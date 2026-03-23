@@ -1,0 +1,36 @@
+{
+  "name": "backend",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "HOST=0.0.0.0 bun --watch src/server.ts",
+    "build": "bunx --bun tsc -p tsconfig.json",
+    "start": "bun dist/apps/backend/src/server.js",
+    "lint": "bunx --bun eslint .",
+    "typecheck": "bunx --bun tsc --noEmit",
+    "sync:openai-rate-limits": "bun scripts/update-openai-rate-limits.ts",
+    "export:invalid-openai-accounts": "bun scripts/export-invalid-openai-accounts.ts",
+    "status:poll": "bun scripts/poll-service-status.ts",
+    "status:poll:once": "bun scripts/poll-service-status.ts --once"
+  },
+  "dependencies": {
+    "@workspace/cloud-mail": "workspace:*",
+    "@workspace/database": "workspace:*",
+    "@workspace/openai-api": "workspace:*",
+    "@workspace/openai-codex-auth": "workspace:*",
+    "@workspace/openai-signup": "workspace:*",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/node": "^25.1.0",
+    "@types/ws": "^8.18.1",
+    "@workspace/eslint-config": "workspace:*",
+    "@workspace/typescript-config": "workspace:*",
+    "typescript": "^5.9.3"
+  }
+}

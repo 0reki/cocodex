@@ -1,0 +1,13 @@
+[Unit]
+Description=Run CoCodex OpenAI rate limit sync every 5 minutes
+PartOf=cocodex.target
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Persistent=true
+Unit=cocodex-sync-openai-rate-limits.service
+
+[Install]
+WantedBy=timers.target

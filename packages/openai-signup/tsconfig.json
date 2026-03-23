@@ -1,0 +1,23 @@
+{
+  "extends": "@workspace/typescript-config/base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@workspace/openai-signup": ["./src/index.ts"],
+      "@workspace/openai-signup/*": ["./src/*"],
+      "@workspace/openai-codex-auth": ["../openai-codex-auth/src/index.ts"],
+      "@workspace/openai-codex-auth/*": ["../openai-codex-auth/src/*"]
+    },
+    "types": ["node"],
+    "noEmit": true,
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
+}

@@ -1,0 +1,35 @@
+{
+  "name": "@workspace/openai-signup",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "bunx --bun eslint .",
+    "typecheck": "bunx --bun tsc --noEmit"
+  },
+  "dependencies": {
+    "@workspace/openai-api": "workspace:*",
+    "@workspace/openai-codex-auth": "workspace:*",
+    "crypto-js": "^4.2.0",
+    "happy-dom": "^20.6.1",
+    "tough-cookie": "^6.0.0",
+    "undici": "^7.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.1.0",
+    "@types/tough-cookie": "^4.0.5",
+    "@workspace/eslint-config": "workspace:*",
+    "@workspace/typescript-config": "workspace:*",
+    "typescript": "^5.9.3"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./cli": "./src/cli.ts",
+    "./env": "./src/env.ts",
+    "./flow": "./src/flow.ts",
+    "./internal/*": "./src/internal/*.ts",
+    "./sdk": "./src/sdk.ts",
+    "./runtime": "./src/runtime.ts",
+    "./types": "./src/types.ts"
+  }
+}

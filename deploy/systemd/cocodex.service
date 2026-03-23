@@ -1,0 +1,27 @@
+[Unit]
+Description=CoCodex Application (turbo start)
+After=network-online.target
+Wants=network-online.target
+PartOf=cocodex.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=HOME=%h
+Environment=PATH=%h/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory=%h/cocodex
+Environment=NODE_ENV=production
+EnvironmentFile=-%h/cocodex/.env
+ExecStart=%h/.bun/bin/bun start
+ExecStop=/bin/kill -s SIGINT $MAINPID
+Restart=always
+RestartSec=2
+TimeoutStopSec=30
+KillSignal=SIGINT
+KillMode=control-group
+SendSIGKILL=yes
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,39 @@
+{
+  "name": "web",
+  "version": "0.0.1",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bunx --bun next dev --hostname 0.0.0.0 --turbopack --port 53332",
+    "build": "bunx --bun next build",
+    "start": "bunx --bun next start --hostname localhost --port 53332",
+    "lint": "bunx --bun eslint .",
+    "lint:fix": "bunx --bun eslint . --fix",
+    "typecheck": "bunx --bun tsc --noEmit",
+    "i18n:translate": "bun run scripts/translate-locales.ts"
+  },
+  "dependencies": {
+    "@workspace/database": "workspace:*",
+    "@workspace/cloud-mail": "workspace:*",
+    "@workspace/openai-api": "workspace:*",
+    "@workspace/openai-codex-auth": "workspace:*",
+    "@workspace/ui": "workspace:*",
+    "date-fns": "^4.1.0",
+    "lucide-react": "^0.563.0",
+    "next": "16.1.6",
+    "next-themes": "^0.4.6",
+    "react": "^19.2.4",
+    "react-day-picker": "^9.13.2",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.18",
+    "@types/node": "^25.1.0",
+    "@types/react": "^19.2.10",
+    "@types/react-dom": "^19.2.3",
+    "@workspace/eslint-config": "workspace:^",
+    "@workspace/typescript-config": "workspace:*",
+    "eslint": "^9.39.2",
+    "typescript": "^5.9.3"
+  }
+}

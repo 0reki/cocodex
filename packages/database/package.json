@@ -1,0 +1,31 @@
+{
+  "name": "@workspace/database",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "bunx --bun eslint .",
+    "typecheck": "bunx --bun tsc --noEmit"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.1.0",
+    "@types/pg": "^8.15.5",
+    "@workspace/eslint-config": "workspace:*",
+    "@workspace/typescript-config": "workspace:*",
+    "typescript": "^5.9.3"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./accounts": "./src/accounts/index.ts",
+    "./billing": "./src/billing/index.ts",
+    "./core": "./src/core/index.ts",
+    "./logs": "./src/logs/index.ts",
+    "./portal": "./src/portal/index.ts",
+    "./schema": "./src/schema/index.ts",
+    "./system": "./src/system/index.ts",
+    "./types": "./src/types/index.ts"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules
+.turbo
+.next
+dist
+build
+coverage
+bun.lock
+*.log
+.dockerignore
+.env.docker.example
+Dockerfile
+docker/start.sh

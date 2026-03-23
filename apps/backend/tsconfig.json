@@ -1,0 +1,42 @@
+{
+  "extends": "@workspace/typescript-config/base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "@workspace/database": ["../../packages/database/src/index.ts"],
+      "@workspace/database/*": ["../../packages/database/src/*"],
+      "@workspace/openai-api": ["../../packages/openai-api/src/index.ts"],
+      "@workspace/openai-api/*": ["../../packages/openai-api/src/*"],
+      "@workspace/openai-signup": ["../../packages/openai-signup/src/index.ts"],
+      "@workspace/openai-signup/env": [
+        "../../packages/openai-signup/src/env.ts"
+      ],
+      "@workspace/openai-signup/sdk": [
+        "../../packages/openai-signup/src/sdk.ts"
+      ],
+      "@workspace/openai-signup/internal/*": [
+        "../../packages/openai-signup/src/internal/*.ts"
+      ],
+      "@workspace/openai-signup/*": ["../../packages/openai-signup/src/*"],
+      "@workspace/openai-codex-auth": [
+        "../../packages/openai-codex-auth/src/index.ts"
+      ],
+      "@workspace/openai-codex-auth/*": [
+        "../../packages/openai-codex-auth/src/*"
+      ],
+      "@workspace/cloud-mail": ["../../packages/cloud-mail/src/index.ts"],
+      "@workspace/cloud-mail/*": ["../../packages/cloud-mail/src/*"],
+      "@workspace/inbox-translation": [
+        "../../packages/inbox-translation/src/index.ts"
+      ],
+      "@workspace/inbox-translation/*": [
+        "../../packages/inbox-translation/src/*"
+      ]
+    },
+    "outDir": "dist",
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,9 @@
+[Unit]
+Description=CoCodex Application Stack
+Requires=cocodex.service
+Wants=cocodex-status-poll.timer
+Wants=cocodex-sync-openai-rate-limits.timer
+After=cocodex.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Run CoCodex status poll every 5 minutes
+PartOf=cocodex.target
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Persistent=true
+Unit=cocodex-status-poll.service
+
+[Install]
+WantedBy=timers.target

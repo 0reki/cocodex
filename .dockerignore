@@ -1,0 +1,15 @@
+.git
+.github
+.turbo
+node_modules
+**/node_modules
+dist
+build
+.next
+**/.next
+coverage
+**/.turbo
+.env
+.env.*
+*.log
+**/.DS_Store

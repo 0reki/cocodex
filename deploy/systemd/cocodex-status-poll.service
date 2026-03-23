@@ -1,0 +1,17 @@
+[Unit]
+Description=CoCodex status poll job
+After=network-online.target
+Wants=network-online.target
+PartOf=cocodex.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+Environment=HOME=%h
+Environment=PATH=%h/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WorkingDirectory=%h/cocodex
+Environment=NODE_ENV=production
+EnvironmentFile=-%h/cocodex/.env
+ExecStart=%h/.bun/bin/bun --cwd %h/cocodex/apps/backend run status:poll:once
+

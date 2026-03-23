@@ -1,0 +1,28 @@
+{
+  "name": "@workspace/openai-codex-auth",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "bunx --bun tsc --noEmit",
+    "debug:login-chain": "bun scripts/test-login-chain.ts",
+    "debug:oauth-raw": "bun scripts/test-oauth-raw.js"
+  },
+  "dependencies": {
+    "tough-cookie": "^6.0.0",
+    "undici": "^7.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.1.0",
+    "@types/tough-cookie": "^4.0.5",
+    "typescript": "^5.9.3"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client.ts",
+    "./internal/*": "./src/internal/*.ts",
+    "./persistence": "./src/persistence.ts",
+    "./pkce": "./src/pkce.ts",
+    "./types": "./src/types.ts"
+  }
+}
