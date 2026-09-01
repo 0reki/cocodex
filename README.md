@@ -1,177 +1,112 @@
-<div align="center">
-  <h1>CoCodex</h1>
-  <p>Get the most out of Codex in the way that fits you best.</p>
-</div>
+# CoCodex Backend
 
-## Overview
+CoCodex Backend 是一个独立的 Express 服务，用于管理 OpenAI 账号并提供 OpenAI 兼容接口。可以保存多个账号，但所有代理请求只使用当前活动账号，不进行轮转或自动故障转移。
 
-CoCodex is a self-hosted control panel and service layer for Codex-oriented workflows.
+仓库不包含前端、Cloud Mail、Team 账号、第三方 OAuth、Addon、Inbox、翻译、Signup、上游代理池或音频转写功能。
 
-It is designed for people who want a practical way to operate Codex at scale, with one place to manage accounts, access, and operational workflows.
+## 模块
 
-CoCodex gives you a web admin interface and backend APIs to manage:
+- `src/server`：Express 路由、鉴权、计费校验、账号选择和请求编排
+- `src/database`：PostgreSQL 数据访问和初始化 Schema
+- `src/openai-api`：OpenAI/Codex 上游协议与流式传输
+- `sql`：全新部署使用的数据库 Schema
 
-- OpenAI accounts and team workspaces
-- API keys and system settings
-- signup / relogin flows
-- inbox and operational tooling around your Codex setup
+## 本地运行
 
-## Quick Start
-
-### Local development
-
-1. Install dependencies:
+安装依赖：
 
 ```bash
-bun install
+pnpm install
 ```
 
-2. Create your local env file:
+创建环境变量文件：
 
 ```bash
 cp .env.example .env
 ```
 
-Then update `.env` with real values for your environment. At minimum, local development needs a working `DATABASE_URL`. For full functionality, also configure the required OpenAI, Cloud Mail, OAuth, and other provider credentials.
+至少需要配置：
 
-3. Start PostgreSQL.
-
-4. Start the development environment:
-
-```bash
-bun run dev
+```dotenv
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/cocodex
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=replace-with-a-strong-password
+ADMIN_JWT_SECRET=replace-with-a-random-secret
 ```
 
-Default local endpoints:
-
-- Web: `http://localhost:53332`
-- Backend: `http://localhost:53141`
-
-### Docker quick start
-
-If you just want the stack running quickly, use Docker.
-
-1. Copy the Docker environment file:
+启动开发服务：
 
 ```bash
-cp .env.docker.example .env.docker
+pnpm dev
 ```
 
-2. Update `.env.docker` if needed.
+默认监听 `http://localhost:53141`，健康检查地址为 `GET /health`。
 
-The default values are enough to boot the app and database locally. For real feature usage, you still need to provide the external service credentials your setup depends on.
+## OpenAI 兼容接口
 
-3. Start the stack:
+- `GET /v1/models`
+- `POST /v1/responses`
+- `POST /v1/responses/compact`
+- `WS /v1/responses`
 
-```bash
-bun run docker:up
-```
+服务保留 Responses 协议适配，包括 Codex 请求体规范化、Compact 请求处理，以及
+非流式 Responses 的结果组装。客户端端到端请求头和 WebSocket 查询参数会继续
+转发，服务只替换上游 `Authorization` 并设置活动账号对应的
+`chatgpt-account-id`。计费和请求日志旁路观察上游响应。
 
-4. Stop the stack:
+## 管理接口
 
-```bash
-bun run docker:down
-```
+首次登录会根据 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 创建管理员。认证接口包括：
 
-Default ports:
+- `POST /api/auth/login`
+- `POST /api/auth/refresh`
+- `GET /api/auth/session`
 
-- Web: `http://localhost:53332`
-- Backend: `http://localhost:53141`
-- PostgreSQL: `localhost:5432`
+其余管理接口位于 `/api` 下，使用登录接口返回的 Access Token 作为 Bearer Token。
 
-## Deployment
+当前包含：
 
-### systemd
+- OpenAI 账号管理
+- API Key 管理
+- 账号连通性测试
 
-The systemd units are under [`deploy/systemd`](./deploy/systemd).
+第一个账号默认成为活动账号，后续新增账号默认是 `inactive`；更新已有账号时
+保持原状态。`POST /api/openai-accounts/:email/activate` 可以切换活动账号，
+原活动账号会自动转为 `inactive`。任一时刻最多只有一个 `active` 账号。
 
-They assume:
+服务不维护账号额度快照或冷却状态，也不会在限流或上游失败时切换账号；相关响应由当前活动账号的上游请求直接返回。
 
-- Bun is installed under the runtime user's home directory
-- the repository is located at `~/cocodex`
-- the runtime env file is `~/cocodex/.env`
+上游 User-Agent 和客户端版本通过 `OPENAI_API_USER_AGENT`、
+`CODEX_CLIENT_VERSION` 环境变量配置。计费价格通过
+`OPENAI_MODEL_PRICING_JSON` 提供。`GET /v1/models` 实时读取 Codex 上游的
+`/backend-api/codex/models`，不依赖本地模型配置，也不维护模型刷新任务。
+服务不限制用户 RPM 或并发数，也不执行可配置的上游请求重试。
 
-The main service uses `%h`, so paths follow the configured `User=` automatically. In practice, you usually only need to check:
-
-- `User=`
-- `Group=`
-- `WorkingDirectory` if your checkout directory is not `~/cocodex`
-
-Install and enable:
-
-```bash
-sudo cp deploy/systemd/*.service /etc/systemd/system/
-sudo cp deploy/systemd/*.timer /etc/systemd/system/
-sudo cp deploy/systemd/*.target /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now cocodex.target
-sudo systemctl enable --now cocodex-status-poll.timer
-sudo systemctl enable --now cocodex-sync-openai-rate-limits.timer
-```
-
-Useful commands:
-
-```bash
-sudo systemctl status cocodex.service
-sudo journalctl -u cocodex.service -f
-sudo systemctl list-timers 'cocodex-*'
-```
-
-The deployment also includes two scheduled jobs running every 5 minutes:
-
-- `status:poll`
-- `sync:openai-rate-limits`
-
-### Docker
-
-The Docker setup is meant to be the fast path for getting the stack online locally or on a small server.
-
-Files involved:
-
-- [`docker-compose.yml`](./docker-compose.yml)
-- [`Dockerfile`](./Dockerfile)
-- [`.env.docker.example`](./.env.docker.example)
-
-The compose stack starts:
-
-- PostgreSQL
-- backend
-- web
-
-To use it:
+## Docker
 
 ```bash
 cp .env.docker.example .env.docker
+pnpm docker:up
 ```
 
-Then edit `.env.docker` for your environment. In most cases you only need to care about:
+Compose 只启动 PostgreSQL 和 Express 后端：
 
-- `DATABASE_URL`
-- `APP_BASE_URL`
-- `NEXT_PUBLIC_APP_BASE_URL`
-- `PORTAL_PUBLIC_ORIGIN`
-- `API_BASE_URL`
-- `NEXT_PUBLIC_API_BASE_URL`
-- any OpenAI / Cloud Mail / OAuth credentials you actually use
+- Backend：`http://localhost:53141`
+- PostgreSQL：`localhost:5432`
 
-Start:
+停止：
 
 ```bash
-bun run docker:up
+pnpm docker:down
 ```
 
-Stop:
+## 常用命令
 
 ```bash
-bun run docker:down
+pnpm typecheck
+pnpm build
 ```
-
-The backend initializes the database schema automatically on startup, so you do not need a separate migration step just to boot the project.
 
 ## License
 
 MIT License
-
-## Acknowledgements
-
-This project has been published in the [LINUX DO](https://linux.do/) community. Thanks to the community for the support and feedback.

@@ -16,7 +16,7 @@ services:
       timeout: 5s
       retries: 20
 
-  app:
+  backend:
     build:
       context: .
       dockerfile: Dockerfile
@@ -28,7 +28,6 @@ services:
         condition: service_healthy
     ports:
       - "53141:53141"
-      - "53332:53332"
 
 volumes:
   cocodex-postgres-data:

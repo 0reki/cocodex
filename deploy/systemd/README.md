@@ -1,23 +1,22 @@
 # CoCodex systemd units
 
-This folder contains production daemon units for the app stack:
+This folder contains production daemon units for the Express backend:
 
-- `cocodex.service` (runs root `bun start`)
+- `cocodex.service` (runs root `pnpm start`)
 - `cocodex.target`
-- `cocodex-status-poll.service`
-- `cocodex-status-poll.timer`
-- `cocodex-sync-openai-rate-limits.service`
-- `cocodex-sync-openai-rate-limits.timer`
 
 ## Install
+
+Install dependencies and compile the backend first:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm build
+```
 
 ```bash
 sudo cp deploy/systemd/cocodex.service /etc/systemd/system/
 sudo cp deploy/systemd/cocodex.target /etc/systemd/system/
-sudo cp deploy/systemd/cocodex-status-poll.service /etc/systemd/system/
-sudo cp deploy/systemd/cocodex-status-poll.timer /etc/systemd/system/
-sudo cp deploy/systemd/cocodex-sync-openai-rate-limits.service /etc/systemd/system/
-sudo cp deploy/systemd/cocodex-sync-openai-rate-limits.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
@@ -25,8 +24,6 @@ sudo systemctl daemon-reload
 
 ```bash
 sudo systemctl enable --now cocodex.target
-sudo systemctl enable --now cocodex-status-poll.timer
-sudo systemctl enable --now cocodex-sync-openai-rate-limits.timer
 ```
 
 ## Status and logs
@@ -34,9 +31,6 @@ sudo systemctl enable --now cocodex-sync-openai-rate-limits.timer
 ```bash
 sudo systemctl status cocodex.service
 sudo journalctl -u cocodex.service -f
-sudo systemctl list-timers 'cocodex-*'
-sudo journalctl -u cocodex-status-poll.service -f
-sudo journalctl -u cocodex-sync-openai-rate-limits.service -f
 ```
 
 ## Stop
@@ -56,14 +50,11 @@ sudo systemctl restart cocodex.service
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl restart cocodex.target
-sudo systemctl restart cocodex-status-poll.timer
-sudo systemctl restart cocodex-sync-openai-rate-limits.timer
 ```
 
 ## Notes
 
 - Paths in `cocodex.service` use systemd `%h`, so they follow the configured `User=` home directory automatically.
 - Default repo path is `%h/cocodex`. If your checkout directory name is different, edit `WorkingDirectory` and `EnvironmentFile`.
-- Bun is loaded from `%h/.bun/bin/bun`.
+- Node.js and pnpm must be available in the service user's `PATH`.
 - `.env` is loaded from `%h/cocodex/.env`.
-- `status:poll` and `sync:openai-rate-limits` are configured as systemd timers, each running every 5 minutes.

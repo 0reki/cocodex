@@ -1,8 +1,6 @@
 [Unit]
-Description=CoCodex Application Stack
+Description=CoCodex Backend
 Requires=cocodex.service
-Wants=cocodex-status-poll.timer
-Wants=cocodex-sync-openai-rate-limits.timer
 After=cocodex.service
 
 [Install]

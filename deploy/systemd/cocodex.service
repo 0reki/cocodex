@@ -1,5 +1,5 @@
 [Unit]
-Description=CoCodex Application (turbo start)
+Description=CoCodex Express Backend
 After=network-online.target
 Wants=network-online.target
 PartOf=cocodex.target
@@ -9,11 +9,12 @@ Type=simple
 User=ubuntu
 Group=ubuntu
 Environment=HOME=%h
-Environment=PATH=%h/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PNPM_HOME=%h/.local/share/pnpm
+Environment=PATH=%h/.local/share/pnpm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=%h/cocodex
 Environment=NODE_ENV=production
 EnvironmentFile=-%h/cocodex/.env
-ExecStart=%h/.bun/bin/bun start
+ExecStart=/usr/bin/env pnpm start
 ExecStop=/bin/kill -s SIGINT $MAINPID
 Restart=always
 RestartSec=2

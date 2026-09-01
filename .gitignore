@@ -2,8 +2,7 @@
 
 # Dependencies
 node_modules
-.pnp
-.pnp.js
+.pnpm-store
 
 # Local env files
 .env
@@ -15,23 +14,13 @@ node_modules
 # Testing
 coverage
 
-# Turbo
-.turbo
-
-# Vercel
-.vercel
-
 # Build Outputs
-.next/
-out/
 build
 dist
 
 # Debug
-npm-debug.log*
+pnpm-debug.log*
 
 # Misc
 .DS_Store
 *.pem
-
-**/next-env.d.ts

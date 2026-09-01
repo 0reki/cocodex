@@ -1,9 +1,9 @@
-import { config as baseConfig } from "@workspace/eslint-config/base";
+import tseslint from "typescript-eslint";
 
 /** @type {import("eslint").Linter.Config[]} */
 export default [
-  ...baseConfig,
   {
-    ignores: ["**/.next/**", "**/dist/**", "**/node_modules/**"],
+    ignores: ["dist/**", "node_modules/**"],
   },
+  ...tseslint.configs.recommended,
 ];
