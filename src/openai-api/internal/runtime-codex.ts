@@ -5,15 +5,6 @@ import {
   DEFAULT_USER_AGENT,
 } from "./runtime-constants.ts";
 
-export function normalizeCodexVersion(version: string): string {
-  const trimmed = version.trim();
-  if (!trimmed) return trimmed;
-  if (/-((alpha|beta|rc)([.-]|$))/i.test(trimmed)) {
-    return trimmed;
-  }
-  return `${trimmed}-alpha.10`;
-}
-
 export function buildCodexTurnMetadataHeader(
   sandbox = DEFAULT_CODEX_SANDBOX,
 ): string {
@@ -46,8 +37,8 @@ export function buildCodexTransportHeaders(args: {
   if (!isProxyRequest && !forwarded.has("session-id")) {
     forwarded.set("session-id", args.sessionId);
   }
-  if (!isProxyRequest && !forwarded.has("version")) {
-    forwarded.set("version", normalizeCodexVersion(args.version));
+  if (!forwarded.has("version")) {
+    forwarded.set("version", args.version.trim());
   }
   if (!isProxyRequest && !forwarded.has("x-codex-turn-metadata")) {
     forwarded.set("x-codex-turn-metadata", buildCodexTurnMetadataHeader());

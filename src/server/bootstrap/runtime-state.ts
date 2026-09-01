@@ -6,7 +6,7 @@ import type {
 
 export function createServerRuntimeState() {
   const DEFAULT_OPENAI_API_USER_AGENT = "node/22.14.0";
-  const DEFAULT_OPENAI_API_CLIENT_VERSION = "0.98.0";
+  const DEFAULT_OPENAI_API_CLIENT_VERSION = "0.152.0";
   const API_KEY_AUTH_LRU_MAX = Number(process.env.API_KEY_AUTH_LRU_MAX ?? 5000);
   const API_KEY_AUTH_LRU_TTL_MS = Number(
     process.env.API_KEY_AUTH_LRU_TTL_MS ?? 30_000,
