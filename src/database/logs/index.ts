@@ -10,6 +10,7 @@ export {
   getModelHourlyTokenSeries,
   getPortalUserModelHourlyStatsSeries,
   getPortalUserUsageStats,
+  getRequestRateStats,
   listApiKeyModelUsage,
 } from "../internal/analytics.ts"
 export {

@@ -1,4 +1,9 @@
-export { generateApiKeyValue, loadBackendEnv } from "./runtime/env-utils.ts";
+export {
+  generateApiKeyValue,
+  getSetupConfigPath,
+  loadBackendEnv,
+  persistSetupConfig,
+} from "./runtime/env-utils.ts";
 export {
   PRIORITY_SERVICE_TIER,
   applyServiceTierBillingMultiplier,

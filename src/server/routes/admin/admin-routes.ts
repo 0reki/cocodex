@@ -17,6 +17,10 @@ import type {
 } from "../../../database/index.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
 import type { generateApiKeyValue } from "../../utils/index.ts";
+import type {
+  pollCodexDeviceAuth,
+  requestCodexDeviceCode,
+} from "../../../openai-api/index.ts";
 import { formatUsdAmount, parseUsdAmount } from "../../../shared/usd.ts";
 
 type AdminRouteDependencies = Pick<
@@ -40,6 +44,8 @@ type AdminRouteDependencies = Pick<
   disableOpenAIAccountsByEmails: typeof disableOpenAIAccountsByEmails;
   normalizeOpenAIAccountStatus: typeof normalizeOpenAIAccountStatus;
   upsertOpenAIAccount: typeof upsertOpenAIAccount;
+  requestCodexDeviceCode: typeof requestCodexDeviceCode;
+  pollCodexDeviceAuth: typeof pollCodexDeviceAuth;
 };
 
 function publicOpenAIAccount(account: OpenAIAccountRecord) {
@@ -84,6 +90,8 @@ export function registerAdminRoutes(
     disableOpenAIAccountsByEmails,
     normalizeOpenAIAccountStatus,
     upsertOpenAIAccount,
+    requestCodexDeviceCode,
+    pollCodexDeviceAuth,
   } = deps;
 
   app.get("/api/openai-accounts", async (req: Request, res: Response) => {
@@ -480,5 +488,68 @@ export function registerAdminRoutes(
       });
     }
   });
+
+  app.post(
+    "/api/openai-accounts/device-auth/start",
+    async (_req: Request, res: Response) => {
+      try {
+        const deviceCode = await requestCodexDeviceCode();
+        res.status(201).json({
+          ...deviceCode,
+          expiresAt: new Date(
+            Date.now() + deviceCode.expiresInSeconds * 1000,
+          ).toISOString(),
+        });
+      } catch (error) {
+        res.status(502).json({
+          error: "Failed to start OpenAI device authentication",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+  );
+
+  app.post(
+    "/api/openai-accounts/device-auth/poll",
+    async (req: Request, res: Response) => {
+      try {
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const deviceAuthId =
+          typeof body.deviceAuthId === "string" ? body.deviceAuthId.trim() : "";
+        const userCode =
+          typeof body.userCode === "string" ? body.userCode.trim() : "";
+        if (!deviceAuthId || !userCode) {
+          res.status(400).json({
+            error: "deviceAuthId and userCode are required",
+          });
+          return;
+        }
+
+        const result = await pollCodexDeviceAuth({ deviceAuthId, userCode });
+        if (result.status === "pending") {
+          res.json(result);
+          return;
+        }
+
+        const account = await upsertOpenAIAccount({
+          email: result.email,
+          accountId: result.accountId,
+          idToken: result.idToken,
+          accessToken: result.accessToken,
+          refreshToken: result.refreshToken,
+        });
+        invalidateActiveSourceAccount();
+        res.status(201).json({
+          status: "complete",
+          account: publicOpenAIAccount(account),
+        });
+      } catch (error) {
+        res.status(502).json({
+          error: "Failed to complete OpenAI device authentication",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+  );
 
 }

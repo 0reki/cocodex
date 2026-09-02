@@ -25,22 +25,28 @@ pnpm install
 cp .env.example .env
 ```
 
-至少需要配置：
-
-```dotenv
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/cocodex
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=replace-with-a-strong-password
-ADMIN_JWT_SECRET=replace-with-a-random-secret
-```
-
 启动开发服务：
 
 ```bash
 pnpm dev
 ```
 
+首次运行且尚未提供数据库与管理员配置时，后端进入初始化模式。打开前端
+`/setup` 页面，填写 PostgreSQL 地址、管理员用户名和密码即可完成初始化。
+JWT Secret 由后端自动生成；管理员密码只用于生成数据库中的密码哈希，不会写入
+配置文件。生成的配置默认保存到 `./data/config.json`，也可通过以下变量修改位置：
+
+```dotenv
+COCODEX_CONFIG_PATH=/var/lib/cocodex/config.json
+```
+
+环境变量仍然可以覆盖 Setup 生成的配置，已有的纯环境变量部署无需迁移。
 默认监听 `http://localhost:53141`，健康检查地址为 `GET /health`。
+
+初始化接口：
+
+- `GET /api/setup/status`
+- `POST /api/setup/complete`
 
 ## 端到端测试
 
@@ -84,7 +90,8 @@ Refresh Token，避免重复填充测试凭据。
 
 ## 管理接口
 
-首次登录会根据 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 创建管理员。认证接口包括：
+Setup 完成后可使用页面中创建的管理员登录。旧式纯环境变量部署仍会在首次登录时
+根据 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 创建管理员。认证接口包括：
 
 - `POST /api/auth/login`
 - `POST /api/auth/refresh`
@@ -125,8 +132,15 @@ Refresh Token，避免重复填充测试凭据。
 第一个账号默认成为活动账号，后续新增账号默认是 `inactive`；更新已有账号时
 保持原状态。`POST /api/openai-accounts/:email/activate` 可以切换活动账号，
 原活动账号会自动转为 `inactive`。任一时刻最多只有一个 `active` 账号。
-账号写入接口要求同时提供 `email`、`accountId`、`idToken`、`accessToken` 和
-`refreshToken`。账号列表、详情及写入响应均不返回任何 Token。
+控制台默认通过 Codex 设备码登录添加账号：
+
+- `POST /api/openai-accounts/device-auth/start`：申请一次性设备码
+- `POST /api/openai-accounts/device-auth/poll`：查询授权结果并在成功后自动写入账号
+
+OAuth Token 仅由后端向 OpenAI 交换，不会返回浏览器。设备码登录需要先在个人
+ChatGPT 安全设置或工作区权限中启用。原 `POST /api/openai-accounts` 手工写入接口
+仅作为兼容方式保留，要求同时提供 `email`、`accountId`、`idToken`、
+`accessToken` 和 `refreshToken`。账号列表、详情及写入响应均不返回任何 Token。
 批量移除和批量禁用接口继续保留：
 
 - `POST /api/openai-accounts/bulk-remove`

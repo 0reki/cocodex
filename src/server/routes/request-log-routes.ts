@@ -4,6 +4,7 @@ import {
   InvalidModelResponseLogCursorError,
   type getModelHourlyStatsSeries,
   type getPortalUserModelHourlyStatsSeries,
+  type getRequestRateStats,
   type listModelResponseLogsCursor,
   type listModelResponseLogsCursorByOwnerUserId,
 } from "../../database/index.ts";
@@ -17,6 +18,7 @@ type RequestLogRouteDependencies = Pick<
   listModelResponseLogsCursorByOwnerUserId: typeof listModelResponseLogsCursorByOwnerUserId;
   getModelHourlyStatsSeries: typeof getModelHourlyStatsSeries;
   getPortalUserModelHourlyStatsSeries: typeof getPortalUserModelHourlyStatsSeries;
+  getRequestRateStats: typeof getRequestRateStats;
 };
 
 const REQUEST_STATUSES = new Set([
@@ -145,15 +147,19 @@ export function registerRequestLogRoutes(
     const maxModels = boundedInteger(req.query.maxModels, 6, 12);
 
     try {
-      const result =
+      const [series, rates] = await Promise.all([
         principal.role === "admin"
-          ? await deps.getModelHourlyStatsSeries(lookbackHours, maxModels)
-          : await deps.getPortalUserModelHourlyStatsSeries(
+          ? deps.getModelHourlyStatsSeries(lookbackHours, maxModels)
+          : deps.getPortalUserModelHourlyStatsSeries(
               principal.id,
               lookbackHours,
               maxModels,
-            );
-      res.json(result);
+            ),
+        deps.getRequestRateStats(
+          principal.role === "admin" ? null : principal.id,
+        ),
+      ]);
+      res.json({ ...series, ...rates });
     } catch (error) {
       sendLogQueryError(res, error);
     }

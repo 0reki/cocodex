@@ -28,6 +28,9 @@ services:
         condition: service_healthy
     ports:
       - "53141:53141"
+    volumes:
+      - cocodex-backend-data:/data
 
 volumes:
   cocodex-postgres-data:
+  cocodex-backend-data:

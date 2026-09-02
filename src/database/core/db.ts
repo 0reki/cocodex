@@ -54,6 +54,14 @@ export function getDbPool() {
   return globalThis.__cocodexPgPool;
 }
 
+export async function resetDatabasePool() {
+  const pool = globalThis.__cocodexPgPool;
+  globalThis.__cocodexPgPool = undefined;
+  globalThis.__cocodexSchemaReady = false;
+  globalThis.__cocodexSchemaInitPromise = undefined;
+  if (pool) await pool.end();
+}
+
 export async function query<T extends QueryResultRow = QueryResultRow>(
   text: string,
   values: unknown[] = [],

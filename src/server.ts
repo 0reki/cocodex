@@ -23,6 +23,7 @@ import {
   getApiKeyByToken,
   getModelHourlyStatsSeries,
   getPortalUserModelHourlyStatsSeries,
+  getRequestRateStats,
   getOpenAIAccountByEmail,
   getActiveOpenAIAccount,
   listOpenAIAccountsPage,
@@ -72,6 +73,7 @@ import {
   registerImageRoutes,
   registerRequestLogRoutes,
   registerResponsesRoutes,
+  registerSetupRoutes,
   registerUserRoutes,
   ResponsesWebSocketUpgradeError,
   prepareResponsesWebSocketProxyContext,
@@ -88,6 +90,10 @@ import {
   isRecord,
   parseJsonRecordText,
 } from "./server/openai-response-utils.ts";
+import {
+  pollCodexDeviceAuth,
+  requestCodexDeviceCode,
+} from "./openai-api/index.ts";
 
 loadBackendEnv();
 
@@ -361,6 +367,7 @@ app.use((req, res, next) => {
   next();
 });
 
+registerSetupRoutes(app);
 registerPortalAuthRoutes(app);
 
 app.use(async (req, res, next) => {
@@ -501,6 +508,8 @@ registerAdminRoutes(app, {
   disableOpenAIAccountsByEmails,
   normalizeOpenAIAccountStatus,
   upsertOpenAIAccount,
+  requestCodexDeviceCode,
+  pollCodexDeviceAuth,
 });
 
 registerUserRoutes(app, {
@@ -519,6 +528,7 @@ registerRequestLogRoutes(app, {
   listModelResponseLogsCursorByOwnerUserId,
   getModelHourlyStatsSeries,
   getPortalUserModelHourlyStatsSeries,
+  getRequestRateStats,
 });
 
 registerAccountMaintenanceRoutes(app, {
@@ -723,6 +733,11 @@ httpServer.on("upgrade", (request, socket, head) => {
 });
 
 httpServer.listen(port, host, async () => {
+  if (!process.env.DATABASE_URL?.trim()) {
+    console.log("[setup] initialization required; open the web setup page");
+    console.log(`[backend] listening at http://${host}:${port}`);
+    return;
+  }
   try {
     await ensureDatabaseSchema();
     const selfCheck = await runDatabaseSelfCheck();

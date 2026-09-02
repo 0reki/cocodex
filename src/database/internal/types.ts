@@ -144,6 +144,11 @@ export type PortalUserUsageStats = {
   tpm5m: number
 }
 
+export type RequestRateStats = {
+  rpm5m: number
+  tpm5m: number
+}
+
 export type ApiKeyModelUsage = {
   modelId: string
   requestCount: number

@@ -6,6 +6,7 @@ import type {
   ModelHourlyStatsSeries,
   ModelHourlyTokenSeries,
   PortalUserUsageStats,
+  RequestRateStats,
 } from "./types.ts"
 
 export async function getApiKeyUsageStats(
@@ -172,6 +173,32 @@ export async function getPortalUserUsageStats(
     totalTokens: Number(res.rows[0]?.total_tokens ?? "0"),
     dailyRequestCost: Number(res.rows[0]?.daily_request_cost ?? "0"),
     totalCost: Number(res.rows[0]?.total_cost ?? "0"),
+    rpm5m: Number(res.rows[0]?.rpm_5m ?? "0"),
+    tpm5m: Number(res.rows[0]?.tpm_5m ?? "0"),
+  }
+}
+
+export async function getRequestRateStats(
+  ownerUserId: string | null,
+): Promise<RequestRateStats> {
+  const ownerId = ownerUserId?.trim() || null
+  const res = await query<{
+    rpm_5m: string
+    tpm_5m: string
+  }>(
+    `
+      SELECT
+        ROUND((COUNT(*)::numeric / 5), 2)::text AS rpm_5m,
+        ROUND((COALESCE(SUM(COALESCE(logs.total_tokens, 0)), 0)::numeric / 5), 2)::text AS tpm_5m
+      FROM model_response_logs logs
+      LEFT JOIN api_keys keys ON keys.id = logs.key_id
+      WHERE logs.request_time >= now() - interval '5 minutes'
+        AND ($1::uuid IS NULL OR keys.owner_user_id = $1::uuid)
+    `,
+    [ownerId],
+  )
+
+  return {
     rpm5m: Number(res.rows[0]?.rpm_5m ?? "0"),
     tpm5m: Number(res.rows[0]?.tpm_5m ?? "0"),
   }

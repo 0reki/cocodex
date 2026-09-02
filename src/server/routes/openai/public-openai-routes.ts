@@ -27,6 +27,10 @@ export function registerPublicOpenAIRoutes(
   deps: PublicOpenAIRouteDependencies,
 ) {
   app.get("/health", async (_req: Request, res: Response) => {
+    if (!process.env.DATABASE_URL?.trim()) {
+      res.json({ ok: true, ready: false, setupRequired: true });
+      return;
+    }
     try {
       await deps.ensureDatabaseSchema();
       const settlement = deps.getResponseSettlementQueueHealth();
