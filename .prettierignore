@@ -1,12 +1,6 @@
 node_modules
-.turbo
-.next
 dist
-build
 coverage
-bun.lock
+pnpm-lock.yaml
 *.log
-.dockerignore
-.env.docker.example
-Dockerfile
-docker/start.sh
+.codex-e2e-runner.mjs

@@ -1,177 +1,73 @@
 <div align="center">
-  <h1>CoCodex</h1>
-  <p>Get the most out of Codex in the way that fits you best.</p>
+  <img src="./public/codex-shell-logo.svg" width="64" alt="CoCodex" />
+  <h1>CoCodex Web</h1>
+  <p>轻量、直接的 CoCodex 管理控制台。</p>
 </div>
 
-## Overview
+## 技术栈
 
-CoCodex is a self-hosted control panel and service layer for Codex-oriented workflows.
+这是一个独立前端项目，不包含后端代码或 monorepo 工具：
 
-It is designed for people who want a practical way to operate Codex at scale, with one place to manage accounts, access, and operational workflows.
+- React 19
+- React Router 8（Data Mode，页面级懒加载）
+- Vite 8
+- Tailwind CSS 4
+- 按需引入的 Radix UI primitives
+- Recharts（仅仪表盘懒加载）
+- TypeScript
+- pnpm
 
-CoCodex gives you a web admin interface and backend APIs to manage:
+没有 Next.js、Turbo、monorepo 工具、全局状态管理库、motion 或 Shiki。生产输出是纯静态资源；内置的 Node 静态服务器负责 SPA fallback，并将管理接口与 HTTP OpenAI 接口反向代理到 CoCodex 后端。
 
-- OpenAI accounts and team workspaces
-- API keys and system settings
-- signup / relogin flows
-- inbox and operational tooling around your Codex setup
-
-## Quick Start
-
-### Local development
-
-1. Install dependencies:
+## 本地开发
 
 ```bash
-bun install
-```
-
-2. Create your local env file:
-
-```bash
+pnpm install
 cp .env.example .env
+pnpm dev
 ```
 
-Then update `.env` with real values for your environment. At minimum, local development needs a working `DATABASE_URL`. For full functionality, also configure the required OpenAI, Cloud Mail, OAuth, and other provider credentials.
+默认地址为 `http://localhost:53332`。Vite 会将 `/api` 和 `/v1` 转发到 `http://localhost:53141`。
+后端尚未初始化时，任意页面都会自动进入 `/setup`，用于连接 PostgreSQL 并创建首个管理员。
 
-3. Start PostgreSQL.
+环境变量：
 
-4. Start the development environment:
+- `VITE_API_PROXY_TARGET`：开发服务器的 `/api`、`/v1` 代理目标。
+- `VITE_API_BASE_URL`：浏览器直接请求的 API 基址；同源部署时留空。
+- `API_PROXY_TARGET`：生产静态服务器的 `/api`、`/v1`、`/health` 代理目标。
+- `WEB_HOST` / `WEB_PORT`：生产静态服务器监听地址与端口。
+
+## 验证与构建
 
 ```bash
-bun run dev
+pnpm lint
+pnpm typecheck
+pnpm build
+pnpm start
 ```
 
-Default local endpoints:
+构建产物位于 `dist/`。
 
-- Web: `http://localhost:53332`
-- Backend: `http://localhost:53141`
-
-### Docker quick start
-
-If you just want the stack running quickly, use Docker.
-
-1. Copy the Docker environment file:
+## Docker
 
 ```bash
-cp .env.docker.example .env.docker
+docker build -t cocodex-web .
+docker run --rm -p 53332:53332 \
+  -e API_PROXY_TARGET=http://host.docker.internal:53141 \
+  --add-host=host.docker.internal:host-gateway \
+  cocodex-web
 ```
 
-2. Update `.env.docker` if needed.
+## 当前页面
 
-The default values are enough to boot the app and database locally. For real feature usage, you still need to provide the external service credentials your setup depends on.
-
-3. Start the stack:
-
-```bash
-bun run docker:up
-```
-
-4. Stop the stack:
-
-```bash
-bun run docker:down
-```
-
-Default ports:
-
-- Web: `http://localhost:53332`
-- Backend: `http://localhost:53141`
-- PostgreSQL: `localhost:5432`
-
-## Deployment
-
-### systemd
-
-The systemd units are under [`deploy/systemd`](./deploy/systemd).
-
-They assume:
-
-- Bun is installed under the runtime user's home directory
-- the repository is located at `~/cocodex`
-- the runtime env file is `~/cocodex/.env`
-
-The main service uses `%h`, so paths follow the configured `User=` automatically. In practice, you usually only need to check:
-
-- `User=`
-- `Group=`
-- `WorkingDirectory` if your checkout directory is not `~/cocodex`
-
-Install and enable:
-
-```bash
-sudo cp deploy/systemd/*.service /etc/systemd/system/
-sudo cp deploy/systemd/*.timer /etc/systemd/system/
-sudo cp deploy/systemd/*.target /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now cocodex.target
-sudo systemctl enable --now cocodex-status-poll.timer
-sudo systemctl enable --now cocodex-sync-openai-rate-limits.timer
-```
-
-Useful commands:
-
-```bash
-sudo systemctl status cocodex.service
-sudo journalctl -u cocodex.service -f
-sudo systemctl list-timers 'cocodex-*'
-```
-
-The deployment also includes two scheduled jobs running every 5 minutes:
-
-- `status:poll`
-- `sync:openai-rate-limits`
-
-### Docker
-
-The Docker setup is meant to be the fast path for getting the stack online locally or on a small server.
-
-Files involved:
-
-- [`docker-compose.yml`](./docker-compose.yml)
-- [`Dockerfile`](./Dockerfile)
-- [`.env.docker.example`](./.env.docker.example)
-
-The compose stack starts:
-
-- PostgreSQL
-- backend
-- web
-
-To use it:
-
-```bash
-cp .env.docker.example .env.docker
-```
-
-Then edit `.env.docker` for your environment. In most cases you only need to care about:
-
-- `DATABASE_URL`
-- `APP_BASE_URL`
-- `NEXT_PUBLIC_APP_BASE_URL`
-- `PORTAL_PUBLIC_ORIGIN`
-- `API_BASE_URL`
-- `NEXT_PUBLIC_API_BASE_URL`
-- any OpenAI / Cloud Mail / OAuth credentials you actually use
-
-Start:
-
-```bash
-bun run docker:up
-```
-
-Stop:
-
-```bash
-bun run docker:down
-```
-
-The backend initializes the database schema automatically on startup, so you do not need a separate migration step just to boot the project.
+- 首次启动 Setup
+- 登录与自动刷新会话
+- 请求概览与 Token 趋势
+- OpenAI 上游账号管理
+- API Key 管理
+- 请求日志与游标分页
+- 用户管理
 
 ## License
 
 MIT License
-
-## Acknowledgements
-
-This project has been published in the [LINUX DO](https://linux.do/) community. Thanks to the community for the support and feedback.
