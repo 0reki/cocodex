@@ -1,12 +1,10 @@
 export {
   countPortalUsers,
   createPortalUser,
-  deletePortalUserById,
-  getPortalUserByEmail,
   getPortalUserById,
   getPortalUserByUsername,
   listPortalUsers,
-  listPortalUsersPage,
-  listPortalUsersByIds,
-  updatePortalUserById,
+  setPortalUserEnabledById,
+  updatePortalUsernameById,
+  updatePortalUserPasswordById,
 } from "../internal/portal-users.ts"

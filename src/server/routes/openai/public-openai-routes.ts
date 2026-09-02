@@ -17,6 +17,7 @@ type PublicOpenAIRouteDependencies = ActiveSourceAccountDependencies &
     | "buildOpenAIModelsList"
     | "extractErrorInfo"
     | "buildPassthroughUpstreamError"
+    | "getResponseSettlementQueueHealth"
   > & {
     ensureDatabaseSchema: typeof ensureDatabaseSchema;
   };
@@ -28,7 +29,11 @@ export function registerPublicOpenAIRoutes(
   app.get("/health", async (_req: Request, res: Response) => {
     try {
       await deps.ensureDatabaseSchema();
-      res.json({ ok: true });
+      const settlement = deps.getResponseSettlementQueueHealth();
+      res.status(settlement.acceptingRequests ? 200 : 503).json({
+        ok: settlement.acceptingRequests,
+        settlement,
+      });
     } catch (error) {
       res.status(500).json({
         ok: false,

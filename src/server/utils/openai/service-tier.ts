@@ -2,15 +2,15 @@ export const PRIORITY_SERVICE_TIER = "priority" as const;
 export const PRIORITY_SERVICE_TIER_BILLING_MULTIPLIER = 2;
 
 export function applyServiceTierBillingMultiplier(
-  cost: number | null,
+  cost: bigint | null,
   serviceTier: typeof PRIORITY_SERVICE_TIER | null | undefined,
-): number | null {
-  if (typeof cost !== "number" || !Number.isFinite(cost)) return null;
+): bigint | null {
+  if (cost === null) return null;
   const multiplier =
     serviceTier === PRIORITY_SERVICE_TIER
       ? PRIORITY_SERVICE_TIER_BILLING_MULTIPLIER
       : 1;
-  return Number((cost * multiplier).toFixed(8));
+  return cost * BigInt(multiplier);
 }
 
 export function resolvePriorityServiceTierForBilling(

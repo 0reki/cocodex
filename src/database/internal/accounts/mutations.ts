@@ -91,18 +91,29 @@ export async function activateOpenAIAccountByEmail(email: string) {
   })
 }
 
-export async function updateOpenAIAccountAccessTokenById(
+export async function updateOpenAIAccountTokensById(
   id: string,
-  accessToken: string | null,
+  tokens: {
+    idToken?: string | null
+    accessToken: string
+    refreshToken?: string | null
+  },
 ) {
   const result = await query<{ id: string }>(
     `
       UPDATE openai_accounts
-      SET access_token = $2
+      SET id_token = COALESCE($2, id_token),
+          access_token = $3,
+          refresh_token = COALESCE($4, refresh_token)
       WHERE id = $1
       RETURNING id
     `,
-    [id, accessToken],
+    [
+      id,
+      tokens.idToken?.trim() || null,
+      tokens.accessToken.trim(),
+      tokens.refreshToken?.trim() || null,
+    ],
   )
   return (result.rowCount ?? 0) > 0
 }

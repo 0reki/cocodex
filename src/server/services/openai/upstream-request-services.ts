@@ -5,30 +5,23 @@ type RuntimeConfig = {
   clientVersion: string;
 };
 
-type UpstreamTrace = {
-  sourceAccountId?: string | null;
-  sourceAccountEmail?: string | null;
-  selectedUpstreamAccountId?: string | null;
-};
-
 type UpstreamSourceAccountRecord = {
   id: string;
-  email: string;
-  accessToken: string | null;
-  accountId: string | null;
-  userId: string | null;
-  sessionToken?: string | null;
+  idToken: string;
+  accessToken: string;
+  accountId: string;
+  refreshToken: string;
 };
 
 type OpenAIApiModule = {
-  getAccessToken?: (args: {
-    sessionToken: string;
+  refreshCodexTokens?: (args: {
+    refreshToken: string;
     userAgent?: string;
     signal?: AbortSignal;
   }) => Promise<{
-    accessToken?: string;
-    session?: unknown;
-    sessionTokenCookies?: Record<string, string | undefined>;
+    idToken?: string | null;
+    accessToken?: string | null;
+    refreshToken?: string | null;
   }>;
   getCodexModels?: (args: {
     accessToken: string;
@@ -37,6 +30,22 @@ type OpenAIApiModule = {
     userAgent?: string;
     signal?: AbortSignal;
   }) => Promise<{ models?: Array<Record<string, unknown>> }>;
+  getCodexUsage?: (args: {
+    accessToken: string;
+    accountId?: string;
+    clientVersion: string;
+    userAgent?: string;
+    signal?: AbortSignal;
+  }) => Promise<Record<string, unknown>>;
+  getCodexDailyWorkspaceUsage?: (args: {
+    accessToken: string;
+    accountId?: string;
+    clientVersion: string;
+    userAgent?: string;
+    startDate: string;
+    endDate: string;
+    signal?: AbortSignal;
+  }) => Promise<Record<string, unknown>>;
   postCodexResponses?: (args: {
     accessToken: string;
     accountId?: string;
@@ -47,13 +56,14 @@ type OpenAIApiModule = {
     userAgent?: string;
     signal?: AbortSignal;
   }) => Promise<Response>;
-  postCodexResponsesCompact?: (args: {
+  postCodexImage?: (args: {
     accessToken: string;
     accountId?: string;
     version: string;
     sessionId: string;
+    operation: "generations" | "edits";
     requestHeaders?: HeadersInit;
-    payload?: Record<string, unknown> | null;
+    payload: Record<string, unknown>;
     userAgent?: string;
     signal?: AbortSignal;
   }) => Promise<Response>;
@@ -72,22 +82,30 @@ type OpenAIApiModule = {
 export function createUpstreamRequestServices(deps: {
   randomUUID: () => string;
   resolveOpenAIUpstreamAccountId: (
-    account: Pick<UpstreamSourceAccountRecord, "accountId" | "userId">,
+    account: Pick<UpstreamSourceAccountRecord, "accountId">,
   ) => string | null;
-  updateOpenAIAccountAccessTokenById: (
+  updateOpenAIAccountTokensById: (
     id: string,
-    accessToken: string,
+    tokens: {
+      idToken?: string | null;
+      accessToken: string;
+      refreshToken?: string | null;
+    },
   ) => Promise<unknown>;
-  disableOpenAIAccountByEmail: (email: string) => Promise<unknown>;
-  extractErrorInfo: (error: unknown) => {
-    status: number | null;
-    errorPayload: Record<string, unknown> | null;
-    message: string | null;
-    rawResponseText: string | null;
-  };
   isTokenInvalidatedError: (error: unknown) => boolean;
-  createAbortError: () => Error;
 }) {
+  type RefreshedAccountTokens = {
+    idToken: string | null;
+    accessToken: string;
+    refreshToken: string | null;
+  };
+
+  const refreshTasks = new Map<string, Promise<RefreshedAccountTokens>>();
+  const latestRefreshByAccountId = new Map<
+    string,
+    RefreshedAccountTokens & { replacedAccessToken: string }
+  >();
+
   function requireWsSocket(value: unknown): WsSocket {
     if (!value || typeof value !== "object") {
       throw new Error("Responses WebSocket connector returned no socket");
@@ -95,6 +113,9 @@ export function createUpstreamRequestServices(deps: {
     const socket = value as Record<string, unknown>;
     if (
       typeof socket.readyState !== "number" ||
+      typeof socket.bufferedAmount !== "number" ||
+      typeof socket.pause !== "function" ||
+      typeof socket.resume !== "function" ||
       typeof socket.send !== "function" ||
       typeof socket.close !== "function" ||
       typeof socket.terminate !== "function" ||
@@ -105,162 +126,152 @@ export function createUpstreamRequestServices(deps: {
     return value as WsSocket;
   }
 
-  function decodeJwtPayload(token: string): Record<string, unknown> | null {
-    const parts = token.split(".");
-    if (parts.length < 2) return null;
-    const payloadPart = parts[1];
-    if (!payloadPart) return null;
-    const normalized = payloadPart.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    try {
-      const decoded = Buffer.from(padded, "base64").toString("utf8");
-      const parsed = JSON.parse(decoded) as unknown;
-      return parsed && typeof parsed === "object"
-        ? (parsed as Record<string, unknown>)
-        : null;
-    } catch {
-      return null;
+  function requireWsConnection(value: unknown): {
+    upstreamSocket: WsSocket;
+    responseHeaders: Record<string, string>;
+  } {
+    if (!value || typeof value !== "object") {
+      throw new Error("Responses WebSocket connector returned no connection");
     }
+    const connection = value as Record<string, unknown>;
+    const responseHeaders: Record<string, string> = {};
+    if (
+      connection.responseHeaders &&
+      typeof connection.responseHeaders === "object"
+    ) {
+      for (const [name, headerValue] of Object.entries(
+        connection.responseHeaders,
+      )) {
+        if (typeof headerValue === "string") {
+          responseHeaders[name] = headerValue;
+        }
+      }
+    }
+    return {
+      upstreamSocket: requireWsSocket(connection.socket),
+      responseHeaders,
+    };
   }
 
-  function getAccessTokenExp(token: string): number | null {
-    const payload = decodeJwtPayload(token);
-    if (!payload) return null;
-    const expRaw = payload.exp;
-    if (typeof expRaw === "number" && Number.isFinite(expRaw)) {
-      return Math.trunc(expRaw);
+  function requireActiveAccount(account: UpstreamSourceAccountRecord) {
+    const accessToken = account.accessToken?.trim() ?? "";
+    const accountId = deps.resolveOpenAIUpstreamAccountId(account);
+    if (!accessToken || !accountId) {
+      throw new Error("No active upstream account");
     }
-    if (typeof expRaw === "string") {
-      const parsed = Number(expRaw);
-      if (Number.isFinite(parsed)) return Math.trunc(parsed);
-    }
-    return null;
+    return { accessToken, accountId };
   }
 
-  function getSessionTokenFromCookieMap(
-    cookies: Record<string, string | undefined> | undefined,
-  ): string | null {
-    if (!cookies || typeof cookies !== "object") return null;
-    const direct = cookies["__Secure-next-auth.session-token"];
-    if (typeof direct === "string" && direct.trim()) {
-      return direct.trim();
+  async function refreshAccessToken(params: {
+    module: OpenAIApiModule;
+    account: UpstreamSourceAccountRecord;
+    runtimeConfig: RuntimeConfig;
+    failedAccessToken: string;
+  }) {
+    const { module, account, runtimeConfig, failedAccessToken } = params;
+    if (typeof module.refreshCodexTokens !== "function") {
+      throw new Error("Access token refresh is unavailable");
     }
-    const chunks = Object.entries(cookies)
-      .filter(([name]) => name.startsWith("__Secure-next-auth.session-token."))
-      .map(([name, value]) => {
-        const index = Number(name.split(".").pop() ?? "");
-        return {
-          index: Number.isFinite(index) ? index : Number.MAX_SAFE_INTEGER,
-          value: typeof value === "string" ? value : "",
+
+    const latest = latestRefreshByAccountId.get(account.id);
+    if (latest?.replacedAccessToken === failedAccessToken) {
+      applyRefreshedTokens(account, latest);
+      return latest.accessToken;
+    }
+
+    let task = refreshTasks.get(account.id);
+    if (!task) {
+      task = (async () => {
+        const refreshToken = account.refreshToken?.trim() ?? "";
+        if (!refreshToken) {
+          throw new Error("Missing refresh token for access token refresh");
+        }
+        const refreshed = await module.refreshCodexTokens!({
+          refreshToken,
+          userAgent: runtimeConfig.userAgent,
+          signal: AbortSignal.timeout(15_000),
+        });
+        const accessToken = refreshed.accessToken?.trim() ?? "";
+        if (!accessToken) {
+          throw new Error("Access token refresh returned no access token");
+        }
+        const tokens: RefreshedAccountTokens = {
+          idToken: refreshed.idToken?.trim() || null,
+          accessToken,
+          refreshToken: refreshed.refreshToken?.trim() || null,
         };
-      })
-      .sort((a, b) => a.index - b.index)
-      .map((item) => item.value)
-      .filter((item) => item.length > 0);
-    if (chunks.length === 0) return null;
-    return chunks.join("");
-  }
-
-  async function disableAccountForInvalidAuth(
-    account: UpstreamSourceAccountRecord,
-    reason: string,
-  ) {
-    await markAccountDisabledForInvalidAuth(account, reason);
-    throw new Error(reason);
-  }
-
-  async function markAccountDisabledForInvalidAuth(
-    account: UpstreamSourceAccountRecord,
-    reason: string,
-  ) {
-    try {
-      await deps.disableOpenAIAccountByEmail(account.email);
-    } catch (error) {
-      console.warn(
-        `[auth] failed to disable account ${account.email}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+        await deps.updateOpenAIAccountTokensById(account.id, tokens);
+        latestRefreshByAccountId.set(account.id, {
+          ...tokens,
+          replacedAccessToken: failedAccessToken,
+        });
+        return tokens;
+      })();
+      refreshTasks.set(account.id, task);
     }
-    console.warn(`[auth] disabled account ${account.email}: ${reason}`);
+
+    try {
+      const tokens = await task;
+      applyRefreshedTokens(account, tokens);
+      return tokens.accessToken;
+    } finally {
+      if (refreshTasks.get(account.id) === task) {
+        refreshTasks.delete(account.id);
+      }
+    }
   }
 
-  async function isTokenInvalidatedResponse(response: Response) {
+  function applyRefreshedTokens(
+    account: UpstreamSourceAccountRecord,
+    tokens: RefreshedAccountTokens,
+  ) {
+    if (tokens.idToken) {
+      account.idToken = tokens.idToken;
+    }
+    account.accessToken = tokens.accessToken;
+    if (tokens.refreshToken) {
+      account.refreshToken = tokens.refreshToken;
+    }
+  }
+
+  async function shouldRefreshResponse(response: Response) {
     if (response.status !== 401) return false;
     const body = await response.clone().text();
     return deps.isTokenInvalidatedError(new Error(`HTTP 401: ${body}`));
   }
 
-  async function refreshUpstreamSourceAccountAccessToken(params: {
+  async function callCodexGetWithTokenRefresh<T>(params: {
     module: OpenAIApiModule;
     account: UpstreamSourceAccountRecord;
     runtimeConfig: RuntimeConfig;
-    signal?: AbortSignal;
+    call: (args: {
+      accessToken: string;
+      accountId: string;
+      clientVersion: string;
+      userAgent: string;
+    }) => Promise<T>;
   }) {
-    const { module, account, runtimeConfig, signal } = params;
-    if (typeof module.getAccessToken !== "function") {
-      await disableAccountForInvalidAuth(
+    const { module, account, runtimeConfig, call } = params;
+    const { accessToken, accountId } = requireActiveAccount(account);
+    const callUpstream = (token: string) =>
+      call({
+        accessToken: token,
+        accountId,
+        clientVersion: runtimeConfig.clientVersion,
+        userAgent: runtimeConfig.userAgent,
+      });
+    try {
+      return await callUpstream(accessToken);
+    } catch (error) {
+      if (!deps.isTokenInvalidatedError(error)) throw error;
+      const refreshedToken = await refreshAccessToken({
+        module,
         account,
-        "Account disabled: refresh function unavailable",
-      );
+        runtimeConfig,
+        failedAccessToken: accessToken,
+      });
+      return callUpstream(refreshedToken);
     }
-
-    const currentAccessToken = account.accessToken?.trim() ?? "";
-    const exp = getAccessTokenExp(currentAccessToken);
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (exp === null || exp >= nowSec) {
-      await disableAccountForInvalidAuth(
-        account,
-        "Account disabled: access token exp is not expired for refresh policy.",
-      );
-    }
-
-    const sessionToken = account.sessionToken?.trim() ?? "";
-    if (!sessionToken) {
-      await disableAccountForInvalidAuth(
-        account,
-        "Account disabled: missing session token for refresh",
-      );
-    }
-
-    const refreshed = await module.getAccessToken!({
-      sessionToken,
-      userAgent: runtimeConfig.userAgent,
-      signal,
-    });
-    const refreshedSession =
-      refreshed &&
-      "session" in refreshed &&
-      refreshed.session &&
-      typeof refreshed.session === "object"
-        ? (refreshed.session as Record<string, unknown>)
-        : null;
-    const isEmptySessionResponse =
-      refreshedSession !== null && Object.keys(refreshedSession).length === 0;
-    if (isEmptySessionResponse) {
-      await disableAccountForInvalidAuth(
-        account,
-        "Account disabled: refresh endpoint returned empty JSON object",
-      );
-    }
-    const refreshedAccessToken =
-      typeof refreshed.accessToken === "string"
-        ? refreshed.accessToken.trim()
-        : "";
-    if (!refreshedAccessToken) {
-      await disableAccountForInvalidAuth(
-        account,
-        "Account disabled: refresh did not return a valid access token",
-      );
-    }
-
-    const refreshedSessionToken = getSessionTokenFromCookieMap(
-      refreshed.sessionTokenCookies,
-    );
-    account.accessToken = refreshedAccessToken;
-    if (refreshedSessionToken) {
-      account.sessionToken = refreshedSessionToken;
-    }
-    await deps.updateOpenAIAccountAccessTokenById(account.id, refreshedAccessToken);
-    return refreshedAccessToken;
   }
 
   async function postCodexResponsesWithTokenRefresh(params: {
@@ -269,39 +280,21 @@ export function createUpstreamRequestServices(deps: {
     payload: Record<string, unknown>;
     requestHeaders?: HeadersInit;
     runtimeConfig: RuntimeConfig;
-    trace?: UpstreamTrace;
     signal?: AbortSignal;
   }): Promise<Response> {
-    const {
-      module,
-      account,
-      payload,
-      requestHeaders,
-      runtimeConfig,
-      trace,
-      signal,
-    } = params;
+    const { module, account, payload, requestHeaders, runtimeConfig, signal } =
+      params;
     if (typeof module.postCodexResponses !== "function") {
       throw new Error(
         "postCodexResponses is not exported from the internal OpenAI module",
       );
     }
-
-    const resolvedAccountId = deps.resolveOpenAIUpstreamAccountId(account);
-    if (!resolvedAccountId) {
-      throw new Error("No active upstream account");
-    }
+    const { accessToken, accountId } = requireActiveAccount(account);
     const sessionId = deps.randomUUID();
-    if (trace) {
-      trace.sourceAccountId = account.id;
-      trace.sourceAccountEmail = account.email;
-      trace.selectedUpstreamAccountId = resolvedAccountId;
-    }
-
-    const callUpstream = async (accessToken: string) =>
+    const callUpstream = (token: string) =>
       module.postCodexResponses!({
-        accessToken,
-        accountId: resolvedAccountId,
+        accessToken: token,
+        accountId,
         version: runtimeConfig.clientVersion,
         sessionId,
         requestHeaders,
@@ -310,28 +303,15 @@ export function createUpstreamRequestServices(deps: {
         signal,
       });
 
-    const currentAccessToken = account.accessToken?.trim() ?? "";
-    if (!currentAccessToken) {
-      throw new Error("No active upstream account");
-    }
-
-    const response = await callUpstream(currentAccessToken);
-    if (!(await isTokenInvalidatedResponse(response))) return response;
-
-    const refreshedAccessToken = await refreshUpstreamSourceAccountAccessToken({
+    const response = await callUpstream(accessToken);
+    if (!(await shouldRefreshResponse(response))) return response;
+    const refreshedToken = await refreshAccessToken({
       module,
       account,
       runtimeConfig,
-      signal,
+      failedAccessToken: accessToken,
     });
-    const retryResponse = await callUpstream(refreshedAccessToken);
-    if (await isTokenInvalidatedResponse(retryResponse)) {
-      await markAccountDisabledForInvalidAuth(
-        account,
-        "token still invalidated after refresh",
-      );
-    }
-    return retryResponse;
+    return callUpstream(refreshedToken);
   }
 
   async function getCodexModelsWithTokenRefresh(params: {
@@ -346,48 +326,89 @@ export function createUpstreamRequestServices(deps: {
         "getCodexModels is not exported from the internal OpenAI module",
       );
     }
-
-    const resolvedAccountId = deps.resolveOpenAIUpstreamAccountId(account);
-    if (!resolvedAccountId) throw new Error("No active upstream account");
-
-    const callUpstream = (accessToken: string) =>
+    const { accessToken, accountId } = requireActiveAccount(account);
+    const callUpstream = (token: string) =>
       module.getCodexModels!({
-        accessToken,
-        accountId: resolvedAccountId,
+        accessToken: token,
+        accountId,
         clientVersion: runtimeConfig.clientVersion,
         userAgent: runtimeConfig.userAgent,
         signal,
       });
-    const currentAccessToken = account.accessToken?.trim() ?? "";
-    if (!currentAccessToken) throw new Error("No active upstream account");
 
     try {
-      return await callUpstream(currentAccessToken);
+      return await callUpstream(accessToken);
     } catch (error) {
       if (!deps.isTokenInvalidatedError(error)) throw error;
-      const refreshedAccessToken = await refreshUpstreamSourceAccountAccessToken({
+      const refreshedToken = await refreshAccessToken({
         module,
         account,
         runtimeConfig,
-        signal,
+        failedAccessToken: accessToken,
       });
-      try {
-        return await callUpstream(refreshedAccessToken);
-      } catch (retryError) {
-        if (deps.isTokenInvalidatedError(retryError)) {
-          await disableAccountForInvalidAuth(
-            account,
-            "Account disabled: token still invalidated after refresh",
-          );
-        }
-        throw retryError;
-      }
+      return callUpstream(refreshedToken);
     }
   }
 
-  async function postCodexResponsesCompactWithTokenRefresh(params: {
+  async function getCodexUsageWithTokenRefresh(params: {
     module: OpenAIApiModule;
     account: UpstreamSourceAccountRecord;
+    runtimeConfig: RuntimeConfig;
+    signal?: AbortSignal;
+  }) {
+    const { module, account, runtimeConfig, signal } = params;
+    if (typeof module.getCodexUsage !== "function") {
+      throw new Error(
+        "getCodexUsage is not exported from the internal OpenAI module",
+      );
+    }
+    return callCodexGetWithTokenRefresh({
+      module,
+      account,
+      runtimeConfig,
+      call: (args) => module.getCodexUsage!({ ...args, signal }),
+    });
+  }
+
+  async function getCodexDailyWorkspaceUsageWithTokenRefresh(params: {
+    module: OpenAIApiModule;
+    account: UpstreamSourceAccountRecord;
+    runtimeConfig: RuntimeConfig;
+    startDate: string;
+    endDate: string;
+    signal?: AbortSignal;
+  }) {
+    const {
+      module,
+      account,
+      runtimeConfig,
+      startDate,
+      endDate,
+      signal,
+    } = params;
+    if (typeof module.getCodexDailyWorkspaceUsage !== "function") {
+      throw new Error(
+        "getCodexDailyWorkspaceUsage is not exported from the internal OpenAI module",
+      );
+    }
+    return callCodexGetWithTokenRefresh({
+      module,
+      account,
+      runtimeConfig,
+      call: (args) =>
+        module.getCodexDailyWorkspaceUsage!({
+          ...args,
+          startDate,
+          endDate,
+          signal,
+        }),
+    });
+  }
+
+  async function postCodexImageWithTokenRefresh(params: {
+    module: OpenAIApiModule;
+    account: UpstreamSourceAccountRecord;
+    operation: "generations" | "edits";
     payload: Record<string, unknown>;
     requestHeaders?: HeadersInit;
     runtimeConfig: RuntimeConfig;
@@ -396,57 +417,41 @@ export function createUpstreamRequestServices(deps: {
     const {
       module,
       account,
+      operation,
       payload,
       requestHeaders,
       runtimeConfig,
       signal,
     } = params;
-    if (typeof module.postCodexResponsesCompact !== "function") {
+    if (typeof module.postCodexImage !== "function") {
       throw new Error(
-        "postCodexResponsesCompact is not exported from the internal OpenAI module",
+        "postCodexImage is not exported from the internal OpenAI module",
       );
     }
-
-    const resolvedAccountId = deps.resolveOpenAIUpstreamAccountId(account);
-    if (!resolvedAccountId) {
-      throw new Error("No active upstream account");
-    }
+    const { accessToken, accountId } = requireActiveAccount(account);
     const sessionId = deps.randomUUID();
-
-    const callUpstream = async (accessToken: string) =>
-      module.postCodexResponsesCompact!({
-        accessToken,
-        accountId: resolvedAccountId,
+    const callUpstream = (token: string) =>
+      module.postCodexImage!({
+        accessToken: token,
+        accountId,
         version: runtimeConfig.clientVersion,
         sessionId,
+        operation,
         requestHeaders,
         payload,
         userAgent: runtimeConfig.userAgent,
         signal,
       });
 
-    const currentAccessToken = account.accessToken?.trim() ?? "";
-    if (!currentAccessToken) {
-      throw new Error("No active upstream account");
-    }
-
-    const response = await callUpstream(currentAccessToken);
-    if (!(await isTokenInvalidatedResponse(response))) return response;
-
-    const refreshedAccessToken = await refreshUpstreamSourceAccountAccessToken({
+    const response = await callUpstream(accessToken);
+    if (!(await shouldRefreshResponse(response))) return response;
+    const refreshedToken = await refreshAccessToken({
       module,
       account,
       runtimeConfig,
-      signal,
+      failedAccessToken: accessToken,
     });
-    const retryResponse = await callUpstream(refreshedAccessToken);
-    if (await isTokenInvalidatedResponse(retryResponse)) {
-      await markAccountDisabledForInvalidAuth(
-        account,
-        "token still invalidated after refresh",
-      );
-    }
-    return retryResponse;
+    return callUpstream(refreshedToken);
   }
 
   async function connectCodexResponsesWebSocketWithTokenRefresh(params: {
@@ -464,55 +469,33 @@ export function createUpstreamRequestServices(deps: {
         "connectCodexResponsesWebSocket is not exported from the internal OpenAI module",
       );
     }
-
-    const resolvedAccountId = deps.resolveOpenAIUpstreamAccountId(account);
-    if (!resolvedAccountId) {
-      throw new Error("No active upstream account");
-    }
-    const callUpstream = async (accessToken: string) => {
-      const socket = await module.connectCodexResponsesWebSocket!({
-        accessToken,
-        accountId: resolvedAccountId,
+    const { accessToken, accountId } = requireActiveAccount(account);
+    const sessionId = deps.randomUUID();
+    const callUpstream = async (token: string) => {
+      const connection = await module.connectCodexResponsesWebSocket!({
+        accessToken: token,
+        accountId,
         version: runtimeConfig.clientVersion,
-        sessionId: deps.randomUUID(),
+        sessionId,
         requestHeaders,
         query,
         userAgent: runtimeConfig.userAgent,
         signal,
       });
-      return requireWsSocket(socket);
+      return requireWsConnection(connection);
     };
 
-    const currentAccessToken = account.accessToken?.trim() ?? "";
-    if (!currentAccessToken) {
-      throw new Error("No active upstream account");
-    }
-
     try {
-      return await callUpstream(currentAccessToken);
+      return await callUpstream(accessToken);
     } catch (error) {
-      const errorInfo = deps.extractErrorInfo(error);
-      if (errorInfo.status === 507) {
-        throw error;
-      }
       if (!deps.isTokenInvalidatedError(error)) throw error;
-      const refreshedAccessToken = await refreshUpstreamSourceAccountAccessToken({
+      const refreshedToken = await refreshAccessToken({
         module,
         account,
         runtimeConfig,
-        signal,
+        failedAccessToken: accessToken,
       });
-      try {
-        return await callUpstream(refreshedAccessToken);
-      } catch (retryError) {
-        if (deps.isTokenInvalidatedError(retryError)) {
-          await disableAccountForInvalidAuth(
-            account,
-            "Account disabled: token still invalidated after refresh",
-          );
-        }
-        throw retryError;
-      }
+      return callUpstream(refreshedToken);
     }
   }
 
@@ -524,8 +507,8 @@ export function createUpstreamRequestServices(deps: {
     query?: string;
     signal?: AbortSignal;
   }): Promise<{
-    sourceAccount: UpstreamSourceAccountRecord;
     upstreamSocket: WsSocket;
+    responseHeaders: Record<string, string>;
   }> {
     const {
       openaiApiModule,
@@ -535,18 +518,7 @@ export function createUpstreamRequestServices(deps: {
       query,
       signal,
     } = args;
-    if (signal?.aborted) {
-      throw deps.createAbortError();
-    }
-
-    if (
-      !account.accessToken?.trim() ||
-      !deps.resolveOpenAIUpstreamAccountId(account)
-    ) {
-      throw new Error("No active upstream account");
-    }
-
-    const upstreamSocket = await connectCodexResponsesWebSocketWithTokenRefresh({
+    return connectCodexResponsesWebSocketWithTokenRefresh({
       module: openaiApiModule,
       account,
       runtimeConfig,
@@ -554,13 +526,14 @@ export function createUpstreamRequestServices(deps: {
       query,
       signal,
     });
-    return { sourceAccount: account, upstreamSocket };
   }
 
   return {
+    getCodexDailyWorkspaceUsageWithTokenRefresh,
     getCodexModelsWithTokenRefresh,
+    getCodexUsageWithTokenRefresh,
+    postCodexImageWithTokenRefresh,
     postCodexResponsesWithTokenRefresh,
-    postCodexResponsesCompactWithTokenRefresh,
     connectResponsesWebSocketProxyUpstream,
   };
 }

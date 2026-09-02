@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import type { createModelResponseLog } from "../../../database/index.ts";
 import * as openaiApiModule from "../../../openai-api/index.ts";
 import type {
   isRecord,
@@ -12,6 +11,7 @@ import {
   getReadyActiveSourceAccount,
   type ActiveSourceAccountDependencies,
 } from "../../services/openai/openai-route-services.ts";
+import type { ResponseTerminalStatus } from "../../services/openai/transparent-response-proxy.ts";
 import type {
   WsRawData,
   WsSocket,
@@ -38,6 +38,7 @@ type PrepareResponsesWebSocketDependencies =
       | "isApiKeyQuotaExceeded"
       | "isApiKeyBoundToUser"
       | "ensureUserBillingAllowanceOrNull"
+      | "isUserBillingAllowanceExceeded"
       | "getOpenAIApiRuntimeConfig"
       | "connectResponsesWebSocketProxyUpstream"
       | "extractErrorInfo"
@@ -52,9 +53,11 @@ type ResponsesWebSocketProxyDependencies = Pick<
   | "shouldPersistModelResponseLog"
   | "extractResponseUsage"
   | "estimateUsageCost"
-  | "chargeCompletedResponseUsage"
+  | "resolveUsagePricingModelId"
+  | "enqueueResponseSettlement"
+  | "tryReserveResponseRequest"
+  | "cancelResponseRequestReservation"
 > & {
-  createModelResponseLog: typeof createModelResponseLog;
   applyServiceTierBillingMultiplier: typeof applyServiceTierBillingMultiplier;
   normalizeWsCloseCode: typeof normalizeWsCloseCode;
   normalizeWsCloseReason: typeof normalizeWsCloseReason;
@@ -73,6 +76,7 @@ type ResponsesWebSocketProxyContext = {
   serviceTier: PriorityServiceTier;
   startedAtMs: number;
   upstreamSocket: WsSocket;
+  upstreamResponseHeaders: Record<string, string>;
 };
 
 export class ResponsesWebSocketUpgradeError extends Error {
@@ -150,7 +154,10 @@ export async function prepareResponsesWebSocketProxyContext(
   try {
     if (ownerUserId) {
       const allowance = await deps.ensureUserBillingAllowanceOrNull(ownerUserId);
-      if (!allowance || allowance.totalAvailable <= 0) {
+      if (
+        !allowance ||
+        deps.isUserBillingAllowanceExceeded(ownerUserId)
+      ) {
         throw new ResponsesWebSocketUpgradeError(
           429,
           {
@@ -235,6 +242,7 @@ export async function prepareResponsesWebSocketProxyContext(
       serviceTier: requestedServiceTier,
       startedAtMs,
       upstreamSocket: upstreamConnection.upstreamSocket,
+      upstreamResponseHeaders: upstreamConnection.responseHeaders,
     };
   } catch (error) {
     throw error;
@@ -250,15 +258,22 @@ export function setupResponsesWebSocketProxy(
   },
 ) {
   const { clientSocket, upstreamSocket, context } = args;
-  const completedResponseIds = new Set<string>();
+  const terminalResponseIds = new Set<string>();
   const wsIntentId = crypto.randomUUID();
-  let sawCompletedResponse = false;
+  let sawTerminalResponse = false;
   let lastRequestedModel: string | null = null;
   let activeTurnStartedAtMs: number | null = null;
   let activeTurnFirstEventAtMs: number | null = null;
   let turnSeq = 0;
-  const pendingTurnServiceTiers: PriorityServiceTier[] = [];
+  const pendingTurns: Array<{
+    intentId: string;
+    serviceTier: PriorityServiceTier;
+    pricingModelId: string | null;
+  }> = [];
   const responseServiceTierById = new Map<string, PriorityServiceTier>();
+  const responsePricingModelIdById = new Map<string, string | null>();
+  const responseReservationIdById = new Map<string, string>();
+  const activeReservationIds = new Set<string>();
   let closeSource:
     | "client_closed"
     | "upstream_closed"
@@ -273,64 +288,87 @@ export function setupResponsesWebSocketProxy(
 
   const getCurrentTurnStartedAtMs = () =>
     activeTurnStartedAtMs ?? context.startedAtMs;
+  const getCurrentTurnIntentId = () =>
+    `${wsIntentId}:${Math.max(1, turnSeq)}`;
 
-  const persistWsFailureLog = (failureCode: string, failureMessage: string) => {
-    if (!deps.shouldPersistModelResponseLog("/v1/responses")) return;
-    void (async () => {
-      try {
-        const startedAtMs = getCurrentTurnStartedAtMs();
-        await deps.createModelResponseLog({
-          intentId: wsIntentId,
-          attemptNo: Math.max(1, turnSeq),
-          isFinal: false,
-          retryReason: null,
-          streamEndReason:
-            closeSource ?? "responses_websocket_closed_without_completed",
-          path: "/v1/responses",
-          modelId: lastRequestedModel,
-          keyId: context.apiKeyId,
-          serviceTier: context.serviceTier,
-          statusCode: closeCode ?? 502,
-          ttfbMs:
-            activeTurnFirstEventAtMs === null
-              ? null
-              : Math.max(0, activeTurnFirstEventAtMs - startedAtMs),
-          latencyMs: Math.max(0, Date.now() - startedAtMs),
-          errorCode: failureCode,
-          errorMessage: failureMessage,
-          requestTime: new Date(startedAtMs).toISOString(),
-        });
-      } catch (error) {
-        console.warn(
-          `[responses-ws] failed to write failure log: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    })();
+  const persistWsFailureLog = (
+    failureCode: string,
+    failureMessage: string,
+    reservationId = getCurrentTurnIntentId(),
+  ) => {
+    if (!deps.shouldPersistModelResponseLog("/v1/responses")) {
+      deps.cancelResponseRequestReservation(reservationId);
+      return;
+    }
+    try {
+      const startedAtMs = getCurrentTurnStartedAtMs();
+      deps.enqueueResponseSettlement({
+        settlementId: reservationId,
+        reservationId,
+        intentId: reservationId,
+        ownerUserId: context.ownerUserId,
+        apiKeyId: context.apiKeyId,
+        isFinal: false,
+        streamEndReason:
+          closeSource ?? "responses_websocket_closed_without_completed",
+        path: "/v1/responses",
+        modelId: lastRequestedModel,
+        serviceTier: context.serviceTier,
+        statusCode: closeCode ?? 502,
+        ttfbMs:
+          activeTurnFirstEventAtMs === null
+            ? null
+            : Math.max(0, activeTurnFirstEventAtMs - startedAtMs),
+        latencyMs: Math.max(0, Date.now() - startedAtMs),
+        errorCode: failureCode,
+        errorMessage: failureMessage,
+        requestTime: new Date(startedAtMs).toISOString(),
+      });
+    } catch (error) {
+      deps.cancelResponseRequestReservation(reservationId);
+      console.warn(
+        `[responses-ws] failed to queue failure settlement: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   };
 
-  const persistWsCompletedLog = async (
+  const persistWsTerminalLog = (
     payload: Record<string, unknown>,
     modelId: string | null,
+    pricingModelId: string | null,
     serviceTier: PriorityServiceTier,
+    responseId: string,
+    reservationId: string,
+    terminalStatus: ResponseTerminalStatus,
+    errorCode: string | null,
+    errorMessage: string | null,
   ) => {
-    if (!deps.shouldPersistModelResponseLog("/v1/responses")) return;
+    if (!deps.shouldPersistModelResponseLog("/v1/responses")) {
+      deps.cancelResponseRequestReservation(reservationId);
+      return;
+    }
     const startedAtMs = getCurrentTurnStartedAtMs();
     const { tokensInfo, totalTokens } = deps.extractResponseUsage({
       response: payload,
     });
     const cost = deps.applyServiceTierBillingMultiplier(
-      deps.estimateUsageCost(modelId, tokensInfo),
+      deps.estimateUsageCost(pricingModelId ?? modelId, tokensInfo),
       serviceTier,
     );
-    await deps.createModelResponseLog({
-      intentId: wsIntentId,
-      attemptNo: Math.max(1, turnSeq),
-      isFinal: true,
-      retryReason: null,
-      streamEndReason: "completed",
+    deps.enqueueResponseSettlement({
+      settlementId: responseId || reservationId,
+      reservationId,
+      intentId: reservationId,
+      ownerUserId: context.ownerUserId,
+      apiKeyId: context.apiKeyId,
+      charge:
+        typeof cost === "bigint" && cost > 0n
+          ? cost
+          : 0n,
+      isFinal: terminalStatus === "completed",
+      streamEndReason: terminalStatus,
       path: "/v1/responses",
       modelId,
-      keyId: context.apiKeyId,
       serviceTier,
       statusCode: 200,
       ttfbMs:
@@ -341,8 +379,8 @@ export function setupResponsesWebSocketProxy(
       tokensInfo,
       totalTokens,
       cost,
-      errorCode: null,
-      errorMessage: null,
+      errorCode,
+      errorMessage,
       requestTime: new Date(startedAtMs).toISOString(),
     });
   };
@@ -350,7 +388,16 @@ export function setupResponsesWebSocketProxy(
   const finalize = () => {
     if (finalized) return;
     finalized = true;
-    if (!sawCompletedResponse) {
+    if (activeReservationIds.size > 0) {
+      for (const reservationId of activeReservationIds) {
+        persistWsFailureLog(
+          "responses_websocket_closed_without_completed",
+          closeReason || "Responses websocket closed before completion",
+          reservationId,
+        );
+      }
+      activeReservationIds.clear();
+    } else if (!sawTerminalResponse) {
       persistWsFailureLog(
         "responses_websocket_closed_without_completed",
         closeReason || "Responses websocket closed before completion",
@@ -382,7 +429,37 @@ export function setupResponsesWebSocketProxy(
     }
   };
 
-  const maybeChargeCompletedUsage = async (parsed: Record<string, unknown>) => {
+  const forwardMessage = (
+    source: WsSocket,
+    target: WsSocket,
+    data: WsRawData,
+    isBinary: boolean,
+    onError: (error: Error) => void,
+  ) => {
+    let paused = false;
+    try {
+      target.send(data, { binary: isBinary }, (error?: Error) => {
+        if (paused && source.readyState === deps.WS_READY_STATE_OPEN) {
+          source.resume();
+        }
+        if (error) onError(error);
+      });
+      if (
+        target.bufferedAmount > 0 &&
+        source.readyState === deps.WS_READY_STATE_OPEN
+      ) {
+        paused = true;
+        source.pause();
+      }
+    } catch (error) {
+      if (paused && source.readyState === deps.WS_READY_STATE_OPEN) {
+        source.resume();
+      }
+      onError(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+
+  const maybeSettleTerminalUsage = (parsed: Record<string, unknown>) => {
     if (parsed.type === "response.created" && deps.isRecord(parsed.response)) {
       const response = parsed.response as Record<string, unknown>;
       if (typeof response.model === "string" && response.model.trim()) {
@@ -391,68 +468,147 @@ export function setupResponsesWebSocketProxy(
       const responseId =
         typeof response.id === "string" ? response.id.trim() : "";
       if (responseId) {
+        const pendingTurn = pendingTurns.shift();
         const responseTier =
           deps.resolvePriorityServiceTierForBilling(response.service_tier) ??
-          (pendingTurnServiceTiers.length > 0
-            ? (pendingTurnServiceTiers.shift() ?? null)
-            : context.serviceTier);
+          pendingTurn?.serviceTier ??
+          context.serviceTier;
         responseServiceTierById.set(responseId, responseTier);
+        if (pendingTurn) {
+          responseReservationIdById.set(responseId, pendingTurn.intentId);
+          responsePricingModelIdById.set(
+            responseId,
+            pendingTurn.pricingModelId,
+          );
+        }
       }
     }
 
-    let completedPayload: Record<string, unknown> | null = null;
+    let terminalPayload: Record<string, unknown> | null = null;
+    let terminalStatus: ResponseTerminalStatus | null = null;
     if (parsed.type === "response.completed" && deps.isRecord(parsed.response)) {
-      completedPayload = parsed.response as Record<string, unknown>;
+      terminalPayload = parsed.response as Record<string, unknown>;
+      terminalStatus = "completed";
+    } else if (
+      parsed.type === "response.done" &&
+      deps.isRecord(parsed.response)
+    ) {
+      terminalPayload = parsed.response as Record<string, unknown>;
+      terminalStatus = "completed";
+    } else if (
+      (parsed.type === "response.failed" ||
+        parsed.type === "response.incomplete" ||
+        parsed.type === "response.cancelled") &&
+      deps.isRecord(parsed.response)
+    ) {
+      terminalPayload = parsed.response as Record<string, unknown>;
+      terminalStatus =
+        parsed.type === "response.failed"
+          ? "failed"
+          : parsed.type === "response.incomplete"
+            ? "incomplete"
+            : "cancelled";
     } else if (parsed.object === "response" && parsed.status === "completed") {
-      completedPayload = parsed;
+      terminalPayload = parsed;
+      terminalStatus = "completed";
+    } else if (
+      parsed.object === "response" &&
+      (parsed.status === "failed" ||
+        parsed.status === "incomplete" ||
+        parsed.status === "cancelled")
+    ) {
+      terminalPayload = parsed;
+      terminalStatus = parsed.status;
+    } else if (parsed.type === "error") {
+      terminalPayload = parsed;
+      terminalStatus = "error";
     }
-    if (!completedPayload) return;
+    if (!terminalPayload || !terminalStatus) return;
 
     const responseId =
-      typeof completedPayload.id === "string" ? completedPayload.id.trim() : "";
+      typeof terminalPayload.id === "string"
+        ? terminalPayload.id.trim()
+        : typeof parsed.response_id === "string"
+          ? parsed.response_id.trim()
+          : "";
     if (responseId) {
-      if (completedResponseIds.has(responseId)) return;
-      completedResponseIds.add(responseId);
+      if (terminalResponseIds.has(responseId)) return;
+      terminalResponseIds.add(responseId);
     }
 
     const modelId =
-      typeof completedPayload.model === "string" &&
-      completedPayload.model.trim()
-        ? completedPayload.model.trim()
+      typeof terminalPayload.model === "string" && terminalPayload.model.trim()
+        ? terminalPayload.model.trim()
         : lastRequestedModel;
-    const billedServiceTier =
-      deps.resolvePriorityServiceTierForBilling(completedPayload.service_tier) ??
-      (responseId ? (responseServiceTierById.get(responseId) ?? null) : null) ??
-      (pendingTurnServiceTiers.length > 0
-        ? (pendingTurnServiceTiers.shift() ?? null)
-        : null) ??
-      context.serviceTier;
+    const pendingTurn =
+      responseId && responseReservationIdById.has(responseId)
+        ? null
+        : pendingTurns.shift();
+    let billedServiceTier = deps.resolvePriorityServiceTierForBilling(
+      terminalPayload.service_tier,
+    );
+    if (billedServiceTier === null && responseId) {
+      billedServiceTier = responseServiceTierById.get(responseId) ?? null;
+    }
+    if (billedServiceTier === null) {
+      billedServiceTier = pendingTurn?.serviceTier ?? null;
+    }
+    billedServiceTier ??= context.serviceTier;
+    const pricingModelId =
+      (responseId ? responsePricingModelIdById.get(responseId) : null) ??
+      pendingTurn?.pricingModelId ??
+      modelId;
+    const reservationId =
+      (responseId ? responseReservationIdById.get(responseId) : null) ??
+      pendingTurn?.intentId ??
+      getCurrentTurnIntentId();
     if (responseId) {
       responseServiceTierById.delete(responseId);
+      responsePricingModelIdById.delete(responseId);
+      responseReservationIdById.delete(responseId);
     }
-    sawCompletedResponse = true;
+    activeReservationIds.delete(reservationId);
+    sawTerminalResponse = true;
+    const errorPayload = deps.isRecord(terminalPayload.error)
+      ? terminalPayload.error
+      : terminalPayload;
+    const incompleteDetails = deps.isRecord(terminalPayload.incomplete_details)
+      ? terminalPayload.incomplete_details
+      : null;
+    const incompleteReason =
+      incompleteDetails && typeof incompleteDetails.reason === "string"
+        ? incompleteDetails.reason.trim()
+        : "";
+    const errorCode =
+      terminalStatus === "completed"
+        ? null
+        : typeof errorPayload.code === "string" && errorPayload.code.trim()
+          ? errorPayload.code.trim()
+          : `response_${terminalStatus}`;
+    const errorMessage =
+      terminalStatus === "completed"
+        ? null
+        : typeof errorPayload.message === "string" &&
+            errorPayload.message.trim()
+          ? errorPayload.message.trim()
+          : incompleteReason ||
+            `Responses websocket turn ended with status ${terminalStatus}`;
     try {
-      try {
-        await persistWsCompletedLog(
-          completedPayload,
-          modelId,
-          billedServiceTier,
-        );
-      } catch (error) {
-        console.warn(
-          `[responses-ws] failed to write completed log: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      await deps.chargeCompletedResponseUsage({
-        apiKeyId: context.apiKeyId,
-        ownerUserId: context.ownerUserId,
+      persistWsTerminalLog(
+        terminalPayload,
         modelId,
-        responsePayload: completedPayload,
-        serviceTier: billedServiceTier,
-      });
+        pricingModelId,
+        billedServiceTier,
+        responseId,
+        reservationId,
+        terminalStatus,
+        errorCode,
+        errorMessage,
+      );
     } catch (error) {
+      deps.cancelResponseRequestReservation(reservationId);
       console.warn(
-        `[responses-ws] failed to charge usage: ${error instanceof Error ? error.message : String(error)}`,
+        `[responses-ws] failed to queue terminal settlement: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   };
@@ -474,21 +630,53 @@ export function setupResponsesWebSocketProxy(
       closeReason = "upstream_unavailable";
       return;
     }
-
     if (!isBinary) {
       const text = deps.wsRawDataToText(data);
       if (text?.trim()) {
         try {
           const parsed = JSON.parse(text) as Record<string, unknown>;
           if (deps.isRecord(parsed) && parsed.type === "response.create") {
-            pendingTurnServiceTiers.push(
-              deps.resolvePriorityServiceTierForBilling(parsed.service_tier) ??
-                context.serviceTier,
-            );
+            turnSeq += 1;
+            const reservationId = getCurrentTurnIntentId();
+            const reservation = deps.tryReserveResponseRequest({
+              reservationId,
+              ownerUserId: context.ownerUserId,
+            });
+            if (!reservation.ok) {
+              const queueUnavailable = reservation.reason === "queue";
+              deps.sendWsErrorEvent(clientSocket, {
+                status: queueUnavailable ? 503 : 429,
+                error: {
+                  message: queueUnavailable
+                    ? "Billing settlement is temporarily unavailable"
+                    : "Billing quota exceeded",
+                  type: queueUnavailable
+                    ? "server_error"
+                    : "insufficient_quota",
+                  code: queueUnavailable
+                    ? "settlement_queue_unavailable"
+                    : "insufficient_quota",
+                },
+              });
+              return;
+            }
+            pendingTurns.push({
+              intentId: reservationId,
+              serviceTier:
+                deps.resolvePriorityServiceTierForBilling(
+                  parsed.service_tier,
+                ) ?? context.serviceTier,
+              pricingModelId: deps.resolveUsagePricingModelId(
+                typeof parsed.model === "string" && parsed.model.trim()
+                  ? parsed.model.trim()
+                  : lastRequestedModel,
+                parsed,
+              ),
+            });
+            activeReservationIds.add(reservationId);
             if (typeof parsed.model === "string" && parsed.model.trim()) {
               lastRequestedModel = parsed.model.trim();
             }
-            turnSeq += 1;
             activeTurnStartedAtMs = Date.now();
             activeTurnFirstEventAtMs = null;
           }
@@ -498,8 +686,7 @@ export function setupResponsesWebSocketProxy(
       }
     }
 
-    upstreamSocket.send(data, { binary: isBinary }, (error?: Error) => {
-      if (!error) return;
+    forwardMessage(clientSocket, upstreamSocket, data, isBinary, () => {
       deps.sendWsErrorEvent(clientSocket, {
         status: 502,
         error: {
@@ -522,17 +709,20 @@ export function setupResponsesWebSocketProxy(
     if (!isBinary && activeTurnFirstEventAtMs === null) {
       activeTurnFirstEventAtMs = Date.now();
     }
-    clientSocket.send(data, { binary: isBinary }, (error?: Error) => {
-      if (!error) return;
+    forwardMessage(upstreamSocket, clientSocket, data, isBinary, () => {
+      closeSource = "forward_failed";
+      closeCode = 1011;
+      closeReason = "forward_failed";
       closeClientSocket(1011, "forward_failed");
       closeUpstreamSocket(1011, "forward_failed");
+      finalize();
     });
     if (!isBinary) {
       const text = deps.wsRawDataToText(data);
       if (text?.trim()) {
         const parsed = deps.parseJsonRecordText(text);
         if (parsed) {
-          void maybeChargeCompletedUsage(parsed);
+          maybeSettleTerminalUsage(parsed);
         }
       }
     }

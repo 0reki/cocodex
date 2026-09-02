@@ -18,20 +18,18 @@ export function normalizeOpenAIAccountStatus(
 
 export type OpenAIAccountRow = {
   id: string
-  user_id: string | null
-  name: string | null
   email: string
-  picture: string | null
-  account_id: string | null
+  account_id: string
   status: string | null
-  access_token: string | null
-  session_token: string | null
+  id_token: string
+  access_token: string
+  refresh_token: string
   created_at: Date
   updated_at: Date
 }
 
 export const OPENAI_ACCOUNT_COLUMNS = `
-  id, user_id, name, email, picture, account_id, status, access_token, session_token,
+  id, email, account_id, status, id_token, access_token, refresh_token,
   created_at, updated_at
 `
 
@@ -40,14 +38,12 @@ export function mapOpenAIAccountRow(row: OpenAIAccountRow): OpenAIAccountRecord 
 
   return {
     id: row.id,
-    userId: row.user_id,
-    name: row.name,
     email: row.email,
-    picture: row.picture,
     accountId: row.account_id,
     status,
+    idToken: row.id_token,
     accessToken: row.access_token,
-    sessionToken: row.session_token,
+    refreshToken: row.refresh_token,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   }

@@ -8,6 +8,6 @@ export {
   getOpenAIAccountByEmail,
   listOpenAIAccountsPage,
   normalizeOpenAIAccountStatus,
-  updateOpenAIAccountAccessTokenById,
+  updateOpenAIAccountTokensById,
   upsertOpenAIAccount,
 } from "../internal/accounts.ts"

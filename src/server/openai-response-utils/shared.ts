@@ -117,9 +117,10 @@ export function extractResponseErrorPayload(
   }
   if (
     typeof payload.code === "string" ||
-    typeof payload.type === "string" ||
     typeof payload.message === "string" ||
-    typeof payload.detail === "string"
+    typeof payload.detail === "string" ||
+    payload.type === "error" ||
+    payload.type === "response.failed"
   ) {
     return payload;
   }

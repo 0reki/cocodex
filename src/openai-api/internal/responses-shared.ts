@@ -1,11 +1,8 @@
-import { buildCodexTransportHeaders } from "./runtime.ts";
-import type {
-  PostCodexResponsesCompactOptions,
-  PostCodexResponsesOptions,
-} from "./runtime.ts";
+import { buildCodexTransportHeaders } from "./runtime-codex.ts";
+import type { PostCodexResponsesOptions } from "./runtime-types.ts";
 
 export function resolveResponseTransport(
-  options: PostCodexResponsesOptions | PostCodexResponsesCompactOptions,
+  options: PostCodexResponsesOptions,
 ) {
   const accessToken = options.accessToken.trim();
   const accountId = options.accountId?.trim();
@@ -36,26 +33,4 @@ export function resolveResponseTransport(
       requestHeaders: options.requestHeaders,
     }),
   };
-}
-
-export async function postCodexResponsesCompact(
-  options: PostCodexResponsesCompactOptions,
-): Promise<Response> {
-  const { transportHeaders } = resolveResponseTransport(options);
-  const payload =
-    typeof options.payload === "object" && options.payload !== null
-      ? (options.payload as Record<string, unknown>)
-      : {};
-  const body = Buffer.from(JSON.stringify(payload), "utf8");
-  const headers = new Headers(transportHeaders);
-  headers.set("accept", "application/json");
-  headers.set("content-type", "application/json");
-  headers.delete("content-encoding");
-
-  return fetch("https://chatgpt.com/backend-api/codex/responses/compact", {
-    method: "POST",
-    headers,
-    body: Uint8Array.from(body),
-    signal: options.signal,
-  });
 }

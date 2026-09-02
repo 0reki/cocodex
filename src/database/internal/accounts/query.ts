@@ -24,9 +24,7 @@ export async function listOpenAIAccountsPage(
   }
   if (keyword) {
     values.push(`%${keyword}%`)
-    whereClauses.push(
-      `(email ILIKE $${values.length} OR COALESCE(name, '') ILIKE $${values.length})`,
-    )
+    whereClauses.push(`email ILIKE $${values.length}`)
   }
 
   const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : ""

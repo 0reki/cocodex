@@ -9,6 +9,13 @@ declare global {
 
 const SCHEMA_INIT_LOCK_KEY = 8_453_201_114_257n;
 
+function positiveIntegerEnv(name: string, fallback: number) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.floor(parsed)
+    : fallback;
+}
+
 function requireDatabaseUrl() {
   const url = process.env.DATABASE_URL;
   if (!url) {
@@ -21,8 +28,15 @@ export function getDbPool() {
   if (!globalThis.__cocodexPgPool) {
     const pool = new Pool({
       connectionString: requireDatabaseUrl(),
-      max: Number(process.env.PG_POOL_MAX ?? 10),
-      idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS ?? 30_000),
+      max: positiveIntegerEnv("PG_POOL_MAX", 10),
+      idleTimeoutMillis: positiveIntegerEnv("PG_IDLE_TIMEOUT_MS", 30_000),
+      connectionTimeoutMillis: positiveIntegerEnv(
+        "PG_CONNECTION_TIMEOUT_MS",
+        5_000,
+      ),
+      statement_timeout: positiveIntegerEnv("PG_STATEMENT_TIMEOUT_MS", 15_000),
+      query_timeout: positiveIntegerEnv("PG_QUERY_TIMEOUT_MS", 20_000),
+      lock_timeout: positiveIntegerEnv("PG_LOCK_TIMEOUT_MS", 5_000),
       ssl:
         process.env.PG_SSL_MODE === "require"
           ? { rejectUnauthorized: false }

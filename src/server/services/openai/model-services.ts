@@ -2,8 +2,11 @@ import {
   extractResponseErrorPayload,
   isRecord,
 } from "../../openai-response-utils.ts";
-import type { ApiKeyRecord } from "../../../database/index.ts";
-
+import {
+  divideUsdAmount,
+  parseUsdAmount,
+  type UsdAmount,
+} from "../../../shared/usd.ts";
 export function getNestedNumberFromRecord(
   source: Record<string, unknown> | null,
   keys: string[],
@@ -20,25 +23,66 @@ export function getNestedNumberFromRecord(
   return null;
 }
 
+function getTokenCount(
+  source: Record<string, unknown> | null,
+  keys: string[],
+): number | null {
+  const value = getNestedNumberFromRecord(source, keys);
+  return value === null ? null : Math.max(0, Math.trunc(value));
+}
+
+function extractImageTokenUsage(
+  usage: Record<string, unknown> | null,
+): Record<string, number> | null {
+  if (!usage) return null;
+  const inputDetails = isRecord(usage.input_tokens_details)
+    ? usage.input_tokens_details
+    : null;
+  const outputDetails = isRecord(usage.output_tokens_details)
+    ? usage.output_tokens_details
+    : null;
+  const values = {
+    input_tokens: getTokenCount(usage, ["input_tokens", "inputTokens"]),
+    cached_input_tokens:
+      getTokenCount(usage, ["cached_input_tokens", "cachedInputTokens"]) ??
+      getTokenCount(inputDetails, ["cached_tokens", "cachedTokens"]),
+    cached_text_input_tokens: getTokenCount(inputDetails, [
+      "cached_text_tokens",
+      "cachedTextTokens",
+    ]),
+    cached_image_input_tokens: getTokenCount(inputDetails, [
+      "cached_image_tokens",
+      "cachedImageTokens",
+    ]),
+    input_text_tokens: getTokenCount(inputDetails, [
+      "text_tokens",
+      "textTokens",
+    ]),
+    input_image_tokens: getTokenCount(inputDetails, [
+      "image_tokens",
+      "imageTokens",
+    ]),
+    output_tokens: getTokenCount(usage, ["output_tokens", "outputTokens"]),
+    output_text_tokens: getTokenCount(outputDetails, [
+      "text_tokens",
+      "textTokens",
+    ]),
+    output_image_tokens: getTokenCount(outputDetails, [
+      "image_tokens",
+      "imageTokens",
+    ]),
+    total_tokens: getTokenCount(usage, ["total_tokens", "totalTokens"]),
+  };
+  return Object.fromEntries(
+    Object.entries(values).filter(
+      (entry): entry is [string, number] => entry[1] !== null,
+    ),
+  );
+}
+
 export function createModelServices(deps: {
   priceAfter272kInputThresholdTokens: number;
   modelPricing: Array<Record<string, unknown>>;
-  incrementApiKeyUsed: (
-    apiKeyId: string,
-    amount: number,
-  ) => Promise<ApiKeyRecord | null>;
-  applyApiKeyCacheUpdate: (updatedKey: ApiKeyRecord) => void;
-  adjustPortalUserBalance: (userId: string, delta: number) => Promise<unknown>;
-  applyUserBillingAllowanceChargeCache: (
-    userId: string,
-    charge: {
-      chargedFromBalance: number;
-    },
-  ) => void;
-  applyServiceTierBillingMultiplier: (
-    cost: number | null,
-    serviceTier?: "priority" | null,
-  ) => number | null;
 }) {
   function buildOpenAIModelsList(sourceModels: Array<Record<string, unknown>>) {
     const seen = new Set<string>();
@@ -99,16 +143,89 @@ export function createModelServices(deps: {
             >)
           : null;
 
+    const inputTokens = getNestedNumberFromRecord(usageRaw, [
+      "input_tokens",
+      "inputTokens",
+    ]);
+    const outputTokens = getNestedNumberFromRecord(usageRaw, [
+      "output_tokens",
+      "outputTokens",
+    ]);
+    const inputTokenDetails = isRecord(usageRaw?.input_tokens_details)
+      ? usageRaw.input_tokens_details
+      : null;
+    const outputTokenDetails = isRecord(usageRaw?.output_tokens_details)
+      ? usageRaw.output_tokens_details
+      : null;
+    const cachedInputTokens =
+      getNestedNumberFromRecord(usageRaw, [
+        "cached_input_tokens",
+        "cachedInputTokens",
+      ]) ??
+      getNestedNumberFromRecord(inputTokenDetails, [
+        "cached_tokens",
+        "cachedTokens",
+      ]);
+    const cacheWriteInputTokens =
+      getNestedNumberFromRecord(usageRaw, [
+        "cache_write_input_tokens",
+        "cacheWriteInputTokens",
+      ]) ??
+      getNestedNumberFromRecord(inputTokenDetails, [
+        "cache_write_tokens",
+        "cacheWriteTokens",
+      ]);
+    const reasoningOutputTokens =
+      getNestedNumberFromRecord(usageRaw, [
+        "reasoning_output_tokens",
+        "reasoningOutputTokens",
+      ]) ??
+      getNestedNumberFromRecord(outputTokenDetails, [
+        "reasoning_tokens",
+        "reasoningTokens",
+      ]);
+    const imageTokenUsage = extractImageTokenUsage(usageRaw);
+    const toolUsage = isRecord(usageRaw?.tool_usage)
+      ? usageRaw.tool_usage
+      : isRecord(usageRaw?.toolUsage)
+        ? usageRaw.toolUsage
+        : null;
+    const imageGenerationUsage = extractImageTokenUsage(
+      isRecord(toolUsage?.image_gen)
+        ? toolUsage.image_gen
+        : isRecord(toolUsage?.imageGeneration)
+          ? toolUsage.imageGeneration
+          : null,
+    );
     const totalTokens =
       getNestedNumberFromRecord(usageRaw, ["total_tokens", "totalTokens"]) ??
       (() => {
-        const inputTokens =
-          getNestedNumberFromRecord(usageRaw, ["input_tokens", "inputTokens"]) ?? 0;
-        const outputTokens =
-          getNestedNumberFromRecord(usageRaw, ["output_tokens", "outputTokens"]) ?? 0;
-        const sum = inputTokens + outputTokens;
+        const sum = (inputTokens ?? 0) + (outputTokens ?? 0);
         return sum > 0 ? sum : null;
       })();
+    const tokensInfo: Record<string, unknown> | null = usageRaw
+      ? Object.fromEntries(
+          Object.entries({
+            input_tokens: inputTokens,
+            cached_input_tokens: cachedInputTokens,
+            cache_write_input_tokens: cacheWriteInputTokens,
+            input_text_tokens: imageTokenUsage?.input_text_tokens ?? null,
+            input_image_tokens: imageTokenUsage?.input_image_tokens ?? null,
+            cached_text_input_tokens:
+              imageTokenUsage?.cached_text_input_tokens ?? null,
+            cached_image_input_tokens:
+              imageTokenUsage?.cached_image_input_tokens ?? null,
+            output_tokens: outputTokens,
+            reasoning_output_tokens: reasoningOutputTokens,
+            output_text_tokens: imageTokenUsage?.output_text_tokens ?? null,
+            output_image_tokens: imageTokenUsage?.output_image_tokens ?? null,
+            total_tokens: totalTokens,
+          }).filter((entry): entry is [string, number] => entry[1] !== null),
+        )
+      : null;
+    if (tokensInfo && imageGenerationUsage) {
+      tokensInfo.image_generation = imageGenerationUsage;
+    }
 
     const errorRaw = extractResponseErrorPayload(payload);
     const errorCode =
@@ -129,18 +246,15 @@ export function createModelServices(deps: {
               : null;
 
     return {
-      tokensInfo: usageRaw,
+      tokensInfo,
       totalTokens,
       errorCode,
       errorMessage,
     };
   }
 
-  function estimateUsageCost(
-    modelId: string | null,
-    tokensInfo: Record<string, unknown> | null,
-  ): number | null {
-    if (!modelId || !tokensInfo) return null;
+  function findModelPricing(modelId: string | null) {
+    if (!modelId) return null;
     const resolvedModelId = modelId.trim();
     if (!resolvedModelId) return null;
     const baseModelId = resolvedModelId.replace(/-\d{4}-\d{2}-\d{2}$/, "");
@@ -148,20 +262,26 @@ export function createModelServices(deps: {
       baseModelId !== resolvedModelId
         ? [baseModelId, resolvedModelId]
         : [resolvedModelId];
-    const model = deps.modelPricing.find(
-      (item) =>
-        typeof item.slug === "string" && candidateModelIds.includes(item.slug),
+    return (
+      deps.modelPricing.find(
+        (item) =>
+          typeof item.slug === "string" && candidateModelIds.includes(item.slug),
+      ) ?? null
     );
-    if (!model) return null;
+  }
 
-    const readPrice = (value: unknown) => {
-      if (typeof value === "number" && Number.isFinite(value)) return value;
-      if (typeof value === "string") {
-        const parsed = Number(value);
-        if (Number.isFinite(parsed)) return parsed;
-      }
-      return null;
-    };
+  const readPrice = (value: unknown) => {
+    const parsed = parseUsdAmount(value);
+    return parsed !== null && parsed >= 0n ? parsed : null;
+  };
+
+  function estimateTextUsageCost(
+    modelId: string | null,
+    tokensInfo: Record<string, unknown> | null,
+  ): UsdAmount | null {
+    if (!modelId || !tokensInfo) return null;
+    const model = findModelPricing(modelId);
+    if (!model) return null;
 
     const inputRate = readPrice(model.input_price_per_million);
     const cachedInputRate = readPrice(model.cached_input_price_per_million);
@@ -181,43 +301,59 @@ export function createModelServices(deps: {
       cachedInputRateAfter400k !== null ||
       outputRateAfter400k !== null;
 
-    const inputTokens =
-      getNestedNumberFromRecord(tokensInfo, ["input_tokens", "inputTokens"]) ?? 0;
-    const cachedInputTokens =
-      getNestedNumberFromRecord(tokensInfo, [
-        "cached_input_tokens",
-        "cachedInputTokens",
-        "input_tokens_details.cached_tokens",
-      ]) ??
-      getNestedNumberFromRecord(
-        isRecord(tokensInfo.input_tokens_details)
-          ? (tokensInfo.input_tokens_details as Record<string, unknown>)
-          : null,
-        ["cached_tokens"],
-      ) ??
-      0;
+    const inputTokens = Math.max(
+      0,
+      Math.trunc(
+        getNestedNumberFromRecord(tokensInfo, [
+          "input_tokens",
+          "inputTokens",
+        ]) ?? 0,
+      ),
+    );
+    const cachedInputTokens = Math.max(
+      0,
+      Math.trunc(
+        getNestedNumberFromRecord(tokensInfo, [
+          "cached_input_tokens",
+          "cachedInputTokens",
+          "input_tokens_details.cached_tokens",
+        ]) ??
+          getNestedNumberFromRecord(
+            isRecord(tokensInfo.input_tokens_details)
+              ? (tokensInfo.input_tokens_details as Record<string, unknown>)
+              : null,
+            ["cached_tokens"],
+          ) ??
+          0,
+      ),
+    );
     const billableInputTokens = Math.max(0, inputTokens - cachedInputTokens);
-    const outputTokens =
-      getNestedNumberFromRecord(tokensInfo, ["output_tokens", "outputTokens"]) ?? 0;
+    const outputTokens = Math.max(
+      0,
+      Math.trunc(
+        getNestedNumberFromRecord(tokensInfo, [
+          "output_tokens",
+          "outputTokens",
+        ]) ?? 0,
+      ),
+    );
     const totalInputTokens = billableInputTokens + cachedInputTokens;
 
-    let total = 0;
+    let totalPriceWeightedTokens = 0n;
     let hasCost = false;
+    const addCost = (tokens: number, rate: UsdAmount | null) => {
+      if (rate === null || tokens <= 0) return;
+      totalPriceWeightedTokens += BigInt(tokens) * rate;
+      hasCost = true;
+    };
     const resolvedCachedInputRate = cachedInputRate ?? inputRate;
     if (!hasExplicitAfter400kPricing && !doublesAfter400k) {
-      if (inputRate !== null && billableInputTokens > 0) {
-        total += (billableInputTokens * inputRate) / 1_000_000;
-        hasCost = true;
-      }
-      if (resolvedCachedInputRate !== null && cachedInputTokens > 0) {
-        total += (cachedInputTokens * resolvedCachedInputRate) / 1_000_000;
-        hasCost = true;
-      }
-      if (outputRate !== null && outputTokens > 0) {
-        total += (outputTokens * outputRate) / 1_000_000;
-        hasCost = true;
-      }
-      return hasCost ? Number(total.toFixed(8)) : null;
+      addCost(billableInputTokens, inputRate);
+      addCost(cachedInputTokens, resolvedCachedInputRate);
+      addCost(outputTokens, outputRate);
+      return hasCost
+        ? divideUsdAmount(totalPriceWeightedTokens, 1_000_000n)
+        : null;
     }
 
     const overflowInputRate =
@@ -225,31 +361,35 @@ export function createModelServices(deps: {
       (hasExplicitAfter400kPricing
         ? inputRate
         : inputRate !== null && doublesAfter400k
-          ? inputRate * 2
+          ? inputRate * 2n
           : inputRate);
     const overflowCachedInputRate =
       cachedInputRateAfter400k ??
       (hasExplicitAfter400kPricing
         ? resolvedCachedInputRate
         : resolvedCachedInputRate !== null && doublesAfter400k
-          ? resolvedCachedInputRate * 2
+          ? resolvedCachedInputRate * 2n
           : resolvedCachedInputRate);
     const overflowOutputRate =
       outputRateAfter400k ??
       (hasExplicitAfter400kPricing
         ? outputRate
         : outputRate !== null && doublesAfter400k
-          ? outputRate * 2
+          ? outputRate * 2n
           : outputRate);
 
     const regularInputTokens = Math.min(
       totalInputTokens,
       deps.priceAfter272kInputThresholdTokens,
     );
-    const regularInputRatio =
-      totalInputTokens > 0 ? regularInputTokens / totalInputTokens : 0;
-    const regularBillableInputTokens = billableInputTokens * regularInputRatio;
-    const regularCachedInputTokens = cachedInputTokens * regularInputRatio;
+    const regularBillableInputTokens =
+      totalInputTokens > 0
+        ? Math.floor(
+            (billableInputTokens * regularInputTokens) / totalInputTokens,
+          )
+        : 0;
+    const regularCachedInputTokens =
+      regularInputTokens - regularBillableInputTokens;
     const overflowBillableInputTokens = Math.max(
       0,
       billableInputTokens - regularBillableInputTokens,
@@ -263,76 +403,152 @@ export function createModelServices(deps: {
     const regularOutputTokens = inputThresholdExceeded ? 0 : outputTokens;
     const overflowOutputTokens = inputThresholdExceeded ? outputTokens : 0;
 
-    if (inputRate !== null && regularBillableInputTokens > 0) {
-      total += (regularBillableInputTokens * inputRate) / 1_000_000;
-      hasCost = true;
-    }
-    if (resolvedCachedInputRate !== null && regularCachedInputTokens > 0) {
-      total += (regularCachedInputTokens * resolvedCachedInputRate) / 1_000_000;
-      hasCost = true;
-    }
-    if (outputRate !== null && regularOutputTokens > 0) {
-      total += (regularOutputTokens * outputRate) / 1_000_000;
-      hasCost = true;
-    }
-    if (overflowInputRate !== null && overflowBillableInputTokens > 0) {
-      total += (overflowBillableInputTokens * overflowInputRate) / 1_000_000;
-      hasCost = true;
-    }
-    if (overflowCachedInputRate !== null && overflowCachedInputTokens > 0) {
-      total +=
-        (overflowCachedInputTokens * overflowCachedInputRate) / 1_000_000;
-      hasCost = true;
-    }
-    if (overflowOutputRate !== null && overflowOutputTokens > 0) {
-      total += (overflowOutputTokens * overflowOutputRate) / 1_000_000;
-      hasCost = true;
-    }
-    return hasCost ? Number(total.toFixed(8)) : null;
+    addCost(regularBillableInputTokens, inputRate);
+    addCost(regularCachedInputTokens, resolvedCachedInputRate);
+    addCost(regularOutputTokens, outputRate);
+    addCost(overflowBillableInputTokens, overflowInputRate);
+    addCost(overflowCachedInputTokens, overflowCachedInputRate);
+    addCost(overflowOutputTokens, overflowOutputRate);
+    return hasCost
+      ? divideUsdAmount(totalPriceWeightedTokens, 1_000_000n)
+      : null;
   }
 
-  async function chargeCompletedResponseUsage(args: {
-    apiKeyId: string | null;
-    ownerUserId: string | null;
-    modelId: string | null;
-    responsePayload: Record<string, unknown>;
-    serviceTier?: "priority" | null;
-  }) {
-    const { tokensInfo } = extractResponseUsage({
-      response: args.responsePayload,
-    });
-    const cost = deps.applyServiceTierBillingMultiplier(
-      estimateUsageCost(args.modelId, tokensInfo),
-      args.serviceTier,
+  function estimateImageUsageCost(
+    tokensInfo: Record<string, unknown> | null,
+  ): UsdAmount | null {
+    if (!tokensInfo) return null;
+    const model = findModelPricing("gpt-image-2");
+    if (!model) return null;
+
+    const textInputRate = readPrice(model.text_input_price_per_million);
+    const cachedTextInputRate =
+      readPrice(model.cached_text_input_price_per_million) ?? textInputRate;
+    const textOutputRate = readPrice(model.text_output_price_per_million);
+    const imageInputRate = readPrice(model.image_input_price_per_million);
+    const cachedImageInputRate =
+      readPrice(model.cached_image_input_price_per_million) ?? imageInputRate;
+    const imageOutputRate = readPrice(model.image_output_price_per_million);
+
+    const declaredInputTokens =
+      getTokenCount(tokensInfo, ["input_tokens", "inputTokens"]) ?? 0;
+    const textInputTokens =
+      getTokenCount(tokensInfo, ["input_text_tokens", "inputTextTokens"]) ?? 0;
+    let imageInputTokens =
+      getTokenCount(tokensInfo, ["input_image_tokens", "inputImageTokens"]) ?? 0;
+    imageInputTokens += Math.max(
+      0,
+      declaredInputTokens - textInputTokens - imageInputTokens,
     );
-    if (
-      !args.apiKeyId ||
-      typeof cost !== "number" ||
-      !Number.isFinite(cost) ||
-      cost <= 0
-    ) {
-      return;
+
+    const declaredOutputTokens =
+      getTokenCount(tokensInfo, ["output_tokens", "outputTokens"]) ?? 0;
+    const textOutputTokens =
+      getTokenCount(tokensInfo, ["output_text_tokens", "outputTextTokens"]) ?? 0;
+    let imageOutputTokens =
+      getTokenCount(tokensInfo, ["output_image_tokens", "outputImageTokens"]) ?? 0;
+    imageOutputTokens += Math.max(
+      0,
+      declaredOutputTokens - textOutputTokens - imageOutputTokens,
+    );
+
+    const cachedInputTokens = Math.min(
+      textInputTokens + imageInputTokens,
+      getTokenCount(tokensInfo, ["cached_input_tokens", "cachedInputTokens"]) ??
+        0,
+    );
+    let cachedTextInputTokens = Math.min(
+      textInputTokens,
+      getTokenCount(tokensInfo, [
+        "cached_text_input_tokens",
+        "cachedTextInputTokens",
+      ]) ?? 0,
+    );
+    let cachedImageInputTokens = Math.min(
+      imageInputTokens,
+      getTokenCount(tokensInfo, [
+        "cached_image_input_tokens",
+        "cachedImageInputTokens",
+      ]) ?? 0,
+    );
+    const unassignedCachedTokens = Math.max(
+      0,
+      cachedInputTokens - cachedTextInputTokens - cachedImageInputTokens,
+    );
+    const remainingInputTokens =
+      textInputTokens +
+      imageInputTokens -
+      cachedTextInputTokens -
+      cachedImageInputTokens;
+    if (unassignedCachedTokens > 0 && remainingInputTokens > 0) {
+      const additionalImageCachedTokens = Math.min(
+        imageInputTokens - cachedImageInputTokens,
+        Math.floor(
+          (unassignedCachedTokens *
+            (imageInputTokens - cachedImageInputTokens)) /
+            remainingInputTokens,
+        ),
+      );
+      cachedImageInputTokens += additionalImageCachedTokens;
+      cachedTextInputTokens += Math.min(
+        textInputTokens - cachedTextInputTokens,
+        unassignedCachedTokens - additionalImageCachedTokens,
+      );
     }
 
-    const updatedKey = await deps.incrementApiKeyUsed(args.apiKeyId, cost);
-    if (updatedKey) {
-      deps.applyApiKeyCacheUpdate(updatedKey);
-    }
-    if (!args.ownerUserId) return;
+    let weightedTokens = 0n;
+    let hasCost = false;
+    const addCost = (tokens: number, rate: UsdAmount | null) => {
+      if (rate === null || tokens <= 0) return;
+      weightedTokens += BigInt(tokens) * rate;
+      hasCost = true;
+    };
+    addCost(textInputTokens - cachedTextInputTokens, textInputRate);
+    addCost(cachedTextInputTokens, cachedTextInputRate);
+    addCost(imageInputTokens - cachedImageInputTokens, imageInputRate);
+    addCost(cachedImageInputTokens, cachedImageInputRate);
+    addCost(textOutputTokens, textOutputRate);
+    addCost(imageOutputTokens, imageOutputRate);
+    return hasCost ? divideUsdAmount(weightedTokens, 1_000_000n) : null;
+  }
 
-    const chargedFromBalance = cost;
-    if (chargedFromBalance > 0) {
-      await deps.adjustPortalUserBalance(args.ownerUserId, -chargedFromBalance);
-    }
-    deps.applyUserBillingAllowanceChargeCache(args.ownerUserId, {
-      chargedFromBalance,
-    });
+  function resolveUsagePricingModelId(
+    modelId: string | null,
+    requestPayload: Record<string, unknown> | null,
+  ): string | null {
+    const accessPrograms = isRecord(requestPayload?.access_programs)
+      ? requestPayload.access_programs
+      : null;
+    const cyber =
+      typeof accessPrograms?.cyber === "string"
+        ? accessPrograms.cyber.trim().toLowerCase()
+        : "";
+    if (cyber === "daybreak_blue" || cyber === "daybreak_red") return cyber;
+    return modelId;
+  }
+
+  function estimateUsageCost(
+    modelId: string | null,
+    tokensInfo: Record<string, unknown> | null,
+  ): UsdAmount | null {
+    if (!tokensInfo) return null;
+    const isImageModel = modelId
+      ?.trim()
+      .replace(/-\d{4}-\d{2}-\d{2}$/, "") === "gpt-image-2";
+    const primaryCost = isImageModel
+      ? estimateImageUsageCost(tokensInfo)
+      : estimateTextUsageCost(modelId, tokensInfo);
+    const imageGenerationCost = isRecord(tokensInfo.image_generation)
+      ? estimateImageUsageCost(tokensInfo.image_generation)
+      : null;
+    if (primaryCost === null && imageGenerationCost === null) return null;
+    return (primaryCost ?? 0n) + (imageGenerationCost ?? 0n);
   }
 
   return {
     buildOpenAIModelsList,
     extractResponseUsage,
     estimateUsageCost,
-    chargeCompletedResponseUsage,
+    resolveUsagePricingModelId,
   };
 }

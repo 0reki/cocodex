@@ -1,19 +1,20 @@
 import { createAuthServices } from "../services/auth/auth-services.ts";
 import { createOpenAIRuntimeServices } from "../services/openai/openai-runtime-services.ts";
 import { createSourceAccountServices } from "../services/openai/source-account-services.ts";
-import { createApiKeyCacheServices } from "../services/auth/api-key-cache.ts";
 import { createModelServices } from "../services/openai/model-services.ts";
+import { createResponseSettlementServices } from "../services/openai/response-settlement-services.ts";
 import { createUpstreamRequestServices } from "../services/openai/upstream-request-services.ts";
 import { createUpstreamErrorServices } from "../services/openai/upstream-error-services.ts";
+import type { UsdAmount } from "../../shared/usd.ts";
 
-type ApiKeyCacheDependencies = Parameters<
-  typeof createApiKeyCacheServices
->[0];
 type AuthDependencies = Parameters<typeof createAuthServices>[0];
 type SourceAccountDependencies = Parameters<
   typeof createSourceAccountServices
 >[0];
 type ModelDependencies = Parameters<typeof createModelServices>[0];
+type SettlementDependencies = Parameters<
+  typeof createResponseSettlementServices
+>[0];
 type UpstreamErrorDependencies = Parameters<
   typeof createUpstreamErrorServices
 >[0];
@@ -21,116 +22,133 @@ type UpstreamRequestDependencies = Parameters<
   typeof createUpstreamRequestServices
 >[0];
 
-type BootstrapServerServicesDependencies = Pick<
-  ApiKeyCacheDependencies,
-  | "apiKeysCache"
-  | "apiKeyAuthLruCache"
-  | "ensureDatabaseSchema"
-  | "listApiKeys"
-> &
+type BootstrapServerServicesDependencies =
   Pick<
     AuthDependencies,
     | "lruGet"
     | "lruSet"
+    | "apiKeyAuthLruCache"
+    | "apiKeyAuthTokenById"
+    | "apiKeyAuthLoadingPromises"
+    | "apiKeyAuthTokenVersions"
+    | "apiKeyPendingCharges"
+    | "getApiKeyByToken"
     | "billingAllowanceLruCache"
     | "billingAllowanceLoadingPromises"
+    | "billingPendingChargesByOwnerId"
+    | "billingReservationById"
+    | "billingReservedAmountsByOwnerId"
     | "getPortalUserSpendAllowance"
-  > &
-  Pick<SourceAccountDependencies, "getActiveOpenAIAccount"> &
-  Pick<
-    UpstreamErrorDependencies,
-    "isRecord" | "resolveOpenAIUpstreamAccountId" | "createModelResponseLog"
+    | "getPortalUserById"
   > &
   Pick<
-    ModelDependencies,
-    | "modelPricing"
-    | "incrementApiKeyUsed"
-    | "adjustPortalUserBalance"
-    | "applyServiceTierBillingMultiplier"
+    SourceAccountDependencies,
+    "ensureDatabaseSchema" | "getActiveOpenAIAccount"
   > &
+  Pick<UpstreamErrorDependencies, "isRecord"> &
+  Pick<ModelDependencies, "modelPricing"> &
+  Pick<SettlementDependencies, "flushResponseSettlements"> &
   Pick<
     UpstreamRequestDependencies,
     | "randomUUID"
-    | "updateOpenAIAccountAccessTokenById"
-    | "disableOpenAIAccountByEmail"
+    | "resolveOpenAIUpstreamAccountId"
+    | "updateOpenAIAccountTokensById"
   > & {
     DEFAULT_OPENAI_API_USER_AGENT: string;
     DEFAULT_OPENAI_API_CLIENT_VERSION: string;
+    ACTIVE_SOURCE_ACCOUNT_CACHE_TTL_MS: number;
     API_KEY_AUTH_LRU_MAX: number;
     API_KEY_AUTH_LRU_TTL_MS: number;
     BILLING_ALLOWANCE_LRU_MAX: number;
     BILLING_ALLOWANCE_LRU_TTL_MS: number;
+    BILLING_OVERDRAFT_LIMIT_USD: UsdAmount;
+    BILLING_INFLIGHT_RESERVE_USD: UsdAmount;
     PRICE_AFTER_272K_INPUT_THRESHOLD_TOKENS: number;
+    RESPONSE_SETTLEMENT_BATCH_SIZE: number;
+    RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS: number;
+    RESPONSE_SETTLEMENT_ID_CACHE_SIZE: number;
+    RESPONSE_SETTLEMENT_QUEUE_MAX: number;
+    RESPONSE_SETTLEMENT_RETRY_MAX_MS: number;
   };
 
 export function bootstrapServerServices(
   deps: BootstrapServerServicesDependencies,
 ) {
-  const apiKeyCache = createApiKeyCacheServices({
-    apiKeysCache: deps.apiKeysCache,
-    apiKeyAuthLruCache: deps.apiKeyAuthLruCache,
-    ensureDatabaseSchema: deps.ensureDatabaseSchema,
-    listApiKeys: deps.listApiKeys,
-  });
-
   const runtime = createOpenAIRuntimeServices({
     defaultOpenAIApiUserAgent: deps.DEFAULT_OPENAI_API_USER_AGENT,
     defaultOpenAIApiClientVersion: deps.DEFAULT_OPENAI_API_CLIENT_VERSION,
   });
 
   const auth = createAuthServices({
-    adminAccessCookieName: "admin_access_token",
     lruGet: deps.lruGet,
     lruSet: deps.lruSet,
-    apiKeysCache: deps.apiKeysCache,
     apiKeyAuthLruCache: deps.apiKeyAuthLruCache,
+    apiKeyAuthTokenById: deps.apiKeyAuthTokenById,
+    apiKeyAuthLoadingPromises: deps.apiKeyAuthLoadingPromises,
+    apiKeyAuthTokenVersions: deps.apiKeyAuthTokenVersions,
+    apiKeyPendingCharges: deps.apiKeyPendingCharges,
     apiKeyAuthLruMax: deps.API_KEY_AUTH_LRU_MAX,
     apiKeyAuthLruTtlMs: deps.API_KEY_AUTH_LRU_TTL_MS,
-    ensureApiKeysCacheLoaded: apiKeyCache.ensureApiKeysCacheLoaded,
+    getApiKeyByToken: deps.getApiKeyByToken,
     billingAllowanceLruCache: deps.billingAllowanceLruCache,
     billingAllowanceLoadingPromises: deps.billingAllowanceLoadingPromises,
     billingAllowanceLruMax: deps.BILLING_ALLOWANCE_LRU_MAX,
     billingAllowanceLruTtlMs: deps.BILLING_ALLOWANCE_LRU_TTL_MS,
+    billingOverdraftLimitUsd: deps.BILLING_OVERDRAFT_LIMIT_USD,
+    billingInflightReserveUsd: deps.BILLING_INFLIGHT_RESERVE_USD,
+    billingPendingChargesByOwnerId: deps.billingPendingChargesByOwnerId,
+    billingReservationById: deps.billingReservationById,
+    billingReservedAmountsByOwnerId: deps.billingReservedAmountsByOwnerId,
     getPortalUserSpendAllowance: deps.getPortalUserSpendAllowance,
-    setApiKeysCache: apiKeyCache.setApiKeysCache,
+    getPortalUserById: deps.getPortalUserById,
   });
 
   const source = createSourceAccountServices({
     ensureDatabaseSchema: deps.ensureDatabaseSchema,
     getActiveOpenAIAccount: deps.getActiveOpenAIAccount,
+    cacheTtlMs: deps.ACTIVE_SOURCE_ACCOUNT_CACHE_TTL_MS,
+  });
+
+  const settlement = createResponseSettlementServices({
+    flushResponseSettlements: deps.flushResponseSettlements,
+    applyApiKeyPendingCharge: auth.applyApiKeyPendingCharge,
+    settleApiKeyPendingCharge: auth.settleApiKeyPendingCharge,
+    applyUserBillingAllowanceChargeCache:
+      auth.applyUserBillingAllowanceChargeCache,
+    settleUserBillingAllowanceChargeCache:
+      auth.settleUserBillingAllowanceChargeCache,
+    tryReserveUserBillingRequest: auth.tryReserveUserBillingRequest,
+    releaseUserBillingRequestReservation:
+      auth.releaseUserBillingRequestReservation,
+    batchSize: deps.RESPONSE_SETTLEMENT_BATCH_SIZE,
+    flushIntervalMs: deps.RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS,
+    settledIdCacheSize: deps.RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
+    queueMaxSize: deps.RESPONSE_SETTLEMENT_QUEUE_MAX,
+    retryMaxMs: deps.RESPONSE_SETTLEMENT_RETRY_MAX_MS,
   });
 
   const upstreamError = createUpstreamErrorServices({
     isRecord: deps.isRecord,
-    resolveOpenAIUpstreamAccountId: deps.resolveOpenAIUpstreamAccountId,
-    createModelResponseLog: deps.createModelResponseLog,
+    enqueueResponseSettlement: settlement.enqueueResponseSettlement,
   });
 
   const model = createModelServices({
     priceAfter272kInputThresholdTokens: deps.PRICE_AFTER_272K_INPUT_THRESHOLD_TOKENS,
     modelPricing: deps.modelPricing,
-    incrementApiKeyUsed: deps.incrementApiKeyUsed,
-    applyApiKeyCacheUpdate: auth.applyApiKeyCacheUpdate,
-    adjustPortalUserBalance: deps.adjustPortalUserBalance,
-    applyUserBillingAllowanceChargeCache: auth.applyUserBillingAllowanceChargeCache,
-    applyServiceTierBillingMultiplier: deps.applyServiceTierBillingMultiplier,
   });
 
   const upstreamRequest = createUpstreamRequestServices({
     randomUUID: deps.randomUUID,
     resolveOpenAIUpstreamAccountId: deps.resolveOpenAIUpstreamAccountId,
-    updateOpenAIAccountAccessTokenById: deps.updateOpenAIAccountAccessTokenById,
-    disableOpenAIAccountByEmail: deps.disableOpenAIAccountByEmail,
-    extractErrorInfo: upstreamError.extractErrorInfo,
+    updateOpenAIAccountTokensById: deps.updateOpenAIAccountTokensById,
     isTokenInvalidatedError: upstreamError.isTokenInvalidatedError,
-    createAbortError: upstreamError.createAbortError,
   });
 
   return {
-    ...apiKeyCache,
     ...runtime,
     ...auth,
     ...source,
+    ...settlement,
     ...upstreamError,
     ...model,
     ...upstreamRequest,

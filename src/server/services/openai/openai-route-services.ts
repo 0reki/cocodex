@@ -1,10 +1,4 @@
 import type { Request, Response } from "express";
-import type {
-  adjustPortalUserBalance,
-  createModelResponseLog,
-  hasSuccessfulFinalChargeLog,
-  incrementApiKeyUsed,
-} from "../../../database/index.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
 import type {
   applyServiceTierBillingMultiplier,
@@ -21,6 +15,7 @@ export type OpenAIRequestPreparationDependencies = Pick<
   | "persistQuotaExceededLog"
   | "isApiKeyBoundToUser"
   | "ensureUserBillingAllowanceOrNull"
+  | "tryReserveResponseRequest"
 >;
 
 export type ActiveSourceAccountDependencies = Pick<
@@ -32,20 +27,15 @@ export type ActiveSourceAccountDependencies = Pick<
 
 export type OpenAIAccountingDependencies = Pick<
   ServerServices,
-  | "extractResponseUsage"
-  | "estimateUsageCost"
-  | "applyApiKeyCacheUpdate"
-  | "applyUserBillingAllowanceChargeCache"
+  "extractResponseUsage" | "estimateUsageCost"
 > & {
   applyServiceTierBillingMultiplier: typeof applyServiceTierBillingMultiplier;
-  hasSuccessfulFinalChargeLog: typeof hasSuccessfulFinalChargeLog;
-  incrementApiKeyUsed: typeof incrementApiKeyUsed;
-  adjustPortalUserBalance: typeof adjustPortalUserBalance;
 };
 
-export type OpenAIResponseLogDependencies = {
-  createModelResponseLog: typeof createModelResponseLog;
-};
+export type OpenAIResponseLogDependencies = Pick<
+  ServerServices,
+  "enqueueResponseSettlement" | "cancelResponseRequestReservation"
+>;
 
 export type OpenAIResponsesRouteDependencies =
   OpenAIRequestPreparationDependencies &
@@ -57,12 +47,11 @@ export type OpenAIResponsesRouteDependencies =
       | "createRequestAbortContext"
       | "getOpenAIApiRuntimeConfig"
       | "postCodexResponsesWithTokenRefresh"
-      | "postCodexResponsesCompactWithTokenRefresh"
       | "extractErrorInfo"
       | "isAbortError"
-      | "buildInternalUpstreamErrorDetails"
       | "buildPassthroughUpstreamError"
       | "shouldPersistModelResponseLog"
+      | "resolveUsagePricingModelId"
     > & {
       resolvePriorityServiceTierForBilling: typeof resolvePriorityServiceTierForBilling;
     };
@@ -77,21 +66,10 @@ export async function prepareOpenAIRouteRequest(args: {
   res: Response;
   deps: OpenAIRequestPreparationDependencies;
   intentId: string;
-  attemptNo: number;
-  retryReason: string | null;
   model: string | null;
   startedAtMs: number;
 }) {
-  const {
-    req,
-    res,
-    deps,
-    intentId,
-    attemptNo,
-    retryReason,
-    model,
-    startedAtMs,
-  } = args;
+  const { req, res, deps, intentId, model, startedAtMs } = args;
 
   const { apiKey, reason: apiKeyAuthFailureReason } =
     await deps.authenticateApiKeyWithReason(req);
@@ -100,8 +78,6 @@ export async function prepareOpenAIRouteRequest(args: {
     await deps.persistShortCircuitErrorLog({
       requestPath: req.path,
       intentId,
-      attemptNo,
-      retryReason,
       model,
       keyId: null,
       startedAtMs,
@@ -123,10 +99,9 @@ export async function prepareOpenAIRouteRequest(args: {
     await deps.persistQuotaExceededLog({
       requestPath: req.path,
       intentId,
-      attemptNo,
-      retryReason,
       model,
       keyId: apiKey.id,
+      ownerUserId: apiKey.ownerUserId,
       startedAtMs,
     });
     res.status(429).json({
@@ -147,10 +122,9 @@ export async function prepareOpenAIRouteRequest(args: {
     await deps.persistShortCircuitErrorLog({
       requestPath: req.path,
       intentId,
-      attemptNo,
-      retryReason,
       model,
       keyId: apiKey.id,
+      ownerUserId: apiKey.ownerUserId,
       startedAtMs,
       statusCode: 403,
       errorCode: "api_key_owner_missing",
@@ -179,8 +153,6 @@ export async function prepareOpenAIRouteRequest(args: {
       ownerUserId,
       apiKeyId: apiKey.id,
       intentId,
-      attemptNo,
-      retryReason,
       model,
       startedAtMs,
     });
@@ -212,13 +184,13 @@ export async function ensureBillingAllowanceOrRespond(args: {
   res: Response;
   deps: Pick<
     OpenAIRequestPreparationDependencies,
-    "ensureUserBillingAllowanceOrNull" | "persistShortCircuitErrorLog"
+    | "ensureUserBillingAllowanceOrNull"
+    | "persistShortCircuitErrorLog"
+    | "tryReserveResponseRequest"
   >;
   ownerUserId: string | null;
   apiKeyId: string | null;
   intentId: string;
-  attemptNo: number;
-  retryReason: string | null;
   model: string | null;
   startedAtMs: number;
 }) {
@@ -229,8 +201,6 @@ export async function ensureBillingAllowanceOrRespond(args: {
     ownerUserId,
     apiKeyId,
     intentId,
-    attemptNo,
-    retryReason,
     model,
     startedAtMs,
   } = args;
@@ -240,30 +210,109 @@ export async function ensureBillingAllowanceOrRespond(args: {
   }
 
   const allowance = await deps.ensureUserBillingAllowanceOrNull(ownerUserId);
-  if (!allowance || allowance.totalAvailable <= 0) {
-    await deps.persistShortCircuitErrorLog({
-      requestPath: req.path,
+  if (!allowance) {
+    await persistBillingAdmissionError({
+      req,
+      res,
+      deps,
+      ownerUserId,
+      apiKeyId,
       intentId,
-      attemptNo,
-      retryReason,
       model,
-      keyId: apiKeyId,
       startedAtMs,
-      statusCode: 429,
-      errorCode: "insufficient_quota",
-      errorMessage: "Billing quota exceeded",
+      status: 429,
+      code: "insufficient_quota",
+      message: "Billing quota exceeded",
     });
-    res.status(429).json({
+    return { ok: false as const };
+  }
+
+  const reservation = deps.tryReserveResponseRequest({
+    reservationId: intentId,
+    ownerUserId,
+  });
+  if (!reservation.ok) {
+    const queueUnavailable = reservation.reason === "queue";
+    const status = queueUnavailable ? 503 : 429;
+    const code = queueUnavailable
+      ? "settlement_queue_unavailable"
+      : "insufficient_quota";
+    const message = queueUnavailable
+      ? "Billing settlement is temporarily unavailable"
+      : "Billing quota exceeded";
+    if (!queueUnavailable) {
+      await deps.persistShortCircuitErrorLog({
+        requestPath: req.path,
+        intentId,
+        model,
+        keyId: apiKeyId,
+        ownerUserId,
+        startedAtMs,
+        statusCode: status,
+        errorCode: code,
+        errorMessage: message,
+      });
+    }
+    res.status(status).json({
       error: {
-        message: "Billing quota exceeded",
-        type: "insufficient_quota",
-        code: "insufficient_quota",
+        message,
+        type: queueUnavailable ? "server_error" : "insufficient_quota",
+        code,
       },
     });
     return { ok: false as const };
   }
 
   return { ok: true as const };
+}
+
+async function persistBillingAdmissionError(args: {
+  req: Request;
+  res: Response;
+  deps: Pick<
+    OpenAIRequestPreparationDependencies,
+    "persistShortCircuitErrorLog"
+  >;
+  ownerUserId: string;
+  apiKeyId: string | null;
+  intentId: string;
+  model: string | null;
+  startedAtMs: number;
+  status: number;
+  code: string;
+  message: string;
+}) {
+  const {
+    req,
+    res,
+    deps,
+    ownerUserId,
+    apiKeyId,
+    intentId,
+    model,
+    startedAtMs,
+    status,
+    code,
+    message,
+  } = args;
+  await deps.persistShortCircuitErrorLog({
+    requestPath: req.path,
+    intentId,
+    model,
+    keyId: apiKeyId,
+    ownerUserId,
+    startedAtMs,
+    statusCode: status,
+    errorCode: code,
+    errorMessage: message,
+  });
+  res.status(status).json({
+    error: {
+      message,
+      type: "insufficient_quota",
+      code,
+    },
+  });
 }
 
 export async function getReadyActiveSourceAccount(args: {
@@ -282,112 +331,76 @@ export async function getReadyActiveSourceAccount(args: {
   return { ok: true as const, sourceAccount };
 }
 
-export async function finalizeOpenAIRouteAccounting(args: {
+export function finalizeOpenAIRouteAccounting(args: {
   deps: OpenAIAccountingDependencies;
   apiKeyId: string | null;
-  ownerUserId: string | null;
-  intentId: string;
-  path: string;
   model: string | null;
-  completedResponsePayload: Record<string, unknown> | null;
+  pricingModelId?: string | null;
+  usageResponsePayload: Record<string, unknown> | null;
   lastErrorPayload: Record<string, unknown> | null;
   serviceTier: PriorityServiceTier;
-  requestSucceeded: boolean;
 }) {
   const {
     deps,
     apiKeyId,
-    ownerUserId,
-    intentId,
-    path,
     model,
-    completedResponsePayload,
+    pricingModelId,
+    usageResponsePayload,
     lastErrorPayload,
     serviceTier,
-    requestSucceeded,
   } = args;
 
-  const usageSource = completedResponsePayload
-    ? { response: completedResponsePayload }
+  const usageSource = usageResponsePayload
+    ? { response: usageResponsePayload }
     : lastErrorPayload;
   const usage = deps.extractResponseUsage(usageSource);
   const cost = deps.applyServiceTierBillingMultiplier(
-    deps.estimateUsageCost(model, usage.tokensInfo),
+    deps.estimateUsageCost(pricingModelId ?? model, usage.tokensInfo),
     serviceTier,
   );
-  const alreadyCharged =
-    apiKeyId && intentId
-      ? await deps.hasSuccessfulFinalChargeLog({
-          intentId,
-          keyId: apiKeyId,
-          path,
-        })
-      : false;
   const shouldCharge =
-    requestSucceeded &&
     apiKeyId &&
-    typeof cost === "number" &&
-    Number.isFinite(cost) &&
-    cost > 0 &&
-    !alreadyCharged;
-  if (shouldCharge && apiKeyId) {
-    const updatedKey = await deps.incrementApiKeyUsed(apiKeyId, cost);
-    if (updatedKey) {
-      deps.applyApiKeyCacheUpdate(updatedKey);
-    }
-    if (ownerUserId) {
-      const chargedFromBalance = cost;
-      if (chargedFromBalance > 0) {
-        await deps.adjustPortalUserBalance(ownerUserId, -chargedFromBalance);
-      }
-      deps.applyUserBillingAllowanceChargeCache(ownerUserId, {
-        chargedFromBalance,
-      });
-    }
-  }
-
+    typeof cost === "bigint" &&
+    cost > 0n;
   return {
     usage,
     cost,
-    alreadyCharged,
+    charge: shouldCharge ? cost : 0n,
   };
 }
 
-export async function persistOpenAIResponseLog(args: {
+export function persistOpenAIResponseLog(args: {
   deps: OpenAIResponseLogDependencies;
   shouldPersist: boolean;
   path: string;
   intentId: string;
-  attemptNo: number;
   isFinal: boolean;
-  retryReason: string | null;
-  heartbeatCount?: number | null;
   streamEndReason?: string | null;
   model: string | null;
   apiKeyId: string | null;
+  ownerUserId: string | null;
+  charge: bigint;
   serviceTier: PriorityServiceTier;
   statusCode: number | null;
   startedAtMs: number;
   firstEventAtMs: number | null;
   finishedAtMs: number | null;
   usage: ResponseUsage;
-  cost: number | null;
+  cost: bigint | null;
   fallbackErrorCode: string | null;
   fallbackErrorMessage: string | null;
-  internalErrorDetails?: Record<string, unknown> | null;
 }) {
   const {
     deps,
     shouldPersist,
     path,
     intentId,
-    attemptNo,
     isFinal,
-    retryReason,
-    heartbeatCount = null,
     streamEndReason = null,
     model,
     apiKeyId,
+    ownerUserId,
+    charge,
     serviceTier,
     statusCode,
     startedAtMs,
@@ -397,20 +410,23 @@ export async function persistOpenAIResponseLog(args: {
     cost,
     fallbackErrorCode,
     fallbackErrorMessage,
-    internalErrorDetails = null,
   } = args;
 
-  if (!shouldPersist) return;
-  await deps.createModelResponseLog({
+  if (!shouldPersist) {
+    deps.cancelResponseRequestReservation(intentId);
+    return;
+  }
+  deps.enqueueResponseSettlement({
+    settlementId: intentId,
+    reservationId: intentId,
     intentId,
-    attemptNo,
+    ownerUserId,
+    apiKeyId,
+    charge,
     isFinal,
-    retryReason,
-    heartbeatCount,
     streamEndReason,
     path,
     modelId: model,
-    keyId: apiKeyId,
     serviceTier,
     statusCode,
     ttfbMs: firstEventAtMs ? Math.max(0, firstEventAtMs - startedAtMs) : null,
@@ -420,7 +436,6 @@ export async function persistOpenAIResponseLog(args: {
     cost,
     errorCode: isFinal ? null : (usage.errorCode ?? fallbackErrorCode),
     errorMessage: isFinal ? null : (usage.errorMessage ?? fallbackErrorMessage),
-    internalErrorDetails,
     requestTime: new Date(startedAtMs).toISOString(),
   });
 }

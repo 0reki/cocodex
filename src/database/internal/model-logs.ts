@@ -10,6 +10,28 @@ type ModelResponseLogFilters = {
   requestDateTo?: string | null
 }
 
+type ModelResponseLogRow = {
+  id: string
+  intent_id: string | null
+  is_final: boolean | null
+  stream_end_reason: string | null
+  path: string
+  model_id: string | null
+  key_id: string | null
+  service_tier: string | null
+  status_code: number | null
+  ttfb_ms: number | null
+  latency_ms: number | null
+  tokens_info: Record<string, unknown> | null
+  total_tokens: number | null
+  cost: number | string | null
+  error_code: string | null
+  error_message: string | null
+  request_time: Date
+  created_at: Date
+  updated_at: Date
+}
+
 function normalizeModelResponseLogFilters(
   filters?: ModelResponseLogFilters,
 ): {
@@ -43,15 +65,15 @@ function buildModelResponseLogsFilterSql(
 
   if (ownerUserId?.trim()) {
     params.push(ownerUserId.trim())
-    whereParts.push(`keys.owner_user_id = $${params.length}::uuid`)
+    whereParts.push(`logs.owner_user_id = $${params.length}::uuid`)
   }
   if (normalized.keyId) {
-    params.push(`%${normalized.keyId}%`)
-    whereParts.push(`COALESCE(keys.api_key, '') ILIKE $${params.length}`)
+    params.push(normalized.keyId)
+    whereParts.push(`logs.key_id = $${params.length}::uuid`)
   }
   if (normalized.modelId) {
-    params.push(`%${normalized.modelId}%`)
-    whereParts.push(`COALESCE(logs.model_id, '') ILIKE $${params.length}`)
+    params.push(normalized.modelId)
+    whereParts.push(`logs.model_id = $${params.length}`)
   }
   if (normalized.requestStatus) {
     switch (normalized.requestStatus) {
@@ -118,30 +140,7 @@ function buildModelResponseLogsFilterSql(
   }
 }
 
-function mapModelResponseLogRow(row: {
-  id: string
-  intent_id: string | null
-  attempt_no: number | null
-  is_final: boolean | null
-  retry_reason: string | null
-  heartbeat_count?: number | null
-  stream_end_reason?: string | null
-  path: string
-  model_id: string | null
-  key_id: string | null
-  service_tier?: string | null
-  status_code: number | null
-  ttfb_ms: number | null
-  latency_ms: number | null
-  tokens_info: Record<string, unknown> | null
-  total_tokens: number | null
-  cost: number | string | null
-  error_code: string | null
-  error_message: string | null
-  request_time: Date
-  created_at: Date
-  updated_at: Date
-}): ModelResponseLogRecord {
+function mapModelResponseLogRow(row: ModelResponseLogRow): ModelResponseLogRecord {
   const numericCost =
     typeof row.cost === "number"
       ? row.cost
@@ -151,15 +150,12 @@ function mapModelResponseLogRow(row: {
   return {
     id: row.id,
     intentId: row.intent_id,
-    attemptNo: row.attempt_no,
     isFinal: row.is_final,
-    retryReason: row.retry_reason,
-    heartbeatCount: row.heartbeat_count ?? null,
-    streamEndReason: row.stream_end_reason ?? null,
+    streamEndReason: row.stream_end_reason,
     path: row.path,
     modelId: row.model_id,
     keyId: row.key_id,
-    serviceTier: row.service_tier ?? null,
+    serviceTier: row.service_tier,
     statusCode: row.status_code,
     ttfbMs: row.ttfb_ms,
     latencyMs: row.latency_ms,
@@ -174,434 +170,120 @@ function mapModelResponseLogRow(row: {
   }
 }
 
-export async function createModelResponseLog(input: {
-  intentId?: string | null
-  attemptNo?: number | null
-  isFinal?: boolean | null
-  retryReason?: string | null
-  heartbeatCount?: number | null
-  streamEndReason?: string | null
-  path: string
-  modelId?: string | null
-  keyId?: string | null
-  serviceTier?: string | null
-  statusCode?: number | null
-  ttfbMs?: number | null
-  latencyMs?: number | null
-  tokensInfo?: Record<string, unknown> | null
-  totalTokens?: number | null
-  cost?: number | null
-  errorCode?: string | null
-  errorMessage?: string | null
-  internalErrorDetails?: Record<string, unknown> | null
-  requestTime?: string | Date | null
-}): Promise<ModelResponseLogRecord> {
-  const safePath = input.path.trim()
-  if (!safePath) {
-    throw new Error("path is required")
+type ModelResponseLogCursor = {
+  requestTime: string
+  id: string
+}
+
+export class InvalidModelResponseLogCursorError extends Error {
+  constructor() {
+    super("Invalid request log cursor")
+    this.name = "InvalidModelResponseLogCursorError"
   }
-  const res = await query<{
-    id: string
-    intent_id: string | null
-    attempt_no: number | null
-    is_final: boolean | null
-    retry_reason: string | null
-    heartbeat_count: number | null
-    stream_end_reason: string | null
-    path: string
-    model_id: string | null
-    key_id: string | null
-    service_tier: string | null
-    status_code: number | null
-    ttfb_ms: number | null
-    latency_ms: number | null
-    tokens_info: Record<string, unknown> | null
-    total_tokens: number | null
-    cost: number | string | null
-    error_code: string | null
-    error_message: string | null
-    request_time: Date
-    created_at: Date
-    updated_at: Date
-  }>(
-    `
-      INSERT INTO model_response_logs (
-        intent_id,
-        attempt_no,
-        is_final,
-        retry_reason,
-        heartbeat_count,
-        stream_end_reason,
-        path,
-        model_id,
-        key_id,
-        service_tier,
-        status_code,
-        ttfb_ms,
-        latency_ms,
-        tokens_info,
-        total_tokens,
-        cost,
-        error_code,
-        error_message,
-        internal_error_details,
-        request_time
-      )
-      VALUES (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        $7,
-        $8,
-        $9::uuid,
-        $10,
-        $11,
-        $12,
-        $13,
-        $14::jsonb,
-        $15,
-        $16,
-        $17,
-        $18,
-        $19::jsonb,
-        COALESCE($20::timestamptz, now())
-      )
-      RETURNING
-        id, intent_id, attempt_no, is_final, retry_reason, heartbeat_count, stream_end_reason, path, model_id, key_id, service_tier,
-        status_code, ttfb_ms, latency_ms, tokens_info, total_tokens, cost,
-        error_code, error_message, request_time, created_at, updated_at
-    `,
-    [
-      input.intentId ?? null,
-      input.attemptNo ?? null,
-      input.isFinal ?? null,
-      input.retryReason ?? null,
-      input.heartbeatCount ?? null,
-      input.streamEndReason ?? null,
-      safePath,
-      input.modelId ?? null,
-      input.keyId ?? null,
-      input.serviceTier ?? null,
-      input.statusCode ?? null,
-      input.ttfbMs ?? null,
-      input.latencyMs ?? null,
-      input.tokensInfo ? JSON.stringify(input.tokensInfo) : null,
-      input.totalTokens ?? null,
-      input.cost ?? null,
-      input.errorCode ?? null,
-      input.errorMessage ?? null,
-      input.internalErrorDetails ?? null,
-      input.requestTime ?? null,
-    ],
-  )
-  if (!res.rows[0]) {
-    throw new Error("Failed to create model response log")
+}
+
+function encodeModelResponseLogCursor(row: ModelResponseLogRow): string {
+  return Buffer.from(
+    JSON.stringify({
+      requestTime: row.request_time.toISOString(),
+      id: row.id,
+    } satisfies ModelResponseLogCursor),
+  ).toString("base64url")
+}
+
+function decodeModelResponseLogCursor(value?: string | null): ModelResponseLogCursor | null {
+  const normalized = value?.trim() ?? ""
+  if (!normalized) return null
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(normalized, "base64url").toString("utf8"),
+    ) as Partial<ModelResponseLogCursor>
+    if (
+      typeof parsed.requestTime !== "string" ||
+      Number.isNaN(Date.parse(parsed.requestTime)) ||
+      typeof parsed.id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(parsed.id)
+    ) {
+      throw new InvalidModelResponseLogCursorError()
+    }
+    return { requestTime: parsed.requestTime, id: parsed.id }
+  } catch (error) {
+    if (error instanceof InvalidModelResponseLogCursorError) throw error
+    throw new InvalidModelResponseLogCursorError()
   }
-  return mapModelResponseLogRow(res.rows[0])
 }
 
-export async function hasSuccessfulFinalChargeLog(input: {
-  intentId: string
-  keyId: string
-  path: string
-}): Promise<boolean> {
-  const intentId = input.intentId.trim()
-  const keyId = input.keyId.trim()
-  const path = input.path.trim()
-  if (!intentId || !keyId || !path) return false
-  const res = await query<{ exists: boolean }>(
-    `
-      SELECT EXISTS (
-        SELECT 1
-        FROM model_response_logs
-        WHERE intent_id = $1
-          AND key_id = $2::uuid
-          AND path = $3
-          AND is_final = TRUE
-          AND status_code >= 200
-          AND status_code < 300
-          AND COALESCE(cost, 0) > 0
-      ) AS exists
-    `,
-    [intentId, keyId, path],
-  )
-  return Boolean(res.rows[0]?.exists)
-}
-
-export async function listModelResponseLogs(limit = 200): Promise<ModelResponseLogRecord[]> {
-  const safeLimit = Math.max(1, Math.min(1000, Math.floor(limit)))
-  const res = await query<{
-    id: string
-    intent_id: string | null
-    attempt_no: number | null
-    is_final: boolean | null
-    retry_reason: string | null
-    heartbeat_count: number | null
-    stream_end_reason: string | null
-    path: string
-    model_id: string | null
-    key_id: string | null
-    service_tier: string | null
-    status_code: number | null
-    ttfb_ms: number | null
-    latency_ms: number | null
-    tokens_info: Record<string, unknown> | null
-    total_tokens: number | null
-    cost: number | string | null
-    error_code: string | null
-    error_message: string | null
-    request_time: Date
-    created_at: Date
-    updated_at: Date
-  }>(
-    `
-      SELECT
-        id, intent_id, attempt_no, is_final, retry_reason, heartbeat_count, stream_end_reason, path, model_id, key_id, service_tier,
-        status_code, ttfb_ms, latency_ms, tokens_info, total_tokens, cost,
-        error_code, error_message, request_time, created_at, updated_at
-      FROM model_response_logs
-      ORDER BY request_time DESC, created_at DESC
-      LIMIT $1
-    `,
-    [safeLimit],
-  )
-  return res.rows.map(mapModelResponseLogRow)
-}
-
-export async function listModelResponseLogsPage(
-  page = 1,
-  pageSize = 50,
+async function listModelResponseLogsByCursor(
+  ownerUserId: string | null,
+  limit = 50,
+  cursor?: string | null,
   filters?: ModelResponseLogFilters,
 ): Promise<{
   items: ModelResponseLogRecord[]
-  total: number
-  page: number
-  pageSize: number
-  totalPages: number
+  nextCursor: string | null
+  hasMore: boolean
+  limit: number
 }> {
-  const safePage = Math.max(1, Math.floor(page))
-  const safePageSize = Math.max(1, Math.min(500, Math.floor(pageSize)))
-  const filterSql = buildModelResponseLogsFilterSql(filters)
-
-  const countRes = await query<{ count: string }>(
-    `
-      SELECT COUNT(*)::text AS count
-      FROM model_response_logs logs
-      LEFT JOIN api_keys keys ON keys.id = logs.key_id
-      ${filterSql.whereSql}
-    `,
-    filterSql.params,
-  )
-  const total = Number(countRes.rows[0]?.count ?? "0")
-  const totalPages = Math.max(1, Math.ceil(total / safePageSize))
-  const normalizedPage = Math.min(safePage, totalPages)
-  const normalizedOffset = (normalizedPage - 1) * safePageSize
-
-  const rowsRes = await query<{
-    id: string
-    intent_id: string | null
-    attempt_no: number | null
-    is_final: boolean | null
-    retry_reason: string | null
-    heartbeat_count: number | null
-    stream_end_reason: string | null
-    path: string
-    model_id: string | null
-    key_id: string | null
-    service_tier: string | null
-    status_code: number | null
-    ttfb_ms: number | null
-    latency_ms: number | null
-    tokens_info: Record<string, unknown> | null
-    total_tokens: number | null
-    cost: number | string | null
-    error_code: string | null
-    error_message: string | null
-    request_time: Date
-    created_at: Date
-    updated_at: Date
-  }>(
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)))
+  const decodedCursor = decodeModelResponseLogCursor(cursor)
+  const filterSql = buildModelResponseLogsFilterSql(filters, ownerUserId)
+  const params = [...filterSql.params]
+  let cursorSql = ""
+  if (decodedCursor) {
+    params.push(decodedCursor.requestTime, decodedCursor.id)
+    cursorSql = `${filterSql.whereSql ? "AND" : "WHERE"}
+      (logs.request_time, logs.id) < (
+        $${params.length - 1}::timestamptz,
+        $${params.length}::uuid
+      )`
+  }
+  params.push(safeLimit + 1)
+  const rowsRes = await query<ModelResponseLogRow>(
     `
       SELECT
-        logs.id, logs.intent_id, logs.attempt_no, logs.is_final, logs.retry_reason,
-        logs.heartbeat_count, logs.stream_end_reason, logs.path, logs.model_id, logs.key_id, logs.service_tier,
-        logs.status_code, logs.ttfb_ms, logs.latency_ms, logs.tokens_info, logs.total_tokens, logs.cost,
-        logs.error_code, logs.error_message, logs.request_time, logs.created_at, logs.updated_at
+        logs.id, logs.intent_id, logs.is_final, logs.stream_end_reason,
+        logs.path, logs.model_id, logs.key_id, logs.service_tier,
+        logs.status_code, logs.ttfb_ms, logs.latency_ms, logs.tokens_info,
+        logs.total_tokens, logs.cost, logs.error_code, logs.error_message,
+        logs.request_time, logs.created_at, logs.updated_at
       FROM model_response_logs logs
-      LEFT JOIN api_keys keys ON keys.id = logs.key_id
       ${filterSql.whereSql}
-      ORDER BY logs.request_time DESC, logs.created_at DESC
-      LIMIT $${filterSql.params.length + 1}
-      OFFSET $${filterSql.params.length + 2}
+      ${cursorSql}
+      ORDER BY logs.request_time DESC, logs.id DESC
+      LIMIT $${params.length}
     `,
-    [...filterSql.params, safePageSize, normalizedOffset],
+    params,
   )
-
+  const hasMore = rowsRes.rows.length > safeLimit
+  const rows = hasMore ? rowsRes.rows.slice(0, safeLimit) : rowsRes.rows
   return {
-    items: rowsRes.rows.map(mapModelResponseLogRow),
-    total,
-    page: normalizedPage,
-    pageSize: safePageSize,
-    totalPages,
+    items: rows.map(mapModelResponseLogRow),
+    nextCursor:
+      hasMore && rows.length > 0
+        ? encodeModelResponseLogCursor(rows[rows.length - 1]!)
+        : null,
+    hasMore,
+    limit: safeLimit,
   }
 }
 
-export async function listModelResponseLogsPageByOwnerUserId(
-  ownerUserId: string,
-  page = 1,
-  pageSize = 50,
+export async function listModelResponseLogsCursor(
+  limit = 50,
+  cursor?: string | null,
   filters?: ModelResponseLogFilters,
-): Promise<{
-  items: ModelResponseLogRecord[]
-  total: number
-  page: number
-  pageSize: number
-  totalPages: number
-}> {
+) {
+  return listModelResponseLogsByCursor(null, limit, cursor, filters)
+}
+
+export async function listModelResponseLogsCursorByOwnerUserId(
+  ownerUserId: string,
+  limit = 50,
+  cursor?: string | null,
+  filters?: ModelResponseLogFilters,
+) {
   const ownerId = ownerUserId.trim()
   if (!ownerId) {
-    return { items: [], total: 0, page: 1, pageSize: 50, totalPages: 1 }
+    return { items: [], nextCursor: null, hasMore: false, limit: 50 }
   }
-  const safePage = Math.max(1, Math.floor(page))
-  const safePageSize = Math.max(1, Math.min(500, Math.floor(pageSize)))
-  const filterSql = buildModelResponseLogsFilterSql(filters, ownerId)
-
-  const countRes = await query<{ count: string }>(
-    `
-      SELECT COUNT(*)::text AS count
-      FROM model_response_logs logs
-      JOIN api_keys keys ON keys.id = logs.key_id
-      ${filterSql.whereSql}
-    `,
-    filterSql.params,
-  )
-  const total = Number(countRes.rows[0]?.count ?? "0")
-  const totalPages = Math.max(1, Math.ceil(total / safePageSize))
-  const normalizedPage = Math.min(safePage, totalPages)
-  const normalizedOffset = (normalizedPage - 1) * safePageSize
-
-  const rowsRes = await query<{
-    id: string
-    intent_id: string | null
-    attempt_no: number | null
-    is_final: boolean | null
-    retry_reason: string | null
-    heartbeat_count: number | null
-    stream_end_reason: string | null
-    path: string
-    model_id: string | null
-    key_id: string | null
-    service_tier: string | null
-    status_code: number | null
-    ttfb_ms: number | null
-    latency_ms: number | null
-    tokens_info: Record<string, unknown> | null
-    total_tokens: number | null
-    cost: number | string | null
-    error_code: string | null
-    error_message: string | null
-    request_time: Date
-    created_at: Date
-    updated_at: Date
-  }>(
-    `
-      SELECT
-        logs.id, logs.intent_id, logs.attempt_no, logs.is_final, logs.retry_reason,
-        logs.heartbeat_count, logs.stream_end_reason, logs.path, logs.model_id, logs.key_id, logs.service_tier, logs.status_code, logs.ttfb_ms,
-        logs.latency_ms, logs.tokens_info, logs.total_tokens, logs.cost,
-        logs.error_code, logs.error_message, logs.request_time, logs.created_at, logs.updated_at
-      FROM model_response_logs logs
-      JOIN api_keys keys ON keys.id = logs.key_id
-      ${filterSql.whereSql}
-      ORDER BY logs.request_time DESC, logs.created_at DESC
-      LIMIT $${filterSql.params.length + 1}
-      OFFSET $${filterSql.params.length + 2}
-    `,
-    [...filterSql.params, safePageSize, normalizedOffset],
-  )
-
-  return {
-    items: rowsRes.rows.map(mapModelResponseLogRow),
-    total,
-    page: normalizedPage,
-    pageSize: safePageSize,
-    totalPages,
-  }
-}
-
-export async function listModelResponseLogsByKeyIdPage(
-  keyId: string,
-  page = 1,
-  pageSize = 50,
-): Promise<{
-  items: ModelResponseLogRecord[]
-  total: number
-  page: number
-  pageSize: number
-  totalPages: number
-}> {
-  const safePage = Math.max(1, Math.floor(page))
-  const safePageSize = Math.max(1, Math.min(500, Math.floor(pageSize)))
-
-  const countRes = await query<{ count: string }>(
-    `
-      SELECT COUNT(*)::text AS count
-      FROM model_response_logs
-      WHERE key_id = $1::uuid
-    `,
-    [keyId],
-  )
-  const total = Number(countRes.rows[0]?.count ?? "0")
-  const totalPages = Math.max(1, Math.ceil(total / safePageSize))
-  const normalizedPage = Math.min(safePage, totalPages)
-  const normalizedOffset = (normalizedPage - 1) * safePageSize
-
-  const rowsRes = await query<{
-    id: string
-    intent_id: string | null
-    attempt_no: number | null
-    is_final: boolean | null
-    retry_reason: string | null
-    heartbeat_count: number | null
-    stream_end_reason: string | null
-    path: string
-    model_id: string | null
-    key_id: string | null
-    service_tier: string | null
-    status_code: number | null
-    ttfb_ms: number | null
-    latency_ms: number | null
-    tokens_info: Record<string, unknown> | null
-    total_tokens: number | null
-    cost: number | string | null
-    error_code: string | null
-    error_message: string | null
-    request_time: Date
-    created_at: Date
-    updated_at: Date
-  }>(
-    `
-      SELECT
-        id, intent_id, attempt_no, is_final, retry_reason, heartbeat_count, stream_end_reason, path, model_id, key_id, service_tier,
-        status_code, ttfb_ms, latency_ms, tokens_info, total_tokens, cost,
-        error_code, error_message, request_time, created_at, updated_at
-      FROM model_response_logs
-      WHERE key_id = $1::uuid
-      ORDER BY request_time DESC, created_at DESC
-      LIMIT $2
-      OFFSET $3
-    `,
-    [keyId, safePageSize, normalizedOffset],
-  )
-
-  return {
-    items: rowsRes.rows.map(mapModelResponseLogRow),
-    total,
-    page: normalizedPage,
-    pageSize: safePageSize,
-    totalPages,
-  }
+  return listModelResponseLogsByCursor(ownerId, limit, cursor, filters)
 }

@@ -26,11 +26,28 @@ export async function runDatabaseSelfCheck(): Promise<DatabaseSelfCheckReport> {
         SELECT EXISTS (
           SELECT 1
           FROM pg_constraint c
-          JOIN pg_class t ON t.oid = c.conrelid
-          JOIN pg_namespace n ON n.oid = t.relnamespace
-          WHERE n.nspname = current_schema()
-            AND t.relname = 'api_keys'
-            AND c.conname = 'fk_api_keys_owner_user'
+          JOIN pg_class source_table ON source_table.oid = c.conrelid
+          JOIN pg_namespace source_schema ON source_schema.oid = source_table.relnamespace
+          JOIN pg_class target_table ON target_table.oid = c.confrelid
+          JOIN pg_namespace target_schema ON target_schema.oid = target_table.relnamespace
+          JOIN LATERAL unnest(c.conkey) WITH ORDINALITY
+            AS source_key(attnum, position) ON TRUE
+          JOIN LATERAL unnest(c.confkey) WITH ORDINALITY
+            AS target_key(attnum, position)
+            ON target_key.position = source_key.position
+          JOIN pg_attribute source_column
+            ON source_column.attrelid = c.conrelid
+            AND source_column.attnum = source_key.attnum
+          JOIN pg_attribute target_column
+            ON target_column.attrelid = c.confrelid
+            AND target_column.attnum = target_key.attnum
+          WHERE c.contype = 'f'
+            AND source_schema.nspname = current_schema()
+            AND target_schema.nspname = current_schema()
+            AND source_table.relname = 'api_keys'
+            AND source_column.attname = 'owner_user_id'
+            AND target_table.relname = 'portal_users'
+            AND target_column.attname = 'id'
         ) AS exists
       `,
     )
@@ -38,7 +55,7 @@ export async function runDatabaseSelfCheck(): Promise<DatabaseSelfCheckReport> {
       pushIssue({
         id: "api_keys_owner_fk_missing",
         level: "error",
-        message: "Missing foreign key fk_api_keys_owner_user on api_keys.owner_user_id",
+        message: "Missing foreign key from api_keys.owner_user_id to portal_users.id",
       })
     }
   } catch (error) {

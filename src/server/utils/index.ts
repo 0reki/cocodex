@@ -5,8 +5,10 @@ export {
   resolvePriorityServiceTierForBilling,
 } from "./openai/service-tier.ts";
 export {
+  DEFAULT_MODEL_PRICING_USD,
   loadModelPricingFromEnv,
 } from "./openai/model-pricing.ts";
+export type { ModelPricingRecord } from "./openai/model-pricing.ts";
 export {
   parseContentEncodingHeader,
   readRequestBodyBuffer,

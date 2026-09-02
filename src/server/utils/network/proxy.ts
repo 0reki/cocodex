@@ -5,6 +5,7 @@ const HOP_BY_HOP_HEADERS = new Set([
   "connection",
   "host",
   "keep-alive",
+  "proxy-connection",
   "proxy-authenticate",
   "proxy-authorization",
   "te",
@@ -13,6 +14,16 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
 ]);
 
+const PROXY_CONTEXT_HEADERS = new Set([
+  "cookie",
+  "forwarded",
+  "origin",
+  "via",
+  "x-real-ip",
+]);
+
+const PROXY_CONTEXT_HEADER_PREFIXES = ["cf-", "x-forwarded-"];
+
 export function getForwardRequestHeaders(headers: IncomingHttpHeaders) {
   const forwarded = new Headers();
   for (const [name, value] of Object.entries(headers)) {
@@ -20,6 +31,10 @@ export function getForwardRequestHeaders(headers: IncomingHttpHeaders) {
     if (
       value === undefined ||
       HOP_BY_HOP_HEADERS.has(normalized) ||
+      PROXY_CONTEXT_HEADERS.has(normalized) ||
+      PROXY_CONTEXT_HEADER_PREFIXES.some((prefix) =>
+        normalized.startsWith(prefix),
+      ) ||
       normalized.startsWith("sec-websocket-")
     ) {
       continue;

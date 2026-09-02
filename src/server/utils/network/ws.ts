@@ -7,6 +7,9 @@ export type WsRawData = string | Buffer | ArrayBuffer | Buffer[];
 
 export type WsSocket = {
   readyState: number;
+  bufferedAmount: number;
+  pause: () => void;
+  resume: () => void;
   send: (
     data: WsRawData,
     options?: { binary?: boolean },
@@ -45,6 +48,10 @@ export type WsServer = {
     head: Buffer,
     callback: (socket: WsSocket, request: IncomingMessage) => void,
   ) => void;
+  on: (
+    event: "headers",
+    listener: (headers: string[], request: IncomingMessage) => void,
+  ) => WsServer;
 };
 
 type WsSocketCtorType = {

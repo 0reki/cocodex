@@ -4,7 +4,6 @@ export function prepareResponsesPayload(args: {
   requestBody: Record<string, unknown>;
   ownerUserId: string | null;
   apiKeyId: string | null;
-  compact?: boolean;
 }) {
   const payload = { ...args.requestBody };
   if (
@@ -17,8 +16,6 @@ export function prepareResponsesPayload(args: {
   delete payload.forkedFromIdentifier;
   delete payload.forked_from_identifier;
   delete payload.prompt_cache_retention;
-  if (args.compact) delete payload.stream;
-
   if (
     typeof payload.prompt_cache_key !== "string" ||
     !payload.prompt_cache_key.trim()

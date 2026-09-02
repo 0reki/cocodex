@@ -1,26 +1,10 @@
+import type { EnqueueResponseSettlementInput } from "./response-settlement-services.ts";
+
 export function createUpstreamErrorServices(deps: {
   isRecord: (value: unknown) => value is Record<string, unknown>;
-  resolveOpenAIUpstreamAccountId: (account: {
-    accountId: string | null;
-    userId: string | null;
-  }) => string | null;
-  createModelResponseLog: (args: {
-    intentId?: string | null;
-    attemptNo?: number | null;
-    isFinal?: boolean | null;
-    retryReason?: string | null;
-    heartbeatCount?: number | null;
-    path: string;
-    modelId?: string | null;
-    keyId?: string | null;
-    statusCode?: number | null;
-    latencyMs?: number | null;
-    errorCode?: string | null;
-    errorType?: string | null;
-    errorMessage?: string | null;
-    internalErrorDetails?: Record<string, unknown> | null;
-    requestTime?: string | Date | null;
-  }) => Promise<unknown>;
+  enqueueResponseSettlement: (
+    input: EnqueueResponseSettlementInput,
+  ) => void;
 }) {
   function extractUpstreamStatusCode(error: unknown): number | null {
     if (deps.isRecord(error) && typeof error.status === "number") {
@@ -148,57 +132,6 @@ export function createUpstreamErrorServices(deps: {
     };
   }
 
-  function buildInternalUpstreamErrorDetails(args: {
-    path: string;
-    model: string | null;
-    status: number | null;
-    sourceAccount: {
-      id: string;
-      email: string;
-      accountId?: string | null;
-      userId?: string | null;
-    } | null;
-    trace: {
-      sourceAccountId?: string | null;
-      sourceAccountEmail?: string | null;
-      selectedUpstreamAccountId?: string | null;
-    } | null;
-    errorInfo: ReturnType<typeof extractErrorInfo>;
-  }): Record<string, unknown> | null {
-    const sourceAccount = args.sourceAccount;
-    const trace = args.trace;
-    const payload = args.errorInfo.errorPayload;
-    const details: Record<string, unknown> = {
-      path: args.path,
-      model: args.model,
-      status: args.status,
-      sourceAccountId: trace?.sourceAccountId ?? sourceAccount?.id ?? null,
-      sourceAccountEmail:
-        trace?.sourceAccountEmail ?? sourceAccount?.email ?? null,
-      selectedUpstreamAccountId:
-        trace?.selectedUpstreamAccountId ??
-        (sourceAccount
-          ? deps.resolveOpenAIUpstreamAccountId({
-              accountId: sourceAccount.accountId ?? null,
-              userId: sourceAccount.userId ?? null,
-            })
-          : null),
-      publicErrorMessage: args.errorInfo.message,
-      upstreamErrorCode: typeof payload?.code === "string" ? payload.code : null,
-      upstreamErrorType: typeof payload?.type === "string" ? payload.type : null,
-      upstreamErrorMessage:
-        typeof payload?.message === "string"
-          ? payload.message
-          : typeof payload?.detail === "string"
-            ? payload.detail
-            : null,
-      upstreamErrorPayload: payload,
-      upstreamResponseText: args.errorInfo.rawResponseText?.slice(0, 4_000) ?? null,
-    };
-
-    return Object.values(details).some((value) => value !== null) ? details : null;
-  }
-
   function buildPassthroughUpstreamError(args: {
     status: number | null;
     errorPayload: Record<string, unknown> | null;
@@ -265,12 +198,6 @@ export function createUpstreamErrorServices(deps: {
     return false;
   }
 
-  function createAbortError() {
-    const error = new Error("Aborted");
-    error.name = "AbortError";
-    return error;
-  }
-
   function shouldPersistModelResponseLog(requestPath: string): boolean {
     return !/^\/api(?:\/|$)/i.test(requestPath);
   }
@@ -278,22 +205,21 @@ export function createUpstreamErrorServices(deps: {
   async function persistQuotaExceededLog(args: {
     requestPath: string;
     intentId: string;
-    attemptNo: number;
-    retryReason: string | null;
     model: string | null;
     keyId: string | null;
+    ownerUserId?: string | null;
     startedAtMs: number;
   }) {
     if (!shouldPersistModelResponseLog(args.requestPath)) return;
     try {
-      await deps.createModelResponseLog({
+      deps.enqueueResponseSettlement({
+        settlementId: args.intentId,
         intentId: args.intentId,
-        attemptNo: args.attemptNo,
+        ownerUserId: args.ownerUserId,
+        apiKeyId: args.keyId,
         isFinal: false,
-        retryReason: args.retryReason,
         path: args.requestPath,
         modelId: args.model,
-        keyId: args.keyId,
         statusCode: 429,
         latencyMs: 0,
         errorCode: "insufficient_quota",
@@ -312,10 +238,9 @@ export function createUpstreamErrorServices(deps: {
   async function persistShortCircuitErrorLog(args: {
     requestPath: string;
     intentId: string;
-    attemptNo: number;
-    retryReason: string | null;
     model: string | null;
     keyId: string | null;
+    ownerUserId?: string | null;
     startedAtMs: number;
     statusCode: number;
     errorCode: string;
@@ -323,14 +248,14 @@ export function createUpstreamErrorServices(deps: {
   }) {
     if (!shouldPersistModelResponseLog(args.requestPath)) return;
     try {
-      await deps.createModelResponseLog({
+      deps.enqueueResponseSettlement({
+        settlementId: args.intentId,
         intentId: args.intentId,
-        attemptNo: args.attemptNo,
+        ownerUserId: args.ownerUserId,
+        apiKeyId: args.keyId,
         isFinal: false,
-        retryReason: args.retryReason,
         path: args.requestPath,
         modelId: args.model,
-        keyId: args.keyId,
         statusCode: args.statusCode,
         latencyMs: 0,
         errorCode: args.errorCode,
@@ -353,20 +278,13 @@ export function createUpstreamErrorServices(deps: {
         : typeof error === "string"
           ? error
           : "";
-    const normalized = message.toLowerCase();
-    return (
-      /\bHTTP\s+401\b/i.test(message) &&
-      (normalized.includes("token_invalidated") ||
-        normalized.includes("token_revoked"))
-    );
+    return /\bHTTP\s+401\b/i.test(message);
   }
 
   return {
     extractErrorInfo,
-    buildInternalUpstreamErrorDetails,
     buildPassthroughUpstreamError,
     isAbortError,
-    createAbortError,
     shouldPersistModelResponseLog,
     persistQuotaExceededLog,
     persistShortCircuitErrorLog,

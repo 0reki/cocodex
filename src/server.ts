@@ -5,10 +5,9 @@ import express, {
   type Response,
 } from "express";
 import crypto from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage } from "node:http";
 
 import {
-  createModelResponseLog,
   createApiKey,
   deleteApiKeyById,
   disableOpenAIAccountByEmail,
@@ -17,18 +16,27 @@ import {
   deleteOpenAIAccountsByEmails,
   activateOpenAIAccountByEmail,
   ensureDatabaseSchema,
-  hasSuccessfulFinalChargeLog,
-  incrementApiKeyUsed,
-  adjustPortalUserBalance,
+  flushResponseSettlements,
+  createPortalUser,
   getPortalUserSpendAllowance,
+  getPortalUserById,
+  getApiKeyByToken,
+  getModelHourlyStatsSeries,
+  getPortalUserModelHourlyStatsSeries,
   getOpenAIAccountByEmail,
   getActiveOpenAIAccount,
   listOpenAIAccountsPage,
   listApiKeys,
+  listModelResponseLogsCursor,
+  listModelResponseLogsCursorByOwnerUserId,
+  listPortalUsers,
   normalizeOpenAIAccountStatus,
   runDatabaseSelfCheck,
+  setPortalUserEnabledById,
   updateApiKeyById,
-  updateOpenAIAccountAccessTokenById,
+  updateOpenAIAccountTokensById,
+  updatePortalUsernameById,
+  updatePortalUserPasswordById,
   upsertOpenAIAccount,
 } from "./database/index.ts";
 import {
@@ -61,7 +69,10 @@ import {
   registerAdminRoutes,
   registerPortalAuthRoutes,
   registerPublicOpenAIRoutes,
+  registerImageRoutes,
+  registerRequestLogRoutes,
   registerResponsesRoutes,
+  registerUserRoutes,
   ResponsesWebSocketUpgradeError,
   prepareResponsesWebSocketProxyContext,
   setupResponsesWebSocketProxy,
@@ -83,21 +94,33 @@ loadBackendEnv();
 const {
   DEFAULT_OPENAI_API_USER_AGENT,
   DEFAULT_OPENAI_API_CLIENT_VERSION,
+  ACTIVE_SOURCE_ACCOUNT_CACHE_TTL_MS,
   API_KEY_AUTH_LRU_MAX,
   API_KEY_AUTH_LRU_TTL_MS,
   BILLING_ALLOWANCE_LRU_MAX,
   BILLING_ALLOWANCE_LRU_TTL_MS,
+  BILLING_OVERDRAFT_LIMIT_USD,
+  BILLING_INFLIGHT_RESERVE_USD,
   PRICE_AFTER_272K_INPUT_THRESHOLD_TOKENS,
-  apiKeysCache,
+  RESPONSE_SETTLEMENT_BATCH_SIZE,
+  RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS,
+  RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
+  RESPONSE_SETTLEMENT_QUEUE_MAX,
+  RESPONSE_SETTLEMENT_RETRY_MAX_MS,
   apiKeyAuthLruCache,
+  apiKeyAuthTokenById,
+  apiKeyAuthLoadingPromises,
+  apiKeyAuthTokenVersions,
+  apiKeyPendingCharges,
   billingAllowanceLruCache,
   billingAllowanceLoadingPromises,
+  billingPendingChargesByOwnerId,
+  billingReservationById,
+  billingReservedAmountsByOwnerId,
 } = createServerRuntimeState();
 const modelPricing = loadModelPricingFromEnv();
 
 const {
-  setApiKeysCache,
-  ensureApiKeysCacheLoaded,
   createRequestAbortContext,
   getOpenAIApiRuntimeConfig,
   authenticatePortalAccessTokenWithReason,
@@ -105,71 +128,115 @@ const {
   authenticateApiKeyWithReason,
   getApiKeyAuthErrorDetail,
   getAccessTokenAuthErrorDetail,
-  getPortalSessionFromLocals,
+  getPortalPrincipalFromLocals,
+  cacheApiKey,
+  invalidateApiKeyAuthCacheByToken,
+  invalidateApiKeyAuthCacheByOwnerUserId,
   isApiKeyQuotaExceeded,
   ensureUserBillingAllowanceOrNull,
-  applyUserBillingAllowanceChargeCache,
+  isUserBillingAllowanceExceeded,
   isApiKeyBoundToUser,
-  applyApiKeyCacheUpdate,
   getActiveSourceAccount,
+  invalidateActiveSourceAccount,
   extractErrorInfo,
-  buildInternalUpstreamErrorDetails,
   buildPassthroughUpstreamError,
   isAbortError,
   shouldPersistModelResponseLog,
   persistQuotaExceededLog,
   persistShortCircuitErrorLog,
+  enqueueResponseSettlement,
+  tryReserveResponseRequest,
+  cancelResponseRequestReservation,
+  getResponseSettlementQueueHealth,
+  flushAllResponseSettlements,
+  stopResponseSettlementServices,
   extractResponseUsage,
   estimateUsageCost,
+  resolveUsagePricingModelId,
   buildOpenAIModelsList,
-  chargeCompletedResponseUsage,
   postCodexResponsesWithTokenRefresh,
-  postCodexResponsesCompactWithTokenRefresh,
+  postCodexImageWithTokenRefresh,
   connectResponsesWebSocketProxyUpstream,
+  getCodexDailyWorkspaceUsageWithTokenRefresh,
   getCodexModelsWithTokenRefresh,
+  getCodexUsageWithTokenRefresh,
 } = bootstrapServerServices({
   isRecord,
   lruGet,
   lruSet,
   modelPricing,
   getPortalUserSpendAllowance,
+  getPortalUserById,
+  getApiKeyByToken,
   getActiveOpenAIAccount,
-  createModelResponseLog,
-  incrementApiKeyUsed,
-  adjustPortalUserBalance,
-  listApiKeys,
+  flushResponseSettlements,
   ensureDatabaseSchema,
-  updateOpenAIAccountAccessTokenById,
-  disableOpenAIAccountByEmail,
-  applyServiceTierBillingMultiplier,
+  updateOpenAIAccountTokensById,
   randomUUID: () => crypto.randomUUID(),
   resolveOpenAIUpstreamAccountId,
   DEFAULT_OPENAI_API_USER_AGENT,
   DEFAULT_OPENAI_API_CLIENT_VERSION,
+  ACTIVE_SOURCE_ACCOUNT_CACHE_TTL_MS,
   API_KEY_AUTH_LRU_MAX,
   API_KEY_AUTH_LRU_TTL_MS,
   BILLING_ALLOWANCE_LRU_MAX,
   BILLING_ALLOWANCE_LRU_TTL_MS,
+  BILLING_OVERDRAFT_LIMIT_USD,
+  BILLING_INFLIGHT_RESERVE_USD,
   PRICE_AFTER_272K_INPUT_THRESHOLD_TOKENS,
-  apiKeysCache,
+  RESPONSE_SETTLEMENT_BATCH_SIZE,
+  RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS,
+  RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
+  RESPONSE_SETTLEMENT_QUEUE_MAX,
+  RESPONSE_SETTLEMENT_RETRY_MAX_MS,
   apiKeyAuthLruCache,
+  apiKeyAuthTokenById,
+  apiKeyAuthLoadingPromises,
+  apiKeyAuthTokenVersions,
+  apiKeyPendingCharges,
   billingAllowanceLruCache,
   billingAllowanceLoadingPromises,
+  billingPendingChargesByOwnerId,
+  billingReservationById,
+  billingReservedAmountsByOwnerId,
 });
 
 const app = express();
 const port = Number(process.env.PORT ?? 53141);
 const host = process.env.HOST?.trim() || "localhost";
 const JSON_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
+const IMAGE_JSON_BODY_LIMIT_BYTES = 128 * 1024 * 1024;
 const defaultJsonParser = express.json({ limit: JSON_BODY_LIMIT_BYTES });
+const imageJsonParser = express.json({ limit: IMAGE_JSON_BODY_LIMIT_BYTES });
 const responsesWebSocketServer = new WsServerCtor({ noServer: true });
+const responsesWebSocketUpgradeHeaders = new WeakMap<
+  IncomingMessage,
+  Record<string, string>
+>();
+responsesWebSocketServer.on("headers", (headers, request) => {
+  const upstreamHeaders = responsesWebSocketUpgradeHeaders.get(request);
+  responsesWebSocketUpgradeHeaders.delete(request);
+  if (!upstreamHeaders) return;
+  for (const [name, value] of Object.entries(upstreamHeaders)) {
+    if (!value.includes("\r") && !value.includes("\n")) {
+      headers.push(`${name}: ${value}`);
+    }
+  }
+});
+
+const isImageApiPath = (path: string) =>
+  path === "/v1/images/generations" || path === "/v1/images/edits";
 
 app.use(cors());
 app.use((req, res, next) => {
   const encodings = parseContentEncodingHeader(req.headers["content-encoding"]);
   const isZstdOnly = encodings.length === 1 && encodings[0] === "zstd";
   if (!isZstdOnly) {
-    defaultJsonParser(req, res, next);
+    (isImageApiPath(req.path) ? imageJsonParser : defaultJsonParser)(
+      req,
+      res,
+      next,
+    );
     return;
   }
 
@@ -189,9 +256,12 @@ app.use((req, res, next) => {
   }
 
   void (async () => {
-    const compressed = await readRequestBodyBuffer(req, JSON_BODY_LIMIT_BYTES);
+    const bodyLimitBytes = isImageApiPath(req.path)
+      ? IMAGE_JSON_BODY_LIMIT_BYTES
+      : JSON_BODY_LIMIT_BYTES;
+    const compressed = await readRequestBodyBuffer(req, bodyLimitBytes);
     const decompressed = await zstdDecompressBuffer(compressed);
-    if (decompressed.byteLength > JSON_BODY_LIMIT_BYTES) {
+    if (decompressed.byteLength > bodyLimitBytes) {
       res.status(413).json({
         error: {
           message: "Request payload too large",
@@ -303,9 +373,9 @@ app.use(async (req, res, next) => {
       return;
     }
 
-    const { session, reason } =
+    const { principal, reason } =
       await authenticatePortalAccessTokenWithReason(req);
-    if (!session) {
+    if (!principal) {
       const authError = getAccessTokenAuthErrorDetail(reason);
       res.status(authError.status).json({
         error: {
@@ -317,12 +387,14 @@ app.use(async (req, res, next) => {
       });
       return;
     }
-    res.locals.portalSession = session;
+    res.locals.portalPrincipal = principal;
     const isApiPath = req.path.startsWith("/api/");
     const nonAdminAllowed =
       req.path === "/api/api-keys" ||
-      req.path.startsWith("/api/api-keys/");
-    if (isApiPath && !nonAdminAllowed && session.role !== "admin") {
+      req.path.startsWith("/api/api-keys/") ||
+      req.path === "/api/request-logs" ||
+      req.path.startsWith("/api/request-logs/");
+    if (isApiPath && !nonAdminAllowed && principal.role !== "admin") {
       res.status(403).json({
         error: {
           message: "Forbidden",
@@ -355,6 +427,7 @@ registerPublicOpenAIRoutes(app, {
   buildOpenAIModelsList,
   extractErrorInfo,
   buildPassthroughUpstreamError,
+  getResponseSettlementQueueHealth,
 });
 
 registerResponsesRoutes(app, {
@@ -367,34 +440,56 @@ registerResponsesRoutes(app, {
   persistQuotaExceededLog,
   isApiKeyBoundToUser,
   ensureUserBillingAllowanceOrNull,
+  tryReserveResponseRequest,
   getActiveSourceAccount,
   getOpenAIApiRuntimeConfig,
   resolveOpenAIUpstreamAccountId,
   postCodexResponsesWithTokenRefresh,
-  postCodexResponsesCompactWithTokenRefresh,
   extractErrorInfo,
   isAbortError,
-  buildInternalUpstreamErrorDetails,
   buildPassthroughUpstreamError,
   shouldPersistModelResponseLog,
   extractResponseUsage,
   applyServiceTierBillingMultiplier,
   estimateUsageCost,
-  hasSuccessfulFinalChargeLog,
-  incrementApiKeyUsed,
-  applyApiKeyCacheUpdate,
-  adjustPortalUserBalance,
-  applyUserBillingAllowanceChargeCache,
-  createModelResponseLog,
+  resolveUsagePricingModelId,
+  enqueueResponseSettlement,
+  cancelResponseRequestReservation,
+});
+
+registerImageRoutes(app, {
+  createRequestAbortContext,
+  authenticateApiKeyWithReason,
+  getApiKeyAuthErrorDetail,
+  persistShortCircuitErrorLog,
+  isApiKeyQuotaExceeded,
+  persistQuotaExceededLog,
+  isApiKeyBoundToUser,
+  ensureUserBillingAllowanceOrNull,
+  tryReserveResponseRequest,
+  getActiveSourceAccount,
+  getOpenAIApiRuntimeConfig,
+  resolveOpenAIUpstreamAccountId,
+  postCodexImageWithTokenRefresh,
+  extractErrorInfo,
+  isAbortError,
+  buildPassthroughUpstreamError,
+  shouldPersistModelResponseLog,
+  extractResponseUsage,
+  applyServiceTierBillingMultiplier,
+  estimateUsageCost,
+  enqueueResponseSettlement,
+  cancelResponseRequestReservation,
 });
 
 registerAdminRoutes(app, {
   listOpenAIAccountsPage,
-  ensureApiKeysCacheLoaded,
-  getPortalSessionFromLocals,
-  apiKeysCache,
+  getPortalPrincipalFromLocals,
+  listApiKeys,
+  cacheApiKey,
+  invalidateApiKeyAuthCacheByToken,
+  invalidateActiveSourceAccount,
   generateApiKeyValue,
-  setApiKeysCache,
   createApiKey,
   deleteApiKeyById,
   updateApiKeyById,
@@ -408,11 +503,32 @@ registerAdminRoutes(app, {
   upsertOpenAIAccount,
 });
 
+registerUserRoutes(app, {
+  getPortalPrincipalFromLocals,
+  invalidateApiKeyAuthCacheByOwnerUserId,
+  listPortalUsers,
+  createPortalUser,
+  updatePortalUsernameById,
+  updatePortalUserPasswordById,
+  setPortalUserEnabledById,
+});
+
+registerRequestLogRoutes(app, {
+  getPortalPrincipalFromLocals,
+  listModelResponseLogsCursor,
+  listModelResponseLogsCursorByOwnerUserId,
+  getModelHourlyStatsSeries,
+  getPortalUserModelHourlyStatsSeries,
+});
+
 registerAccountMaintenanceRoutes(app, {
   getOpenAIApiRuntimeConfig,
+  getCodexDailyWorkspaceUsageWithTokenRefresh,
+  getCodexUsageWithTokenRefresh,
   getOpenAIAccountByEmail,
   postCodexResponsesWithTokenRefresh,
   extractCodexResultFromSse,
+  invalidateActiveSourceAccount,
 });
 
 app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
@@ -497,6 +613,7 @@ httpServer.on("upgrade", (request, socket, head) => {
           isApiKeyQuotaExceeded,
           isApiKeyBoundToUser,
           ensureUserBillingAllowanceOrNull,
+          isUserBillingAllowanceExceeded,
           getActiveSourceAccount,
           resolveOpenAIUpstreamAccountId,
           getOpenAIApiRuntimeConfig,
@@ -537,20 +654,27 @@ httpServer.on("upgrade", (request, socket, head) => {
         }
       };
       socket.once("close", releaseOnUpgradeSocketClose);
+      responsesWebSocketUpgradeHeaders.set(
+        request,
+        context.upstreamResponseHeaders,
+      );
       responsesWebSocketServer.handleUpgrade(request, socket, head, (ws) => {
         upgradeHandled = true;
+        responsesWebSocketUpgradeHeaders.delete(request);
         socket.off("close", releaseOnUpgradeSocketClose);
         setupResponsesWebSocketProxy(
           {
             shouldPersistModelResponseLog,
-            createModelResponseLog,
+            enqueueResponseSettlement,
+            tryReserveResponseRequest,
+            cancelResponseRequestReservation,
             extractResponseUsage,
             applyServiceTierBillingMultiplier,
             estimateUsageCost,
+            resolveUsagePricingModelId,
             normalizeWsCloseCode,
             normalizeWsCloseReason,
             resolvePriorityServiceTierForBilling,
-            chargeCompletedResponseUsage,
             sendWsErrorEvent,
             wsRawDataToText,
             parseJsonRecordText,
@@ -566,6 +690,7 @@ httpServer.on("upgrade", (request, socket, head) => {
         );
       });
     } catch (error) {
+      responsesWebSocketUpgradeHeaders.delete(request);
       if (
         context.upstreamSocket.readyState === WS_READY_STATE_OPEN ||
         context.upstreamSocket.readyState === WS_READY_STATE_CONNECTING
@@ -610,9 +735,33 @@ httpServer.listen(port, host, async () => {
     } else {
       console.log("[backend] database self-check passed");
     }
-    await ensureApiKeysCacheLoaded(true);
   } catch (error) {
     console.error("[backend] schema init failed:", error);
   }
   console.log(`[backend] listening at http://${host}:${port}`);
 });
+
+let shutdownStarted = false;
+async function shutdown(signal: NodeJS.Signals) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  console.log(`[backend] received ${signal}, flushing pending settlements`);
+  let closePromise: Promise<void> | null = null;
+  if (httpServer.listening) {
+    closePromise = new Promise<void>((resolve) =>
+      httpServer.close(() => resolve()),
+    );
+  }
+  await flushAllResponseSettlements();
+  await closePromise;
+  await stopResponseSettlementServices();
+}
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.once(signal, () => {
+    void shutdown(signal).catch((error) => {
+      console.error("[backend] graceful shutdown failed:", error);
+      process.exitCode = 1;
+    });
+  });
+}

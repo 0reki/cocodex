@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import type { Express, Request, Response } from "express";
 import type {
   activateOpenAIAccountByEmail,
@@ -9,21 +8,26 @@ import type {
   disableOpenAIAccountByEmail,
   disableOpenAIAccountsByEmails,
   getOpenAIAccountByEmail,
+  listApiKeys,
   listOpenAIAccountsPage,
   normalizeOpenAIAccountStatus,
+  OpenAIAccountRecord,
   updateApiKeyById,
   upsertOpenAIAccount,
 } from "../../../database/index.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
-import type { ApiKeysCacheState } from "../../bootstrap/types.ts";
 import type { generateApiKeyValue } from "../../utils/index.ts";
+import { formatUsdAmount, parseUsdAmount } from "../../../shared/usd.ts";
 
 type AdminRouteDependencies = Pick<
   ServerServices,
-  "ensureApiKeysCacheLoaded" | "getPortalSessionFromLocals" | "setApiKeysCache"
+  | "getPortalPrincipalFromLocals"
+  | "cacheApiKey"
+  | "invalidateApiKeyAuthCacheByToken"
+  | "invalidateActiveSourceAccount"
 > & {
   listOpenAIAccountsPage: typeof listOpenAIAccountsPage;
-  apiKeysCache: ApiKeysCacheState;
+  listApiKeys: typeof listApiKeys;
   generateApiKeyValue: typeof generateApiKeyValue;
   createApiKey: typeof createApiKey;
   deleteApiKeyById: typeof deleteApiKeyById;
@@ -38,17 +42,37 @@ type AdminRouteDependencies = Pick<
   upsertOpenAIAccount: typeof upsertOpenAIAccount;
 };
 
+function publicOpenAIAccount(account: OpenAIAccountRecord) {
+  return {
+    id: account.id,
+    email: account.email,
+    accountId: account.accountId,
+    status: account.status,
+    createdAt: account.createdAt,
+    updatedAt: account.updatedAt,
+  };
+}
+
+function publicApiKey(apiKey: Awaited<ReturnType<typeof createApiKey>>) {
+  return {
+    ...apiKey,
+    quota: apiKey.quota === null ? null : Number(apiKey.quota),
+    used: Number(apiKey.used),
+  };
+}
+
 export function registerAdminRoutes(
   app: Express,
   deps: AdminRouteDependencies,
 ) {
   const {
     listOpenAIAccountsPage,
-    ensureApiKeysCacheLoaded,
-    getPortalSessionFromLocals,
-    apiKeysCache,
+    getPortalPrincipalFromLocals,
+    listApiKeys,
+    cacheApiKey,
+    invalidateApiKeyAuthCacheByToken,
+    invalidateActiveSourceAccount,
     generateApiKeyValue,
-    setApiKeysCache,
     createApiKey,
     deleteApiKeyById,
     updateApiKeyById,
@@ -80,7 +104,7 @@ export function registerAdminRoutes(
         keyword: keywordRaw,
       });
       res.json({
-        items: data.items,
+        items: data.items.map(publicOpenAIAccount),
         count: data.total,
         page: data.page,
         pageSize: data.pageSize,
@@ -96,17 +120,13 @@ export function registerAdminRoutes(
 
   app.get("/api/api-keys", async (_req: Request, res: Response) => {
     try {
-      await ensureApiKeysCacheLoaded();
-      const session = getPortalSessionFromLocals(res);
-      if (!session) {
+      const principal = getPortalPrincipalFromLocals(res);
+      if (!principal) {
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
-      const requesterUserId = session.sub;
-      const visibleItems = apiKeysCache.items.filter(
-        (item) => item.ownerUserId === requesterUserId,
-      );
-      res.json({ items: visibleItems, count: visibleItems.length });
+      const items = await listApiKeys({ ownerUserId: principal.id });
+      res.json({ items: items.map(publicApiKey), count: items.length });
     } catch (error) {
       res.status(500).json({
         error: "Failed to list API keys",
@@ -117,13 +137,12 @@ export function registerAdminRoutes(
 
   app.post("/api/api-keys", async (req: Request, res: Response) => {
     try {
-      await ensureApiKeysCacheLoaded();
-      const session = getPortalSessionFromLocals(res);
-      if (!session) {
+      const principal = getPortalPrincipalFromLocals(res);
+      if (!principal) {
         res.status(401).json({ ok: false, error: "Unauthorized" });
         return;
       }
-      const requesterUserId = session.sub;
+      const requesterUserId = principal.id;
       const body = (req.body ?? {}) as Record<string, unknown>;
       const name = typeof body.name === "string" ? body.name.trim() : "";
       if (!name) {
@@ -131,19 +150,14 @@ export function registerAdminRoutes(
         return;
       }
       const quotaInput = body.quota;
-      let quota: number | null = null;
+      let quota: string | null = null;
       if (!(quotaInput === null || quotaInput === undefined || quotaInput === "")) {
-        const quotaRaw =
-          typeof quotaInput === "number"
-            ? quotaInput
-            : typeof quotaInput === "string"
-              ? Number(quotaInput)
-              : NaN;
-        if (!(Number.isFinite(quotaRaw) && quotaRaw >= 0)) {
+        const quotaAmount = parseUsdAmount(quotaInput);
+        if (quotaAmount === null || quotaAmount < 0n) {
           res.status(400).json({ ok: false, error: "quota is invalid" });
           return;
         }
-        quota = quotaRaw;
+        quota = formatUsdAmount(quotaAmount);
       }
 
       let expiresAt: string | null = null;
@@ -158,36 +172,16 @@ export function registerAdminRoutes(
           expiresAt = expiresAtRaw;
         }
       }
-      const ownerUserId = requesterUserId;
-      const optimisticItem = {
-        id: crypto.randomUUID(),
-        ownerUserId,
+      const item = await createApiKey({
+        ownerUserId: requesterUserId,
         name,
         apiKey: generateApiKeyValue(),
         quota,
-        used: 0,
-        expiresAt,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      setApiKeysCache([optimisticItem, ...apiKeysCache.items]);
-
-      const item = await createApiKey({
-        ownerUserId,
-        name: optimisticItem.name,
-        apiKey: optimisticItem.apiKey,
-        quota,
         expiresAt,
       });
-      setApiKeysCache([
-        item,
-        ...apiKeysCache.items.filter(
-          (cacheItem) => cacheItem.id !== optimisticItem.id,
-        ),
-      ]);
-      res.status(201).json({ ok: true, item });
+      cacheApiKey(item);
+      res.status(201).json({ ok: true, item: publicApiKey(item) });
     } catch (error) {
-      await ensureApiKeysCacheLoaded(true);
       res.status(500).json({
         ok: false,
         error: error instanceof Error ? error.message : String(error),
@@ -197,45 +191,27 @@ export function registerAdminRoutes(
 
   app.delete("/api/api-keys/:id", async (req: Request, res: Response) => {
     try {
-      await ensureApiKeysCacheLoaded();
-      const session = getPortalSessionFromLocals(res);
-      if (!session) {
+      const principal = getPortalPrincipalFromLocals(res);
+      if (!principal) {
         res.status(401).json({ ok: false, error: "Unauthorized" });
         return;
       }
-      const requesterUserId = session.sub;
+      const requesterUserId = principal.id;
       const idParam = req.params.id;
       if (typeof idParam !== "string" || !idParam.trim()) {
         res.status(400).json({ ok: false, error: "id param is required" });
         return;
       }
-      const idx = apiKeysCache.items.findIndex((item) => item.id === idParam);
-      if (idx < 0) {
-        res.status(404).json({ ok: false, error: "API key not found" });
-        return;
-      }
-      const removed = apiKeysCache.items[idx]!;
-      if (removed.ownerUserId !== requesterUserId) {
-        res.status(404).json({ ok: false, error: "API key not found" });
-        return;
-      }
-      const next = [...apiKeysCache.items];
-      next.splice(idx, 1);
-      setApiKeysCache(next);
-
       const deleted = await deleteApiKeyById(idParam, {
         ownerUserId: requesterUserId,
       });
       if (!deleted) {
-        const rollback = [...apiKeysCache.items];
-        rollback.splice(idx, 0, removed);
-        setApiKeysCache(rollback);
         res.status(404).json({ ok: false, error: "API key not found" });
         return;
       }
+      invalidateApiKeyAuthCacheByToken(deleted.apiKey);
       res.json({ ok: true, deleted: 1 });
     } catch (error) {
-      await ensureApiKeysCacheLoaded(true);
       res.status(500).json({
         ok: false,
         error: error instanceof Error ? error.message : String(error),
@@ -245,13 +221,12 @@ export function registerAdminRoutes(
 
   app.put("/api/api-keys/:id", async (req: Request, res: Response) => {
     try {
-      await ensureApiKeysCacheLoaded();
-      const session = getPortalSessionFromLocals(res);
-      if (!session) {
+      const principal = getPortalPrincipalFromLocals(res);
+      if (!principal) {
         res.status(401).json({ ok: false, error: "Unauthorized" });
         return;
       }
-      const requesterUserId = session.sub;
+      const requesterUserId = principal.id;
       const idParam = req.params.id;
       if (typeof idParam !== "string" || !idParam.trim()) {
         res.status(400).json({ ok: false, error: "id param is required" });
@@ -266,19 +241,14 @@ export function registerAdminRoutes(
       }
 
       const quotaInput = body.quota;
-      let quota: number | null = null;
+      let quota: string | null = null;
       if (!(quotaInput === null || quotaInput === undefined || quotaInput === "")) {
-        const quotaRaw =
-          typeof quotaInput === "number"
-            ? quotaInput
-            : typeof quotaInput === "string"
-              ? Number(quotaInput)
-              : NaN;
-        if (!(Number.isFinite(quotaRaw) && quotaRaw >= 0)) {
+        const quotaAmount = parseUsdAmount(quotaInput);
+        if (quotaAmount === null || quotaAmount < 0n) {
           res.status(400).json({ ok: false, error: "quota is invalid" });
           return;
         }
-        quota = quotaRaw;
+        quota = formatUsdAmount(quotaAmount);
       }
 
       let expiresAt: string | null = null;
@@ -305,14 +275,9 @@ export function registerAdminRoutes(
         res.status(404).json({ ok: false, error: "API key not found" });
         return;
       }
-      setApiKeysCache(
-        apiKeysCache.items.map((item) =>
-          item.id === updated.id ? updated : item,
-        ),
-      );
-      res.json({ ok: true, item: updated });
+      cacheApiKey(updated);
+      res.json({ ok: true, item: publicApiKey(updated) });
     } catch (error) {
-      await ensureApiKeysCacheLoaded(true);
       res.status(500).json({
         ok: false,
         error: error instanceof Error ? error.message : String(error),
@@ -334,7 +299,7 @@ export function registerAdminRoutes(
         return;
       }
 
-      res.json(row);
+      res.json(publicOpenAIAccount(row));
     } catch (error) {
       res.status(500).json({
         error: "Failed to fetch account",
@@ -356,6 +321,7 @@ export function registerAdminRoutes(
         res.status(404).json({ ok: false, error: "Account not found" });
         return;
       }
+      invalidateActiveSourceAccount();
       res.json({ ok: true, deleted: 1 });
     } catch (error) {
       res.status(500).json({
@@ -376,6 +342,7 @@ export function registerAdminRoutes(
         return;
       }
       const deleted = await deleteOpenAIAccountsByEmails(emails);
+      if (deleted > 0) invalidateActiveSourceAccount();
       res.json({ ok: true, deleted, requested: emails.length });
     } catch (error) {
       res.status(500).json({
@@ -398,6 +365,7 @@ export function registerAdminRoutes(
         res.status(404).json({ ok: false, error: "Account not found" });
         return;
       }
+      invalidateActiveSourceAccount();
       res.json({ ok: true, updated: 1, status: "disabled" });
     } catch (error) {
       res.status(500).json({
@@ -420,6 +388,7 @@ export function registerAdminRoutes(
         res.status(404).json({ ok: false, error: "Account not found" });
         return;
       }
+      invalidateActiveSourceAccount();
       res.json({ ok: true, updated: 1, status: "active" });
     } catch (error) {
       res.status(500).json({
@@ -440,6 +409,7 @@ export function registerAdminRoutes(
         return;
       }
       const updated = await disableOpenAIAccountsByEmails(emails);
+      if (updated > 0) invalidateActiveSourceAccount();
       res.json({
         ok: true,
         updated,
@@ -458,18 +428,32 @@ export function registerAdminRoutes(
     try {
       const body = req.body as Record<string, unknown>;
       const email = typeof body.email === "string" ? body.email.trim() : "";
-      if (!email) {
-        res.status(400).json({ error: "email is required" });
+      const accountId =
+        typeof body.accountId === "string" ? body.accountId.trim() : "";
+      const idToken =
+        typeof body.idToken === "string" ? body.idToken.trim() : "";
+      const accessToken =
+        typeof body.accessToken === "string" ? body.accessToken.trim() : "";
+      const refreshToken =
+        typeof body.refreshToken === "string"
+          ? body.refreshToken.trim()
+          : "";
+      const missingFields = [
+        ["email", email],
+        ["accountId", accountId],
+        ["idToken", idToken],
+        ["accessToken", accessToken],
+        ["refreshToken", refreshToken],
+      ]
+        .filter(([, value]) => !value)
+        .map(([field]) => field);
+      if (missingFields.length > 0) {
+        res.status(400).json({
+          error: `Missing required fields: ${missingFields.join(", ")}`,
+        });
         return;
       }
 
-      const userId = typeof body.userId === "string" ? body.userId : null;
-      const accountId =
-        typeof body.accountId === "string" ? body.accountId : null;
-      const accessToken =
-        typeof body.accessToken === "string" ? body.accessToken : null;
-      const sessionToken =
-        typeof body.sessionToken === "string" ? body.sessionToken : null;
       const statusInput = typeof body.status === "string" ? body.status : "";
       const status = statusInput
         ? normalizeOpenAIAccountStatus(statusInput)
@@ -480,16 +464,15 @@ export function registerAdminRoutes(
       }
       const row = await upsertOpenAIAccount({
         email,
-        userId,
-        name: typeof body.name === "string" ? body.name : null,
-        picture: typeof body.picture === "string" ? body.picture : null,
         accountId,
         status,
+        idToken,
         accessToken,
-        sessionToken,
+        refreshToken,
       });
+      invalidateActiveSourceAccount();
 
-      res.status(201).json(row);
+      res.status(201).json(publicOpenAIAccount(row));
     } catch (error) {
       res.status(500).json({
         error: "Failed to upsert account",

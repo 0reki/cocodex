@@ -5,14 +5,12 @@ export type OpenAIAccountStatus =
 
 export type OpenAIAccountRecord = {
   id: string
-  userId: string | null
-  name: string | null
   email: string
-  picture: string | null
-  accountId: string | null
+  accountId: string
   status: OpenAIAccountStatus
-  accessToken: string | null
-  sessionToken: string | null
+  idToken: string
+  accessToken: string
+  refreshToken: string
   createdAt: string
   updatedAt: string
 }
@@ -22,9 +20,10 @@ export type ApiKeyRecord = {
   ownerUserId: string | null
   name: string
   apiKey: string
-  quota: number | null
-  used: number
+  quota: string | null
+  used: string
   expiresAt: string | null
+  revokedAt: string | null
   createdAt: string
   updatedAt: string
 }
@@ -34,13 +33,9 @@ export type PortalUserRole = "admin" | "user"
 export type PortalUserRecord = {
   id: string
   username: string
-  email: string | null
   passwordHash: string
-  avatarUrl: string | null
-  country: string | null
   role: PortalUserRole
   enabled: boolean
-  mustSetup: boolean
   createdAt: string
   updatedAt: string
 }
@@ -51,17 +46,15 @@ export type PortalUserWithBalanceRecord = PortalUserRecord & {
 
 export type PortalUserBillingProfileRecord = {
   userId: string
-  balance: number
-  currency: string
+  balanceUsd: string
   createdAt: string
   updatedAt: string
 }
 
 export type PortalUserSpendAllowance = {
-  balance: number
-  totalAvailable: number
+  balance: bigint
+  totalAvailable: bigint
 }
-
 
 export type DatabaseSelfCheckIssue = {
   id: string
@@ -80,10 +73,7 @@ export type DatabaseSelfCheckReport = {
 export type ModelResponseLogRecord = {
   id: string
   intentId: string | null
-  attemptNo: number | null
   isFinal: boolean | null
-  retryReason: string | null
-  heartbeatCount: number | null
   streamEndReason: string | null
   path: string
   modelId: string | null
@@ -174,12 +164,10 @@ export type ApiKeyHourlyStatsSeries = {
 }
 
 export type UpsertOpenAIAccountInput = {
-  userId?: string | null
-  name?: string | null
   email: string
-  picture?: string | null
-  accountId?: string | null
+  accountId: string
   status?: string | null
-  accessToken?: string | null
-  sessionToken?: string | null
+  idToken: string
+  accessToken: string
+  refreshToken: string
 }

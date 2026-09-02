@@ -1,7 +1,7 @@
 import {
   createHmac,
   randomBytes,
-  scryptSync,
+  scrypt,
   timingSafeEqual,
 } from "node:crypto";
 
@@ -10,16 +10,12 @@ import {
   createPortalUser,
   ensureDatabaseSchema,
   getPortalUserByUsername,
-  type PortalUserRole,
 } from "../../database/index.ts";
 
 type PortalTokenKind = "access" | "refresh";
 
-export type PortalAccessSession = {
+export type PortalAccessClaims = {
   sub: string;
-  username: string;
-  role: PortalUserRole;
-  mustSetup: boolean;
   typ: PortalTokenKind;
   iat: number;
   exp: number;
@@ -55,14 +51,10 @@ function decodeBase64Url(value: string) {
 
 export function parsePortalAccessPayload(
   payloadRaw: unknown,
-): PortalAccessSession | null {
+): PortalAccessClaims | null {
   if (!payloadRaw || typeof payloadRaw !== "object") return null;
   const payload = payloadRaw as Record<string, unknown>;
   if (typeof payload.sub !== "string" || !payload.sub.trim()) return null;
-  if (typeof payload.username !== "string" || !payload.username.trim()) {
-    return null;
-  }
-  if (payload.role !== "admin" && payload.role !== "user") return null;
   if (payload.typ !== "access" && payload.typ !== "refresh") return null;
   if (typeof payload.iat !== "number" || !Number.isFinite(payload.iat)) {
     return null;
@@ -72,30 +64,16 @@ export function parsePortalAccessPayload(
   }
   return {
     sub: payload.sub.trim(),
-    username: payload.username.trim(),
-    role: payload.role,
-    mustSetup: payload.mustSetup === true,
     typ: payload.typ,
     iat: Math.trunc(payload.iat),
     exp: Math.trunc(payload.exp),
   };
 }
 
-function createPortalToken(
-  input: {
-    userId: string;
-    username: string;
-    role: PortalUserRole;
-    mustSetup: boolean;
-  },
-  kind: PortalTokenKind,
-) {
+function createPortalToken(userId: string, kind: PortalTokenKind) {
   const now = Math.floor(Date.now() / 1000);
-  const payload: PortalAccessSession = {
-    sub: input.userId,
-    username: input.username,
-    role: input.role,
-    mustSetup: input.mustSetup,
+  const payload: PortalAccessClaims = {
+    sub: userId,
     typ: kind,
     iat: now,
     exp: now + getTokenTtlSeconds(kind),
@@ -114,22 +92,17 @@ function createPortalToken(
   };
 }
 
-export function createPortalTokens(input: {
-  userId: string;
-  username: string;
-  role: PortalUserRole;
-  mustSetup: boolean;
-}) {
+export function createPortalTokens(input: { userId: string }) {
   return {
-    accessToken: createPortalToken(input, "access"),
-    refreshToken: createPortalToken(input, "refresh"),
+    accessToken: createPortalToken(input.userId, "access"),
+    refreshToken: createPortalToken(input.userId, "refresh"),
   };
 }
 
 export function verifyPortalToken(
   token: string,
   kind: PortalTokenKind,
-): PortalAccessSession | null {
+): PortalAccessClaims | null {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const [headerPart, payloadPart, signaturePart] = parts;
@@ -163,17 +136,37 @@ export function verifyPortalAccessToken(token: string) {
   return verifyPortalToken(token, "access");
 }
 
-export function hashPassword(password: string) {
+function derivePasswordKey(
+  password: string,
+  salt: Buffer,
+  length: number,
+) {
+  return new Promise<Buffer>((resolve, reject) => {
+    scrypt(password, salt, length, (error, derivedKey) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(derivedKey);
+    });
+  });
+}
+
+export async function hashPassword(password: string) {
   const salt = randomBytes(16);
-  const digest = scryptSync(password, salt, 64);
+  const digest = await derivePasswordKey(password, salt, 64);
   return `scrypt$${salt.toString("base64")}$${digest.toString("base64")}`;
 }
 
-export function verifyPassword(password: string, passwordHash: string) {
+export async function verifyPassword(password: string, passwordHash: string) {
   const [algorithm, saltRaw, hashRaw] = passwordHash.split("$");
   if (algorithm !== "scrypt" || !saltRaw || !hashRaw) return false;
   const expected = Buffer.from(hashRaw, "base64");
-  const actual = scryptSync(password, Buffer.from(saltRaw, "base64"), expected.length);
+  const actual = await derivePasswordKey(
+    password,
+    Buffer.from(saltRaw, "base64"),
+    expected.length,
+  );
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
@@ -193,7 +186,7 @@ export async function ensureBootstrapAdminUser() {
 
   await createPortalUser({
     username,
-    passwordHash: hashPassword(password),
+    passwordHash: await hashPassword(password),
     role: "admin",
     enabled: true,
   });

@@ -5,6 +5,15 @@ import {
   DEFAULT_USER_AGENT,
 } from "./runtime-constants.ts";
 
+const CLIENT_ACCOUNT_HEADERS = [
+  "chatgpt-account-id",
+  "openai-organization",
+  "openai-project",
+  "x-codex-routing-hint",
+  "x-oai-attestation",
+  "x-openai-fedramp",
+] as const;
+
 export function buildCodexTurnMetadataHeader(
   sandbox = DEFAULT_CODEX_SANDBOX,
 ): string {
@@ -30,6 +39,7 @@ export function buildCodexTransportHeaders(args: {
   forwarded.delete("connection");
   forwarded.delete("transfer-encoding");
   forwarded.delete("upgrade");
+  for (const name of CLIENT_ACCOUNT_HEADERS) forwarded.delete(name);
   forwarded.set("authorization", `Bearer ${args.accessToken}`);
   if (!isProxyRequest && !forwarded.has("originator")) {
     forwarded.set("originator", args.originator?.trim() || DEFAULT_CODEX_ORIGINATOR);
@@ -53,6 +63,21 @@ export function buildCodexTransportHeaders(args: {
     forwarded.delete("chatgpt-account-id");
   }
   return Object.fromEntries(forwarded.entries());
+}
+
+export function buildCodexRoutingHint(
+  payload: Record<string, unknown>,
+): string | null {
+  const model =
+    typeof payload.model === "string" ? payload.model.trim() : "";
+  if (!model) return null;
+  const serviceTier =
+    typeof payload.service_tier === "string"
+      ? payload.service_tier.trim()
+      : "";
+  return serviceTier
+    ? `model=${model};tier=${serviceTier}`
+    : `model=${model}`;
 }
 
 export function zstdCompressBuffer(buffer: Buffer): Promise<Buffer> {

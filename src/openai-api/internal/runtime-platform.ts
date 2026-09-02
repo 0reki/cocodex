@@ -10,11 +10,19 @@ type WsUnexpectedResponse = {
   ) => void;
 };
 
+export type WsUpgradeResponse = {
+  headers: Record<string, string | string[] | undefined>;
+};
+
 export type WsSocket = {
   readyState: number;
   close: (code?: number, reason?: string) => void;
   terminate: () => void;
   on(event: "open", listener: () => void): WsSocket;
+  on(
+    event: "upgrade",
+    listener: (response: WsUpgradeResponse) => void,
+  ): WsSocket;
   on(event: "error", listener: (error: Error) => void): WsSocket;
   on(
     event: "unexpected-response",
@@ -22,6 +30,10 @@ export type WsSocket = {
   ): WsSocket;
   on(event: string, listener: WsListener): WsSocket;
   once(event: "open", listener: () => void): WsSocket;
+  once(
+    event: "upgrade",
+    listener: (response: WsUpgradeResponse) => void,
+  ): WsSocket;
   once(event: "error", listener: (error: Error) => void): WsSocket;
   once(
     event: "unexpected-response",
@@ -29,6 +41,10 @@ export type WsSocket = {
   ): WsSocket;
   once(event: string, listener: WsListener): WsSocket;
   off(event: "open", listener: () => void): WsSocket;
+  off(
+    event: "upgrade",
+    listener: (response: WsUpgradeResponse) => void,
+  ): WsSocket;
   off(event: "error", listener: (error: Error) => void): WsSocket;
   off(
     event: "unexpected-response",

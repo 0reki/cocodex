@@ -1,9 +1,11 @@
 import {
-  assembleResponseFromEventStream,
   CHATGPT_CODEX_RESPONSES_URL,
+} from "./runtime-constants.ts";
+import {
+  buildCodexRoutingHint,
   zstdCompressBuffer,
-} from "./runtime.ts";
-import type { PostCodexResponsesOptions } from "./runtime.ts";
+} from "./runtime-codex.ts";
+import type { PostCodexResponsesOptions } from "./runtime-types.ts";
 import { resolveResponseTransport } from "./responses-shared.ts";
 
 function normalizePayload(payload: Record<string, unknown>) {
@@ -87,7 +89,6 @@ export async function postCodexResponses(
     typeof options.payload === "object" && options.payload !== null
       ? (options.payload as Record<string, unknown>)
       : {};
-  const requestedStream = basePayload.stream !== false;
   const input = basePayload.input;
   if (
     !(
@@ -108,6 +109,8 @@ export async function postCodexResponses(
   headers.set("accept", "text/event-stream");
   headers.set("content-type", "application/json");
   headers.set("content-encoding", "zstd");
+  const routingHint = buildCodexRoutingHint(payload);
+  if (routingHint) headers.set("x-codex-routing-hint", routingHint);
 
   const response = await fetch(CHATGPT_CODEX_RESPONSES_URL, {
     method: "POST",
@@ -115,9 +118,5 @@ export async function postCodexResponses(
     body: Uint8Array.from(body),
     signal: options.signal,
   });
-  if (!response.ok || requestedStream) return response;
-  if (!(response.headers.get("content-type") ?? "").includes("text/event-stream")) {
-    return response;
-  }
-  return assembleResponseFromEventStream(response);
+  return response;
 }

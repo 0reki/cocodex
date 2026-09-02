@@ -8,6 +8,16 @@ import {
 
 export async function upsertOpenAIAccount(input: UpsertOpenAIAccountInput) {
   return withTransaction(async (client) => {
+    const email = input.email.trim().toLowerCase()
+    const accountId = input.accountId.trim()
+    const idToken = input.idToken.trim()
+    const accessToken = input.accessToken.trim()
+    const refreshToken = input.refreshToken.trim()
+    if (!email || !accountId || !idToken || !accessToken || !refreshToken) {
+      throw new Error(
+        "email, accountId, idToken, accessToken and refreshToken are required",
+      )
+    }
     const requestedStatus = input.status?.trim() ?? ""
     const normalizedRequestedStatus = requestedStatus
       ? normalizeOpenAIAccountStatus(requestedStatus)
@@ -18,7 +28,7 @@ export async function upsertOpenAIAccount(input: UpsertOpenAIAccountInput) {
 
     const existing = await client.query<{ status: string | null }>(
       `SELECT status FROM openai_accounts WHERE email = $1 FOR UPDATE`,
-      [input.email],
+      [email],
     )
     let status = normalizedRequestedStatus
     if (!status && existing.rows[0]) {
@@ -42,37 +52,32 @@ export async function upsertOpenAIAccount(input: UpsertOpenAIAccountInput) {
           WHERE LOWER(TRIM(status)) = 'active'
             AND email <> $1
         `,
-        [input.email],
+        [email],
       )
     }
 
     const result = await client.query<OpenAIAccountRow>(
       `
         INSERT INTO openai_accounts (
-          user_id, name, email, picture, account_id, status,
-          access_token, session_token
+          email, account_id, status, id_token, access_token, refresh_token
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8
+          $1, $2, $3, $4, $5, $6
         )
         ON CONFLICT (email) DO UPDATE SET
-          user_id = EXCLUDED.user_id,
-          name = EXCLUDED.name,
-          picture = EXCLUDED.picture,
           account_id = EXCLUDED.account_id,
           status = EXCLUDED.status,
+          id_token = EXCLUDED.id_token,
           access_token = EXCLUDED.access_token,
-          session_token = EXCLUDED.session_token
+          refresh_token = EXCLUDED.refresh_token
         RETURNING *
       `,
       [
-        input.userId ?? null,
-        input.name ?? null,
-        input.email,
-        input.picture ?? null,
-        input.accountId ?? null,
+        email,
+        accountId,
         status,
-        input.accessToken ?? null,
-        input.sessionToken ?? null,
+        idToken,
+        accessToken,
+        refreshToken,
       ],
     )
 
