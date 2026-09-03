@@ -9,9 +9,18 @@ import {
 } from "@/components/auth-page";
 import { InlineNotice } from "@/components/ui";
 import { fetchJson } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import {
+  PORTAL_PASSWORD_MAX_LENGTH,
+  PORTAL_PASSWORD_MIN_LENGTH,
+  useAuth,
+} from "@/lib/auth";
 
 type InvitationStatus = { ok: true; expiresAt: string };
+type InvitationValidation = {
+  token: string;
+  valid: boolean;
+  error: string | null;
+};
 
 export function RegisterPage() {
   const { ready, user, register } = useAuth();
@@ -21,52 +30,69 @@ export function RegisterPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [validating, setValidating] = useState(true);
-  const [valid, setValid] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [invitationValidation, setInvitationValidation] =
+    useState<InvitationValidation | null>(null);
+  const [formError, setFormError] = useState<{
+    token: string;
+    message: string;
+  } | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
-    setValidating(true);
-    setValid(false);
-    setError(null);
     if (!inviteToken) {
-      setError("注册链接缺少邀请凭证");
-      setValidating(false);
       return () => controller.abort();
     }
     void fetchJson<InvitationStatus>(
       `/api/auth/invitations/${encodeURIComponent(inviteToken)}`,
       { signal: controller.signal },
     )
-      .then(() => setValid(true))
+      .then(() => {
+        setInvitationValidation({
+          token: inviteToken,
+          valid: true,
+          error: null,
+        });
+      })
       .catch((cause) => {
         if (!controller.signal.aborted) {
-          setError(cause instanceof Error ? cause.message : "注册链接无效");
+          setInvitationValidation({
+            token: inviteToken,
+            valid: false,
+            error: cause instanceof Error ? cause.message : "注册链接无效",
+          });
         }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setValidating(false);
       });
     return () => controller.abort();
   }, [inviteToken]);
+
+  const currentValidation =
+    invitationValidation?.token === inviteToken ? invitationValidation : null;
+  const validating = Boolean(inviteToken) && currentValidation === null;
+  const valid = currentValidation?.valid === true;
+  const invitationError = inviteToken
+    ? currentValidation?.error
+    : "注册链接缺少邀请凭证";
+  const error = formError?.token === inviteToken ? formError.message : null;
 
   if (ready && user) return <Navigate to="/dashboard" replace />;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (password !== confirmPassword) {
-      setError("两次输入的密码不一致");
+      setFormError({ token: inviteToken, message: "两次输入的密码不一致" });
       return;
     }
     setSubmitting(true);
-    setError(null);
+    setFormError(null);
     try {
       await register(inviteToken, username.trim(), password);
       navigate("/dashboard", { replace: true });
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "注册失败");
+      setFormError({
+        token: inviteToken,
+        message: cause instanceof Error ? cause.message : "注册失败",
+      });
     } finally {
       setSubmitting(false);
     }
@@ -84,7 +110,7 @@ export function RegisterPage() {
       {!validating && !valid ? (
         <div className="grid w-full gap-4">
           <InlineNotice tone="error">
-            {error ?? "注册链接无效或已失效"}
+            {invitationError ?? "注册链接无效或已失效"}
           </InlineNotice>
           <Link
             className="text-sm font-medium underline underline-offset-4"
@@ -123,7 +149,8 @@ export function RegisterPage() {
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             autoComplete="new-password"
-            minLength={8}
+            minLength={PORTAL_PASSWORD_MIN_LENGTH}
+            maxLength={PORTAL_PASSWORD_MAX_LENGTH}
             required
           />
           <label
@@ -139,7 +166,8 @@ export function RegisterPage() {
             value={confirmPassword}
             onChange={(event) => setConfirmPassword(event.target.value)}
             autoComplete="new-password"
-            minLength={8}
+            minLength={PORTAL_PASSWORD_MIN_LENGTH}
+            maxLength={PORTAL_PASSWORD_MAX_LENGTH}
             required
           />
           <AuthSubmitButton

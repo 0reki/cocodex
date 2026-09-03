@@ -15,7 +15,6 @@ import type { AuthResponse, PortalUser, TokenEnvelope } from "@/types/api";
 type AuthSession = {
   user: PortalUser;
   accessToken: TokenEnvelope;
-  refreshToken: TokenEnvelope;
 };
 
 type AuthContextValue = {
@@ -27,13 +26,15 @@ type AuthContextValue = {
     username: string,
     password: string,
   ) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   updateCurrentUser: (user: PortalUser) => void;
   api: <T>(path: string, init?: RequestInit) => Promise<T>;
 };
 
 const STORAGE_KEY = "cocodex.session.v1";
 const REFRESH_MARGIN_SECONDS = 30;
+export const PORTAL_PASSWORD_MIN_LENGTH = 8;
+export const PORTAL_PASSWORD_MAX_LENGTH = 128;
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 function isTokenEnvelope(value: unknown): value is TokenEnvelope {
@@ -50,12 +51,15 @@ function readStoredSession(): AuthSession | null {
     if (
       !value.user ||
       typeof value.user.id !== "string" ||
-      !isTokenEnvelope(value.accessToken) ||
-      !isTokenEnvelope(value.refreshToken)
+      !isTokenEnvelope(value.accessToken)
     ) {
       return null;
     }
-    return value as AuthSession;
+    const session = { user: value.user, accessToken: value.accessToken };
+    if ("refreshToken" in value) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+    }
+    return session;
   } catch {
     return null;
   }
@@ -65,7 +69,6 @@ function toSession(response: AuthResponse): AuthSession {
   return {
     user: response.user,
     accessToken: response.accessToken,
-    refreshToken: response.refreshToken,
   };
 }
 
@@ -92,15 +95,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     if (refreshPromise.current) return refreshPromise.current;
-    const current = sessionRef.current;
-    if (!current || !tokenIsFresh(current.refreshToken)) {
-      persist(null);
-      return null;
-    }
-
     refreshPromise.current = fetchJson<AuthResponse>("/api/auth/refresh", {
       method: "POST",
-      ...jsonBody({ refreshToken: current.refreshToken.token }),
+      credentials: "include",
     })
       .then((response) => {
         const next = toSession(response);
@@ -119,11 +116,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const current = sessionRef.current;
-    if (!current) {
-      setReady(true);
-      return;
-    }
-    if (tokenIsFresh(current.accessToken)) {
+    if (current && tokenIsFresh(current.accessToken)) {
       setReady(true);
       return;
     }
@@ -146,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (username: string, password: string) => {
       const response = await fetchJson<AuthResponse>("/api/auth/login", {
         method: "POST",
+        credentials: "include",
         ...jsonBody({ username, password }),
       });
       persist(toSession(response));
@@ -157,6 +151,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (inviteToken: string, username: string, password: string) => {
       const response = await fetchJson<AuthResponse>("/api/auth/register", {
         method: "POST",
+        credentials: "include",
         ...jsonBody({ inviteToken, username, password }),
       });
       persist(toSession(response));
@@ -164,7 +159,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [persist],
   );
 
-  const logout = useCallback(() => persist(null), [persist]);
+  const logout = useCallback(async () => {
+    persist(null);
+    await fetchJson<{ ok: true }>("/api/auth/logout", {
+      method: "POST",
+      credentials: "include",
+    }).catch(() => undefined);
+  }, [persist]);
   const updateCurrentUser = useCallback(
     (user: PortalUser) => {
       const current = sessionRef.current;

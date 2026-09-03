@@ -7,7 +7,11 @@ import {
   AuthSubmitButton,
 } from "@/components/auth-page";
 import { InlineNotice } from "@/components/ui";
-import { useAuth } from "@/lib/auth";
+import {
+  PORTAL_PASSWORD_MAX_LENGTH,
+  PORTAL_PASSWORD_MIN_LENGTH,
+  useAuth,
+} from "@/lib/auth";
 
 function safeNextPath(value: string | null) {
   return value?.startsWith("/") && !value.startsWith("//")
@@ -71,6 +75,8 @@ export function LoginPage() {
           onChange={(event) => setPassword(event.target.value)}
           type="password"
           autoComplete="current-password"
+          minLength={PORTAL_PASSWORD_MIN_LENGTH}
+          maxLength={PORTAL_PASSWORD_MAX_LENGTH}
           required
           className={AUTH_INPUT_CLASS_NAME}
         />

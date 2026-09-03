@@ -245,8 +245,8 @@ function ApiDocs() {
 });
 
 const data = await response.json();`;
-  const codexConfig = `[model_providers.cocodex]
-name = "CoCodex"
+  const codexConfig = `[model_providers.OpenAI]
+name = "OpenAI"
 base_url = "${baseUrl}/v1"
 wire_api = "responses"
 requires_openai_auth = true

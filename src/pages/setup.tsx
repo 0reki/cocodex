@@ -9,6 +9,10 @@ import { useOutletContext } from "react-router";
 
 import codexShellLogoUrl from "@/assets/codex-shell-logo.svg";
 import { InlineNotice } from "@/components/ui";
+import {
+  PORTAL_PASSWORD_MAX_LENGTH,
+  PORTAL_PASSWORD_MIN_LENGTH,
+} from "@/lib/auth";
 import { completeSetup, type SetupStatus } from "@/lib/setup";
 import { Button } from "@/ui/components/button";
 import { Input } from "@/ui/components/input";
@@ -147,7 +151,8 @@ export function SetupPage() {
                   onChange={(event) => setPassword(event.target.value)}
                   type="password"
                   autoComplete="new-password"
-                  minLength={8}
+                  minLength={PORTAL_PASSWORD_MIN_LENGTH}
+                  maxLength={PORTAL_PASSWORD_MAX_LENGTH}
                   required
                 />
               </label>
@@ -160,7 +165,8 @@ export function SetupPage() {
                   }
                   type="password"
                   autoComplete="new-password"
-                  minLength={8}
+                  minLength={PORTAL_PASSWORD_MIN_LENGTH}
+                  maxLength={PORTAL_PASSWORD_MAX_LENGTH}
                   required
                 />
               </label>

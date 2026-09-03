@@ -20,7 +20,6 @@ export type AuthResponse = {
   ok: true;
   user: PortalUser;
   accessToken: TokenEnvelope;
-  refreshToken: TokenEnvelope;
 };
 
 export type OpenAIAccount = {

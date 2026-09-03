@@ -271,8 +271,9 @@ function TopNavbar({ items }: { items: NavItem[] }) {
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onSelect={() => {
-                  logout();
-                  navigate("/login", { replace: true });
+                  void logout().finally(() =>
+                    navigate("/login", { replace: true }),
+                  );
                 }}
               >
                 <LogOut className="h-4 w-4" />

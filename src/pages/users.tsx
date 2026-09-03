@@ -13,7 +13,11 @@ import {
 } from "@/components/ui";
 import { useResource } from "@/hooks/use-resource";
 import { jsonBody } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import {
+  PORTAL_PASSWORD_MAX_LENGTH,
+  PORTAL_PASSWORD_MIN_LENGTH,
+  useAuth,
+} from "@/lib/auth";
 import { formatDate } from "@/lib/format";
 import type {
   OpenAIAccount,
@@ -117,7 +121,8 @@ function UserForm({
           onChange={(event) => setPassword(event.target.value)}
           autoComplete="new-password"
           required={!item}
-          minLength={8}
+          minLength={PORTAL_PASSWORD_MIN_LENGTH}
+          maxLength={PORTAL_PASSWORD_MAX_LENGTH}
         />
       </label>
       <footer className="flex justify-end gap-2 pt-4">

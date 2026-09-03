@@ -1,4 +1,4 @@
-import { Gauge, PackagePlus, RefreshCw, type LucideIcon } from "lucide-react";
+import { Gauge, PackagePlus, type LucideIcon } from "lucide-react";
 import { useCallback } from "react";
 
 import {
@@ -15,7 +15,6 @@ import type {
   QuotaWindow,
   UserQuotaPool,
 } from "@/types/api";
-import { Button } from "@/ui/components/button";
 
 const userColors = ["#2563eb", "#f97316", "#16a34a", "#a855f7"];
 
@@ -150,20 +149,7 @@ export function MyUsagePage() {
 
   return (
     <main className="flex w-full flex-col gap-5 px-3 py-3 sm:gap-6 sm:px-4 sm:py-4 lg:px-5">
-      <PageHeader
-        title="额度信息"
-        actions={
-          <Button
-            variant="outline"
-            type="button"
-            disabled={loading}
-            onClick={() => void reload()}
-          >
-            <RefreshCw className={loading ? "animate-spin" : undefined} />
-            刷新
-          </Button>
-        }
-      />
+      <PageHeader title="额度信息" />
 
       {error && !data ? (
         <ErrorState message={error} retry={() => void reload()} />
