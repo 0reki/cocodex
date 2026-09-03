@@ -18,22 +18,28 @@ import {
   ensureDatabaseSchema,
   flushResponseSettlements,
   createPortalUser,
-  getPortalUserSpendAllowance,
+  createPortalInvitation,
+  getUpstreamQuotaWindow,
+  getUserUpstreamQuotaAllocation,
+  listUpstreamQuotaMemberAllocations,
   getPortalUserById,
-  getApiKeyByToken,
   getModelHourlyStatsSeries,
   getPortalUserModelHourlyStatsSeries,
   getRequestRateStats,
   getOpenAIAccountByEmail,
-  getActiveOpenAIAccount,
   listOpenAIAccountsPage,
   listApiKeys,
+  listAssignedOpenAIAccounts,
   listModelResponseLogsCursor,
   listModelResponseLogsCursorByOwnerUserId,
   listPortalUsers,
+  listPortalUserUpstreamAssignments,
   normalizeOpenAIAccountStatus,
   runDatabaseSelfCheck,
+  recordUserUpstreamQuotaUsage,
   setPortalUserEnabledById,
+  setPortalUserUpstreamAssignment,
+  syncUpstreamQuotaWindow,
   updateApiKeyById,
   updateOpenAIAccountTokensById,
   updatePortalUsernameById,
@@ -79,7 +85,7 @@ import {
   prepareResponsesWebSocketProxyContext,
   setupResponsesWebSocketProxy,
 } from "./server/routes/index.ts";
-import { lruGet, lruSet } from "./server/services/index.ts";
+import { lruGet } from "./server/services/index.ts";
 import {
   bootstrapServerServices,
   createServerRuntimeState,
@@ -87,6 +93,7 @@ import {
 } from "./server/bootstrap/index.ts";
 import {
   extractCodexResultFromSse,
+  extractCodexTerminalResponseFromSse,
   isRecord,
   parseJsonRecordText,
 } from "./server/openai-response-utils.ts";
@@ -100,11 +107,6 @@ loadBackendEnv();
 const {
   DEFAULT_OPENAI_API_USER_AGENT,
   DEFAULT_OPENAI_API_CLIENT_VERSION,
-  ACTIVE_SOURCE_ACCOUNT_CACHE_TTL_MS,
-  API_KEY_AUTH_LRU_MAX,
-  API_KEY_AUTH_LRU_TTL_MS,
-  BILLING_ALLOWANCE_LRU_MAX,
-  BILLING_ALLOWANCE_LRU_TTL_MS,
   BILLING_OVERDRAFT_LIMIT_USD,
   BILLING_INFLIGHT_RESERVE_USD,
   PRICE_AFTER_272K_INPUT_THRESHOLD_TOKENS,
@@ -115,11 +117,8 @@ const {
   RESPONSE_SETTLEMENT_RETRY_MAX_MS,
   apiKeyAuthLruCache,
   apiKeyAuthTokenById,
-  apiKeyAuthLoadingPromises,
-  apiKeyAuthTokenVersions,
   apiKeyPendingCharges,
   billingAllowanceLruCache,
-  billingAllowanceLoadingPromises,
   billingPendingChargesByOwnerId,
   billingReservationById,
   billingReservedAmountsByOwnerId,
@@ -142,8 +141,12 @@ const {
   ensureUserBillingAllowanceOrNull,
   isUserBillingAllowanceExceeded,
   isApiKeyBoundToUser,
-  getActiveSourceAccount,
+  getAssignedSourceAccount,
+  hydrateResponseAuthState,
+  hydrateSourceAccountCache,
+  hydrateUpstreamQuotaCache,
   invalidateActiveSourceAccount,
+  primeUserBillingAllowance,
   extractErrorInfo,
   buildPassthroughUpstreamError,
   isAbortError,
@@ -155,6 +158,8 @@ const {
   cancelResponseRequestReservation,
   getResponseSettlementQueueHealth,
   flushAllResponseSettlements,
+  flushUpstreamQuotaSettlements,
+  flushUpstreamTokenPersistence,
   stopResponseSettlementServices,
   extractResponseUsage,
   estimateUsageCost,
@@ -166,27 +171,27 @@ const {
   getCodexDailyWorkspaceUsageWithTokenRefresh,
   getCodexModelsWithTokenRefresh,
   getCodexUsageWithTokenRefresh,
+  ensureUserUpstreamQuota,
+  getUserUpstreamQuotaSummary,
+  settleUserUpstreamQuota,
 } = bootstrapServerServices({
   isRecord,
   lruGet,
-  lruSet,
   modelPricing,
-  getPortalUserSpendAllowance,
+  listAssignedOpenAIAccounts,
+  getUpstreamQuotaWindow,
+  getUserUpstreamQuotaAllocation,
+  listUpstreamQuotaMemberAllocations,
+  listPortalUserUpstreamAssignments,
+  recordUserUpstreamQuotaUsage,
+  syncUpstreamQuotaWindow,
   getPortalUserById,
-  getApiKeyByToken,
-  getActiveOpenAIAccount,
   flushResponseSettlements,
-  ensureDatabaseSchema,
   updateOpenAIAccountTokensById,
   randomUUID: () => crypto.randomUUID(),
   resolveOpenAIUpstreamAccountId,
   DEFAULT_OPENAI_API_USER_AGENT,
   DEFAULT_OPENAI_API_CLIENT_VERSION,
-  ACTIVE_SOURCE_ACCOUNT_CACHE_TTL_MS,
-  API_KEY_AUTH_LRU_MAX,
-  API_KEY_AUTH_LRU_TTL_MS,
-  BILLING_ALLOWANCE_LRU_MAX,
-  BILLING_ALLOWANCE_LRU_TTL_MS,
   BILLING_OVERDRAFT_LIMIT_USD,
   BILLING_INFLIGHT_RESERVE_USD,
   PRICE_AFTER_272K_INPUT_THRESHOLD_TOKENS,
@@ -197,11 +202,8 @@ const {
   RESPONSE_SETTLEMENT_RETRY_MAX_MS,
   apiKeyAuthLruCache,
   apiKeyAuthTokenById,
-  apiKeyAuthLoadingPromises,
-  apiKeyAuthTokenVersions,
   apiKeyPendingCharges,
   billingAllowanceLruCache,
-  billingAllowanceLoadingPromises,
   billingPendingChargesByOwnerId,
   billingReservationById,
   billingReservedAmountsByOwnerId,
@@ -368,7 +370,7 @@ app.use((req, res, next) => {
 });
 
 registerSetupRoutes(app);
-registerPortalAuthRoutes(app);
+registerPortalAuthRoutes(app, { primeUserBillingAllowance });
 
 app.use(async (req, res, next) => {
   try {
@@ -399,6 +401,7 @@ app.use(async (req, res, next) => {
     const nonAdminAllowed =
       req.path === "/api/api-keys" ||
       req.path.startsWith("/api/api-keys/") ||
+      req.path === "/api/my-usage" ||
       req.path === "/api/request-logs" ||
       req.path.startsWith("/api/request-logs/");
     if (isApiPath && !nonAdminAllowed && principal.role !== "admin") {
@@ -427,7 +430,8 @@ registerPublicOpenAIRoutes(app, {
   ensureDatabaseSchema,
   authenticateApiKeyWithReason,
   getApiKeyAuthErrorDetail,
-  getActiveSourceAccount,
+  isApiKeyBoundToUser,
+  getAssignedSourceAccount,
   resolveOpenAIUpstreamAccountId,
   getOpenAIApiRuntimeConfig,
   getCodexModelsWithTokenRefresh,
@@ -448,7 +452,7 @@ registerResponsesRoutes(app, {
   isApiKeyBoundToUser,
   ensureUserBillingAllowanceOrNull,
   tryReserveResponseRequest,
-  getActiveSourceAccount,
+  getAssignedSourceAccount,
   getOpenAIApiRuntimeConfig,
   resolveOpenAIUpstreamAccountId,
   postCodexResponsesWithTokenRefresh,
@@ -462,6 +466,8 @@ registerResponsesRoutes(app, {
   resolveUsagePricingModelId,
   enqueueResponseSettlement,
   cancelResponseRequestReservation,
+  ensureUserUpstreamQuota,
+  settleUserUpstreamQuota,
 });
 
 registerImageRoutes(app, {
@@ -474,7 +480,7 @@ registerImageRoutes(app, {
   isApiKeyBoundToUser,
   ensureUserBillingAllowanceOrNull,
   tryReserveResponseRequest,
-  getActiveSourceAccount,
+  getAssignedSourceAccount,
   getOpenAIApiRuntimeConfig,
   resolveOpenAIUpstreamAccountId,
   postCodexImageWithTokenRefresh,
@@ -513,10 +519,20 @@ registerAdminRoutes(app, {
 });
 
 registerUserRoutes(app, {
+  cacheApiKey,
   getPortalPrincipalFromLocals,
+  getAssignedSourceAccount,
+  getUserUpstreamQuotaSummary,
+  hydrateUpstreamQuotaCache,
+  invalidateActiveSourceAccount,
   invalidateApiKeyAuthCacheByOwnerUserId,
+  primeUserBillingAllowance,
+  listApiKeys,
   listPortalUsers,
+  listPortalUserUpstreamAssignments,
+  setPortalUserUpstreamAssignment,
   createPortalUser,
+  createPortalInvitation,
   updatePortalUsernameById,
   updatePortalUserPasswordById,
   setPortalUserEnabledById,
@@ -538,6 +554,12 @@ registerAccountMaintenanceRoutes(app, {
   getOpenAIAccountByEmail,
   postCodexResponsesWithTokenRefresh,
   extractCodexResultFromSse,
+  extractCodexTerminalResponseFromSse,
+  getPortalPrincipalFromLocals,
+  ensureUserUpstreamQuota,
+  settleUserUpstreamQuota,
+  extractResponseUsage,
+  estimateUsageCost,
   invalidateActiveSourceAccount,
 });
 
@@ -624,7 +646,7 @@ httpServer.on("upgrade", (request, socket, head) => {
           isApiKeyBoundToUser,
           ensureUserBillingAllowanceOrNull,
           isUserBillingAllowanceExceeded,
-          getActiveSourceAccount,
+          getAssignedSourceAccount,
           resolveOpenAIUpstreamAccountId,
           getOpenAIApiRuntimeConfig,
           connectResponsesWebSocketProxyUpstream,
@@ -691,6 +713,8 @@ httpServer.on("upgrade", (request, socket, head) => {
             isRecord,
             WS_READY_STATE_OPEN,
             WS_READY_STATE_CONNECTING,
+            ensureUserUpstreamQuota,
+            settleUserUpstreamQuota,
           },
           {
             clientSocket: ws,
@@ -732,13 +756,14 @@ httpServer.on("upgrade", (request, socket, head) => {
   });
 });
 
-httpServer.listen(port, host, async () => {
+async function startServer() {
   if (!process.env.DATABASE_URL?.trim()) {
-    console.log("[setup] initialization required; open the web setup page");
-    console.log(`[backend] listening at http://${host}:${port}`);
+    httpServer.listen(port, host, () => {
+      console.log("[setup] initialization required; open the web setup page");
+      console.log(`[backend] listening at http://${host}:${port}`);
+    });
     return;
-  }
-  try {
+  } else {
     await ensureDatabaseSchema();
     const selfCheck = await runDatabaseSelfCheck();
     if (!selfCheck.ok || selfCheck.issues.length > 0) {
@@ -750,10 +775,24 @@ httpServer.listen(port, host, async () => {
     } else {
       console.log("[backend] database self-check passed");
     }
-  } catch (error) {
-    console.error("[backend] schema init failed:", error);
+    const [apiKeys, users, assignedAccounts] = await Promise.all([
+      listApiKeys(),
+      listPortalUsers(),
+      hydrateSourceAccountCache(),
+    ]);
+    await hydrateUpstreamQuotaCache({
+      sourceAccounts: assignedAccounts.map((item) => item.account),
+    });
+    hydrateResponseAuthState({ apiKeys, users });
   }
-  console.log(`[backend] listening at http://${host}:${port}`);
+  httpServer.listen(port, host, () => {
+    console.log(`[backend] listening at http://${host}:${port}`);
+  });
+}
+
+void startServer().catch((error) => {
+  console.error("[backend] startup failed:", error);
+  process.exitCode = 1;
 });
 
 let shutdownStarted = false;
@@ -767,8 +806,12 @@ async function shutdown(signal: NodeJS.Signals) {
       httpServer.close(() => resolve()),
     );
   }
-  await flushAllResponseSettlements();
   await closePromise;
+  await Promise.all([
+    flushAllResponseSettlements(),
+    flushUpstreamQuotaSettlements(),
+  ]);
+  await flushUpstreamTokenPersistence();
   await stopResponseSettlementServices();
 }
 

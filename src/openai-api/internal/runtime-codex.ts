@@ -9,7 +9,6 @@ const CLIENT_ACCOUNT_HEADERS = [
   "chatgpt-account-id",
   "openai-organization",
   "openai-project",
-  "x-codex-routing-hint",
   "x-oai-attestation",
   "x-openai-fedramp",
 ] as const;

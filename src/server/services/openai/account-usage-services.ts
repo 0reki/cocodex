@@ -1,13 +1,6 @@
 const CREDITS_PER_USD = 25;
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const MAX_ANALYTICS_DAYS = 90;
-const MAX_USAGE_SNAPSHOTS = 100;
-
-type UsageSnapshot = {
-  resetAt: number;
-  usedPercent: number;
-  observedCredits: number;
-};
 
 type UsageWindow = {
   usedPercent: number;
@@ -192,18 +185,7 @@ export function resolveUsageAnalyticsDateRange(
 }
 
 export function createAccountUsageSummaryService() {
-  const snapshots = new Map<string, UsageSnapshot>();
-
-  function rememberSnapshot(accountId: string, snapshot: UsageSnapshot) {
-    if (!snapshots.has(accountId) && snapshots.size >= MAX_USAGE_SNAPSHOTS) {
-      const oldest = snapshots.keys().next().value;
-      if (typeof oldest === "string") snapshots.delete(oldest);
-    }
-    snapshots.set(accountId, snapshot);
-  }
-
   function summarize(args: {
-    accountId: string;
     usage: Record<string, unknown>;
     dailyUsage: Record<string, unknown>;
     capturedAtMs?: number;
@@ -221,57 +203,6 @@ export function createAccountUsageSummaryService() {
             .reduce((sum, item) => sum + (item.totals.credits ?? 0), 0),
         )
       : 0;
-    const previous = snapshots.get(args.accountId) ?? null;
-    let method: "snapshot_delta" | "window_ratio" | null = null;
-    let estimatedTotalCredits: number | null = null;
-
-    if (weeklyWindow && weeklyWindow.usedPercent > 0 && observedCredits > 0) {
-      const deltaPercent = previous
-        ? weeklyWindow.usedPercent - previous.usedPercent
-        : 0;
-      const deltaCredits = previous
-        ? observedCredits - previous.observedCredits
-        : 0;
-      if (
-        previous?.resetAt === weeklyWindow.resetAt &&
-        deltaPercent > 0 &&
-        deltaCredits > 0
-      ) {
-        method = "snapshot_delta";
-        estimatedTotalCredits = rounded((deltaCredits * 100) / deltaPercent);
-      } else {
-        method = "window_ratio";
-        estimatedTotalCredits = rounded(
-          (observedCredits * 100) / weeklyWindow.usedPercent,
-        );
-      }
-    }
-
-    if (weeklyWindow) {
-      const currentSnapshot = {
-        resetAt: weeklyWindow.resetAt,
-        usedPercent: weeklyWindow.usedPercent,
-        observedCredits,
-      };
-      if (
-        !previous ||
-        previous.resetAt !== currentSnapshot.resetAt ||
-        currentSnapshot.usedPercent >= previous.usedPercent
-      ) {
-        rememberSnapshot(args.accountId, currentSnapshot);
-      }
-    }
-
-    const estimatedTotalUsd =
-      estimatedTotalCredits === null
-        ? null
-        : creditsToUsd(estimatedTotalCredits);
-    const estimatedRemainingUsd =
-      estimatedTotalUsd === null || !weeklyWindow
-        ? null
-        : rounded(
-            estimatedTotalUsd * (1 - weeklyWindow.usedPercent / 100),
-          );
     const totalCredits = rounded(
       daily.reduce((sum, item) => sum + (item.totals.credits ?? 0), 0),
     );
@@ -295,22 +226,16 @@ export function createAccountUsageSummaryService() {
         usd: creditsToUsd(totalCredits),
       },
       weeklyEstimate: {
-        available: estimatedTotalUsd !== null,
-        reason: weeklyWindow
-          ? weeklyWindow.usedPercent <= 0
-            ? "usage_percent_is_zero"
-            : observedCredits <= 0
-              ? "daily_usage_is_zero"
-              : null
-          : "weekly_window_unavailable",
-        method,
-        approximate: true,
+        available: false,
+        reason: "quota_inference_disabled",
+        method: null,
+        approximate: false,
         window: weeklyWindow,
         observedCredits,
         observedUsd: creditsToUsd(observedCredits),
-        estimatedTotalCredits,
-        estimatedTotalUsd,
-        estimatedRemainingUsd,
+        estimatedTotalCredits: null,
+        estimatedTotalUsd: null,
+        estimatedRemainingUsd: null,
       },
     };
   }

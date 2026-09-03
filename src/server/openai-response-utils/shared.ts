@@ -72,6 +72,35 @@ export function extractCodexResultFromSse(responseText: string): string | null {
   return result || null;
 }
 
+export function extractCodexTerminalResponseFromSse(
+  responseText: string,
+): Record<string, unknown> | null {
+  for (const block of responseText.split(/\r?\n\r?\n/).reverse()) {
+    const data = block
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    if (!data) continue;
+    try {
+      const parsed = JSON.parse(data) as Record<string, unknown>;
+      if (
+        (parsed.type === "response.completed" ||
+          parsed.type === "response.done" ||
+          parsed.type === "response.failed" ||
+          parsed.type === "response.incomplete" ||
+          parsed.type === "response.cancelled") &&
+        isRecord(parsed.response)
+      ) {
+        return parsed.response;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

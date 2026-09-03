@@ -105,6 +105,37 @@ export function createUpstreamRequestServices(deps: {
     string,
     RefreshedAccountTokens & { replacedAccessToken: string }
   >();
+  const tokenPersistenceTasks = new Map<string, Promise<void>>();
+
+  function queueTokenPersistence(
+    accountId: string,
+    tokens: RefreshedAccountTokens,
+  ) {
+    const previous = tokenPersistenceTasks.get(accountId) ?? Promise.resolve();
+    let task: Promise<void>;
+    task = previous
+      .catch(() => undefined)
+      .then(async () => {
+        await deps.updateOpenAIAccountTokensById(accountId, tokens);
+      })
+      .catch((error) => {
+        console.warn(
+          `[upstream] failed to persist refreshed tokens for ${accountId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      })
+      .finally(() => {
+        if (tokenPersistenceTasks.get(accountId) === task) {
+          tokenPersistenceTasks.delete(accountId);
+        }
+      });
+    tokenPersistenceTasks.set(accountId, task);
+  }
+
+  async function flushUpstreamTokenPersistence() {
+    while (tokenPersistenceTasks.size > 0) {
+      await Promise.all(tokenPersistenceTasks.values());
+    }
+  }
 
   function requireWsSocket(value: unknown): WsSocket {
     if (!value || typeof value !== "object") {
@@ -200,11 +231,12 @@ export function createUpstreamRequestServices(deps: {
           accessToken,
           refreshToken: refreshed.refreshToken?.trim() || null,
         };
-        await deps.updateOpenAIAccountTokensById(account.id, tokens);
         latestRefreshByAccountId.set(account.id, {
           ...tokens,
           replacedAccessToken: failedAccessToken,
         });
+        applyRefreshedTokens(account, tokens);
+        queueTokenPersistence(account.id, tokens);
         return tokens;
       })();
       refreshTasks.set(account.id, task);
@@ -532,6 +564,7 @@ export function createUpstreamRequestServices(deps: {
     getCodexDailyWorkspaceUsageWithTokenRefresh,
     getCodexModelsWithTokenRefresh,
     getCodexUsageWithTokenRefresh,
+    flushUpstreamTokenPersistence,
     postCodexImageWithTokenRefresh,
     postCodexResponsesWithTokenRefresh,
     connectResponsesWebSocketProxyUpstream,

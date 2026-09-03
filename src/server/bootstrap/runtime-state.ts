@@ -17,26 +17,6 @@ export function createServerRuntimeState() {
   };
   const DEFAULT_OPENAI_API_USER_AGENT = "node/22.14.0";
   const DEFAULT_OPENAI_API_CLIENT_VERSION = "0.152.0";
-  const ACTIVE_SOURCE_ACCOUNT_CACHE_TTL_MS = positiveInteger(
-    process.env.ACTIVE_SOURCE_ACCOUNT_CACHE_TTL_MS,
-    30_000,
-  );
-  const API_KEY_AUTH_LRU_MAX = positiveInteger(
-    process.env.API_KEY_AUTH_LRU_MAX,
-    5000,
-  );
-  const API_KEY_AUTH_LRU_TTL_MS = positiveInteger(
-    process.env.API_KEY_AUTH_LRU_TTL_MS,
-    30_000,
-  );
-  const BILLING_ALLOWANCE_LRU_MAX = positiveInteger(
-    process.env.BILLING_ALLOWANCE_LRU_MAX,
-    5000,
-  );
-  const BILLING_ALLOWANCE_LRU_TTL_MS = positiveInteger(
-    process.env.BILLING_ALLOWANCE_LRU_TTL_MS,
-    300_000,
-  );
   const BILLING_OVERDRAFT_LIMIT_USD = positiveUsdAmount(
     process.env.BILLING_OVERDRAFT_LIMIT_USD,
     "10",
@@ -72,19 +52,10 @@ export function createServerRuntimeState() {
     { value: ApiKeyRecord; expiresAtMs: number }
   >();
   const apiKeyAuthTokenById = new Map<string, string>();
-  const apiKeyAuthLoadingPromises = new Map<
-    string,
-    Promise<ApiKeyRecord | null>
-  >();
-  const apiKeyAuthTokenVersions = new Map<string, number>();
   const apiKeyPendingCharges = new Map<string, UsdAmount>();
   const billingAllowanceLruCache = new Map<
     string,
     { value: PortalUserSpendAllowanceValue; expiresAtMs: number }
-  >();
-  const billingAllowanceLoadingPromises = new Map<
-    string,
-    Promise<PortalUserSpendAllowanceValue>
   >();
   const billingPendingChargesByOwnerId = new Map<string, UsdAmount>();
   const billingReservationById = new Map<
@@ -95,11 +66,6 @@ export function createServerRuntimeState() {
   return {
     DEFAULT_OPENAI_API_USER_AGENT,
     DEFAULT_OPENAI_API_CLIENT_VERSION,
-    ACTIVE_SOURCE_ACCOUNT_CACHE_TTL_MS,
-    API_KEY_AUTH_LRU_MAX,
-    API_KEY_AUTH_LRU_TTL_MS,
-    BILLING_ALLOWANCE_LRU_MAX,
-    BILLING_ALLOWANCE_LRU_TTL_MS,
     BILLING_OVERDRAFT_LIMIT_USD,
     BILLING_INFLIGHT_RESERVE_USD,
     PRICE_AFTER_272K_INPUT_THRESHOLD_TOKENS,
@@ -110,11 +76,8 @@ export function createServerRuntimeState() {
     RESPONSE_SETTLEMENT_RETRY_MAX_MS,
     apiKeyAuthLruCache,
     apiKeyAuthTokenById,
-    apiKeyAuthLoadingPromises,
-    apiKeyAuthTokenVersions,
     apiKeyPendingCharges,
     billingAllowanceLruCache,
-    billingAllowanceLoadingPromises,
     billingPendingChargesByOwnerId,
     billingReservationById,
     billingReservedAmountsByOwnerId,

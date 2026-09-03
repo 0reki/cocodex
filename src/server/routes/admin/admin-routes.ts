@@ -329,7 +329,7 @@ export function registerAdminRoutes(
         res.status(404).json({ ok: false, error: "Account not found" });
         return;
       }
-      invalidateActiveSourceAccount();
+      await invalidateActiveSourceAccount();
       res.json({ ok: true, deleted: 1 });
     } catch (error) {
       res.status(500).json({
@@ -350,7 +350,7 @@ export function registerAdminRoutes(
         return;
       }
       const deleted = await deleteOpenAIAccountsByEmails(emails);
-      if (deleted > 0) invalidateActiveSourceAccount();
+      if (deleted > 0) await invalidateActiveSourceAccount();
       res.json({ ok: true, deleted, requested: emails.length });
     } catch (error) {
       res.status(500).json({
@@ -373,7 +373,7 @@ export function registerAdminRoutes(
         res.status(404).json({ ok: false, error: "Account not found" });
         return;
       }
-      invalidateActiveSourceAccount();
+      await invalidateActiveSourceAccount();
       res.json({ ok: true, updated: 1, status: "disabled" });
     } catch (error) {
       res.status(500).json({
@@ -396,7 +396,7 @@ export function registerAdminRoutes(
         res.status(404).json({ ok: false, error: "Account not found" });
         return;
       }
-      invalidateActiveSourceAccount();
+      await invalidateActiveSourceAccount();
       res.json({ ok: true, updated: 1, status: "active" });
     } catch (error) {
       res.status(500).json({
@@ -417,7 +417,7 @@ export function registerAdminRoutes(
         return;
       }
       const updated = await disableOpenAIAccountsByEmails(emails);
-      if (updated > 0) invalidateActiveSourceAccount();
+      if (updated > 0) await invalidateActiveSourceAccount();
       res.json({
         ok: true,
         updated,
@@ -478,7 +478,7 @@ export function registerAdminRoutes(
         accessToken,
         refreshToken,
       });
-      invalidateActiveSourceAccount();
+      await invalidateActiveSourceAccount();
 
       res.status(201).json(publicOpenAIAccount(row));
     } catch (error) {
@@ -538,7 +538,7 @@ export function registerAdminRoutes(
           accessToken: result.accessToken,
           refreshToken: result.refreshToken,
         });
-        invalidateActiveSourceAccount();
+        await invalidateActiveSourceAccount();
         res.status(201).json({
           status: "complete",
           account: publicOpenAIAccount(account),

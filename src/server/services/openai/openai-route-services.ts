@@ -20,7 +20,7 @@ export type OpenAIRequestPreparationDependencies = Pick<
 
 export type ActiveSourceAccountDependencies = Pick<
   ServerServices,
-  "getActiveSourceAccount"
+  "getAssignedSourceAccount"
 > & {
   resolveOpenAIUpstreamAccountId: typeof resolveOpenAIUpstreamAccountId;
 };
@@ -37,11 +37,17 @@ export type OpenAIResponseLogDependencies = Pick<
   "enqueueResponseSettlement" | "cancelResponseRequestReservation"
 >;
 
+export type UpstreamQuotaDependencies = Pick<
+  ServerServices,
+  "ensureUserUpstreamQuota" | "settleUserUpstreamQuota"
+>;
+
 export type OpenAIResponsesRouteDependencies =
   OpenAIRequestPreparationDependencies &
     ActiveSourceAccountDependencies &
     OpenAIAccountingDependencies &
     OpenAIResponseLogDependencies &
+    UpstreamQuotaDependencies &
     Pick<
       ServerServices,
       | "createRequestAbortContext"
@@ -68,8 +74,9 @@ export async function prepareOpenAIRouteRequest(args: {
   intentId: string;
   model: string | null;
   startedAtMs: number;
+  billable?: boolean;
 }) {
-  const { req, res, deps, intentId, model, startedAtMs } = args;
+  const { req, res, deps, intentId, model, startedAtMs, billable = true } = args;
 
   const { apiKey, reason: apiKeyAuthFailureReason } =
     await deps.authenticateApiKeyWithReason(req);
@@ -95,7 +102,7 @@ export async function prepareOpenAIRouteRequest(args: {
     return { ok: false as const, alreadyPersistedQuotaLog: true };
   }
 
-  if (deps.isApiKeyQuotaExceeded(apiKey)) {
+  if (billable && deps.isApiKeyQuotaExceeded(apiKey)) {
     await deps.persistQuotaExceededLog({
       requestPath: req.path,
       intentId,
@@ -145,6 +152,32 @@ export async function prepareOpenAIRouteRequest(args: {
   }
 
   const ownerUserId = apiKey.ownerUserId;
+  if (!billable) {
+    const reservation = deps.tryReserveResponseRequest({
+      reservationId: intentId,
+      ownerUserId: null,
+    });
+    if (!reservation.ok) {
+      res.status(503).json({
+        error: {
+          message: "Request log settlement is temporarily unavailable",
+          type: "server_error",
+          code: "settlement_queue_unavailable",
+        },
+      });
+      return {
+        ok: false as const,
+        alreadyPersistedQuotaLog: false,
+        apiKeyId: apiKey.id,
+        ownerUserId,
+      };
+    }
+    return {
+      ok: true as const,
+      apiKeyId: apiKey.id,
+      ownerUserId,
+    };
+  }
   if (ownerUserId) {
     const allowanceResult = await ensureBillingAllowanceOrRespond({
       req,
@@ -315,16 +348,20 @@ async function persistBillingAdmissionError(args: {
   });
 }
 
-export async function getReadyActiveSourceAccount(args: {
+export async function getReadyAssignedSourceAccount(args: {
   deps: ActiveSourceAccountDependencies;
+  ownerUserId: string;
 }) {
-  const { deps } = args;
-
-  const sourceAccount = await deps.getActiveSourceAccount();
+  const sourceAccount = await args.deps.getAssignedSourceAccount(
+    args.ownerUserId,
+  );
+  if (!sourceAccount) {
+    return { ok: false as const, reason: "unassigned" as const };
+  }
   if (
-    !sourceAccount ||
+    sourceAccount.status === "disabled" ||
     !sourceAccount.accessToken?.trim() ||
-    !deps.resolveOpenAIUpstreamAccountId(sourceAccount)
+    !args.deps.resolveOpenAIUpstreamAccountId(sourceAccount)
   ) {
     return { ok: false as const, reason: "unavailable" as const };
   }
@@ -339,6 +376,7 @@ export function finalizeOpenAIRouteAccounting(args: {
   usageResponsePayload: Record<string, unknown> | null;
   lastErrorPayload: Record<string, unknown> | null;
   serviceTier: PriorityServiceTier;
+  billable?: boolean;
 }) {
   const {
     deps,
@@ -348,16 +386,19 @@ export function finalizeOpenAIRouteAccounting(args: {
     usageResponsePayload,
     lastErrorPayload,
     serviceTier,
+    billable = true,
   } = args;
 
   const usageSource = usageResponsePayload
     ? { response: usageResponsePayload }
     : lastErrorPayload;
   const usage = deps.extractResponseUsage(usageSource);
-  const cost = deps.applyServiceTierBillingMultiplier(
-    deps.estimateUsageCost(pricingModelId ?? model, usage.tokensInfo),
-    serviceTier,
-  );
+  const cost = billable
+    ? deps.applyServiceTierBillingMultiplier(
+        deps.estimateUsageCost(pricingModelId ?? model, usage.tokensInfo),
+        serviceTier,
+      )
+    : null;
   const shouldCharge =
     apiKeyId &&
     typeof cost === "bigint" &&

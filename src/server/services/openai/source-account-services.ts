@@ -1,49 +1,50 @@
 import type { OpenAIAccountRecord } from "../../../database/index.ts";
 
 export function createSourceAccountServices(deps: {
-  ensureDatabaseSchema: () => Promise<void>;
-  getActiveOpenAIAccount: () => Promise<OpenAIAccountRecord | null>;
-  cacheTtlMs: number;
+  listAssignedOpenAIAccounts: () => Promise<
+    Array<{ ownerUserId: string; account: OpenAIAccountRecord }>
+  >;
 }) {
-  let cached: { value: OpenAIAccountRecord | null; expiresAtMs: number } | null =
-    null;
-  let loading: Promise<OpenAIAccountRecord | null> | null = null;
-  let invalidationVersion = 0;
+  const assignedAccounts = new Map<string, OpenAIAccountRecord>();
 
-  async function getActiveSourceAccount(): Promise<OpenAIAccountRecord | null> {
-    if (cached && cached.expiresAtMs > Date.now()) return cached.value;
-    if (loading) return loading;
-
-    const version = invalidationVersion;
-    const task = (async () => {
-      await deps.ensureDatabaseSchema();
-      return deps.getActiveOpenAIAccount();
-    })();
-    loading = task;
-    try {
-      const account = await task;
-      if (version !== invalidationVersion) {
-        if (loading === task) loading = null;
-        return getActiveSourceAccount();
-      }
-      cached = {
-        value: account,
-        expiresAtMs: Date.now() + deps.cacheTtlMs,
-      };
-      return account;
-    } finally {
-      if (loading === task) loading = null;
+  async function hydrateSourceAccountCache() {
+    const assignments = await deps.listAssignedOpenAIAccounts();
+    assignedAccounts.clear();
+    const accountsById = new Map<string, OpenAIAccountRecord>();
+    for (const assignment of assignments) {
+      const account =
+        accountsById.get(assignment.account.id) ?? assignment.account;
+      accountsById.set(account.id, account);
+      assignedAccounts.set(assignment.ownerUserId, account);
     }
+    return assignments.map((assignment) => ({
+      ...assignment,
+      account: accountsById.get(assignment.account.id) ?? assignment.account,
+    }));
   }
 
-  function invalidateActiveSourceAccount() {
-    invalidationVersion += 1;
-    cached = null;
-    loading = null;
+  async function invalidateActiveSourceAccount() {
+    return hydrateSourceAccountCache();
+  }
+
+  function getAssignedSourceAccount(ownerUserId: string) {
+    const normalized = ownerUserId.trim();
+    if (!normalized) return null;
+    const account = assignedAccounts.get(normalized) ?? null;
+    if (
+      !account ||
+      account.status === "disabled" ||
+      !account.accountId.trim() ||
+      !account.accessToken.trim()
+    ) {
+      return null;
+    }
+    return account;
   }
 
   return {
-    getActiveSourceAccount,
+    getAssignedSourceAccount,
+    hydrateSourceAccountCache,
     invalidateActiveSourceAccount,
   };
 }

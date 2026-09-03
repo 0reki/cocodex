@@ -1,4 +1,5 @@
 import {
+  createHash,
   createHmac,
   randomBytes,
   scrypt,
@@ -134,6 +135,14 @@ export function verifyPortalToken(
 
 export function verifyPortalAccessToken(token: string) {
   return verifyPortalToken(token, "access");
+}
+
+export function createPortalInvitationToken() {
+  return randomBytes(32).toString("base64url");
+}
+
+export function hashPortalInvitationToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 function derivePasswordKey(

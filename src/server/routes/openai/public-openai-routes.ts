@@ -3,7 +3,7 @@ import type { ensureDatabaseSchema } from "../../../database/index.ts";
 import * as openaiApiModule from "../../../openai-api/index.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
 import {
-  getReadyActiveSourceAccount,
+  getReadyAssignedSourceAccount,
   type ActiveSourceAccountDependencies,
 } from "../../services/openai/openai-route-services.ts";
 
@@ -12,6 +12,7 @@ type PublicOpenAIRouteDependencies = ActiveSourceAccountDependencies &
     ServerServices,
     | "authenticateApiKeyWithReason"
     | "getApiKeyAuthErrorDetail"
+    | "isApiKeyBoundToUser"
     | "getOpenAIApiRuntimeConfig"
     | "getCodexModelsWithTokenRefresh"
     | "buildOpenAIModelsList"
@@ -61,13 +62,26 @@ export function registerPublicOpenAIRoutes(
         return;
       }
 
-      const activeAccount = await getReadyActiveSourceAccount({ deps });
-      if (!activeAccount.ok) {
-        res.status(503).json({
+      if (!deps.isApiKeyBoundToUser(apiKey)) {
+        res.status(403).json({
           error: {
-            message: "No active upstream account",
-            type: "server_error",
-            code: "upstream_account_unavailable",
+            message: "API key must be bound to a user",
+            type: "invalid_request_error",
+            code: "api_key_owner_missing",
+          },
+        });
+        return;
+      }
+      const assignedAccount = await getReadyAssignedSourceAccount({
+        deps,
+        ownerUserId: apiKey.ownerUserId,
+      });
+      if (!assignedAccount.ok) {
+        res.status(403).json({
+          error: {
+            message: "No upstream account assigned",
+            type: "invalid_request_error",
+            code: "upstream_account_unassigned",
           },
         });
         return;
@@ -76,7 +90,7 @@ export function registerPublicOpenAIRoutes(
       const runtimeConfig = await deps.getOpenAIApiRuntimeConfig();
       const upstream = await deps.getCodexModelsWithTokenRefresh({
         module: openaiApiModule,
-        account: activeAccount.sourceAccount,
+        account: assignedAccount.sourceAccount,
         runtimeConfig,
       });
       res.json({

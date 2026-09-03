@@ -36,33 +36,16 @@ export function createAuthServices(deps: {
     cache: Map<K, V>,
     key: K,
   ) => V | null;
-  lruSet: <K, V extends { expiresAtMs: number }>(
-    cache: Map<K, V>,
-    key: K,
-    value: V,
-    maxSize: number,
-  ) => void;
   apiKeyAuthLruCache: Map<
     string,
     { value: ApiKeyRecord; expiresAtMs: number }
   >;
   apiKeyAuthTokenById: Map<string, string>;
-  apiKeyAuthLoadingPromises: Map<string, Promise<ApiKeyRecord | null>>;
-  apiKeyAuthTokenVersions: Map<string, number>;
   apiKeyPendingCharges: Map<string, UsdAmount>;
-  apiKeyAuthLruMax: number;
-  apiKeyAuthLruTtlMs: number;
-  getApiKeyByToken: (token: string) => Promise<ApiKeyRecord | null>;
   billingAllowanceLruCache: Map<
     string,
     { value: PortalUserSpendAllowanceValue; expiresAtMs: number }
   >;
-  billingAllowanceLoadingPromises: Map<
-    string,
-    Promise<PortalUserSpendAllowanceValue>
-  >;
-  billingAllowanceLruMax: number;
-  billingAllowanceLruTtlMs: number;
   billingOverdraftLimitUsd: UsdAmount;
   billingInflightReserveUsd: UsdAmount;
   billingPendingChargesByOwnerId: Map<string, UsdAmount>;
@@ -71,55 +54,28 @@ export function createAuthServices(deps: {
     { ownerUserId: string; amount: UsdAmount }
   >;
   billingReservedAmountsByOwnerId: Map<string, UsdAmount>;
-  getPortalUserSpendAllowance: (
-    ownerUserId: string,
-  ) => Promise<PortalUserSpendAllowanceValue>;
   getPortalUserById: (id: string) => Promise<PortalUserRecord | null>;
 }) {
-  let apiKeyAuthInvalidationVersion = 0;
-
   function storeApiKey(apiKey: ApiKeyRecord) {
     const token = apiKey.apiKey.trim();
     if (!token) return;
-    deps.lruSet(
-      deps.apiKeyAuthLruCache,
-      token,
-      {
-        value: { ...apiKey },
-        expiresAtMs: Date.now() + deps.apiKeyAuthLruTtlMs,
-      },
-      deps.apiKeyAuthLruMax,
-    );
+    deps.apiKeyAuthLruCache.delete(token);
+    deps.apiKeyAuthLruCache.set(token, {
+      value: { ...apiKey },
+      expiresAtMs: Number.POSITIVE_INFINITY,
+    });
     deps.apiKeyAuthTokenById.set(apiKey.id, token);
-    if (deps.apiKeyAuthTokenById.size > deps.apiKeyAuthLruMax * 2) {
-      for (const [id, indexedToken] of deps.apiKeyAuthTokenById) {
-        if (!deps.apiKeyAuthLruCache.has(indexedToken)) {
-          deps.apiKeyAuthTokenById.delete(id);
-        }
-        if (deps.apiKeyAuthTokenById.size <= deps.apiKeyAuthLruMax) break;
-      }
-    }
-  }
-
-  function advanceApiKeyTokenVersion(token: string) {
-    deps.apiKeyAuthTokenVersions.set(
-      token,
-      (deps.apiKeyAuthTokenVersions.get(token) ?? 0) + 1,
-    );
-    deps.apiKeyAuthLoadingPromises.delete(token);
   }
 
   function cacheApiKey(apiKey: ApiKeyRecord) {
     const token = apiKey.apiKey.trim();
     if (!token) return;
-    advanceApiKeyTokenVersion(token);
     storeApiKey(apiKey);
   }
 
   function invalidateApiKeyAuthCacheByToken(token: string) {
     const normalized = token.trim();
     if (!normalized) return;
-    advanceApiKeyTokenVersion(normalized);
     const cached = deps.apiKeyAuthLruCache.get(normalized)?.value;
     deps.apiKeyAuthLruCache.delete(normalized);
     if (cached && deps.apiKeyAuthTokenById.get(cached.id) === normalized) {
@@ -130,8 +86,6 @@ export function createAuthServices(deps: {
   function invalidateApiKeyAuthCacheByOwnerUserId(ownerUserId: string) {
     const normalized = ownerUserId.trim();
     if (!normalized) return;
-    apiKeyAuthInvalidationVersion += 1;
-    deps.apiKeyAuthLoadingPromises.clear();
     for (const [token, entry] of deps.apiKeyAuthLruCache) {
       if (entry.value.ownerUserId === normalized) {
         invalidateApiKeyAuthCacheByToken(token);
@@ -183,12 +137,12 @@ export function createAuthServices(deps: {
     };
   }
 
-  async function authenticateApiKeyByAuthorizationHeaderWithReason(
+  function authenticateApiKeyByAuthorizationHeaderWithReason(
     authorizationHeader: string | string[] | undefined,
-  ): Promise<{
+  ): {
     apiKey: ApiKeyRecord | null;
     reason: ApiKeyAuthFailureReason | null;
-  }> {
+  } {
     const auth = Array.isArray(authorizationHeader)
       ? (authorizationHeader[0] ?? "").trim()
       : (authorizationHeader ?? "").trim();
@@ -209,38 +163,13 @@ export function createAuthServices(deps: {
     }
     if (fromLru) invalidateApiKeyAuthCacheByToken(token);
 
-    const tokenVersion = deps.apiKeyAuthTokenVersions.get(token) ?? 0;
-    const invalidationVersion = apiKeyAuthInvalidationVersion;
-    let loading = deps.apiKeyAuthLoadingPromises.get(token);
-    if (!loading) {
-      loading = deps.getApiKeyByToken(token);
-      deps.apiKeyAuthLoadingPromises.set(token, loading);
-    }
-    let matched: ApiKeyRecord | null;
-    try {
-      matched = await loading;
-    } finally {
-      if (deps.apiKeyAuthLoadingPromises.get(token) === loading) {
-        deps.apiKeyAuthLoadingPromises.delete(token);
-      }
-    }
-    if (
-      (deps.apiKeyAuthTokenVersions.get(token) ?? 0) !== tokenVersion ||
-      apiKeyAuthInvalidationVersion !== invalidationVersion
-    ) {
-      matched = await deps.getApiKeyByToken(token);
-    }
-    if (matched && isApiKeyUsable(matched)) {
-      storeApiKey(matched);
-      return { apiKey: matched, reason: null };
-    }
     return { apiKey: null, reason: "api_key_not_found_or_expired" };
   }
 
-  async function authenticateApiKeyWithReason(req: Request): Promise<{
+  function authenticateApiKeyWithReason(req: Request): {
     apiKey: ApiKeyRecord | null;
     reason: ApiKeyAuthFailureReason | null;
-  }> {
+  } {
     return authenticateApiKeyByAuthorizationHeaderWithReason(
       req.header("authorization"),
     );
@@ -352,43 +281,48 @@ export function createAuthServices(deps: {
     return used + pending >= quota;
   }
 
-  async function ensureUserBillingAllowanceOrNull(ownerUserId: string | null) {
+  function ensureUserBillingAllowanceOrNull(ownerUserId: string | null) {
     if (!ownerUserId) return null;
     const ownerId = ownerUserId.trim();
     if (!ownerId) return null;
     const cached = deps.lruGet(deps.billingAllowanceLruCache, ownerId);
     if (cached) return cached.value;
+    return null;
+  }
 
-    const loading = deps.billingAllowanceLoadingPromises.get(ownerId);
-    if (loading) {
-      return await loading;
+  function primeUserBillingAllowance(ownerUserId: string, balance: unknown) {
+    const ownerId = ownerUserId.trim();
+    const amount =
+      typeof balance === "bigint" ? balance : parseUsdAmount(balance);
+    if (!ownerId || amount === null) return;
+    const effectiveBalance =
+      amount - (deps.billingPendingChargesByOwnerId.get(ownerId) ?? 0n);
+    deps.billingAllowanceLruCache.set(ownerId, {
+      value: {
+        balance: effectiveBalance,
+        totalAvailable: effectiveBalance,
+      },
+      expiresAtMs: Number.POSITIVE_INFINITY,
+    });
+  }
+
+  function hydrateResponseAuthState(input: {
+    apiKeys: ApiKeyRecord[];
+    users: Array<{ id: string; enabled: boolean; balance: unknown }>;
+  }) {
+    deps.apiKeyAuthLruCache.clear();
+    deps.apiKeyAuthTokenById.clear();
+    deps.billingAllowanceLruCache.clear();
+    const enabledUserIds = new Set(
+      input.users.filter((user) => user.enabled).map((user) => user.id),
+    );
+    for (const apiKey of input.apiKeys) {
+      if (apiKey.ownerUserId && enabledUserIds.has(apiKey.ownerUserId)) {
+        storeApiKey(apiKey);
+      }
     }
-
-    const loadPromise = (async () => {
-      const allowance = await deps.getPortalUserSpendAllowance(ownerId);
-      const pendingCharge =
-        deps.billingPendingChargesByOwnerId.get(ownerId) ?? 0n;
-      const availableAfterPending = allowance.totalAvailable - pendingCharge;
-      const effectiveAllowance: PortalUserSpendAllowanceValue = {
-        balance: allowance.balance - pendingCharge,
-        totalAvailable: availableAfterPending,
-      };
-      deps.lruSet(
-        deps.billingAllowanceLruCache,
-        ownerId,
-        {
-          value: effectiveAllowance,
-          expiresAtMs: Date.now() + deps.billingAllowanceLruTtlMs,
-        },
-        deps.billingAllowanceLruMax,
-      );
-      return effectiveAllowance;
-    })();
-    deps.billingAllowanceLoadingPromises.set(ownerId, loadPromise);
-    try {
-      return await loadPromise;
-    } finally {
-      deps.billingAllowanceLoadingPromises.delete(ownerId);
+    for (const user of input.users) {
+      primeUserBillingAllowance(user.id, user.balance);
     }
   }
 
@@ -421,15 +355,10 @@ export function createAuthServices(deps: {
       balance: nextBalance,
       totalAvailable: nextBalance,
     };
-    deps.lruSet(
-      deps.billingAllowanceLruCache,
-      ownerId,
-      {
-        value: next,
-        expiresAtMs: Date.now() + deps.billingAllowanceLruTtlMs,
-      },
-      deps.billingAllowanceLruMax,
-    );
+    deps.billingAllowanceLruCache.set(ownerId, {
+      value: next,
+      expiresAtMs: Number.POSITIVE_INFINITY,
+    });
   }
 
   function settleUserBillingAllowanceChargeCache(
@@ -452,15 +381,10 @@ export function createAuthServices(deps: {
     const cached = deps.billingAllowanceLruCache.get(ownerId) ?? null;
     if (!cached) return;
     const balance = cached.value.balance + amount;
-    deps.lruSet(
-      deps.billingAllowanceLruCache,
-      ownerId,
-      {
-        value: { balance, totalAvailable: balance },
-        expiresAtMs: Date.now() + deps.billingAllowanceLruTtlMs,
-      },
-      deps.billingAllowanceLruMax,
-    );
+    deps.billingAllowanceLruCache.set(ownerId, {
+      value: { balance, totalAvailable: balance },
+      expiresAtMs: Number.POSITIVE_INFINITY,
+    });
   }
 
   function isUserBillingAllowanceExceeded(ownerUserId: string | null) {
@@ -532,7 +456,9 @@ export function createAuthServices(deps: {
     }
   }
 
-  function isApiKeyBoundToUser(apiKey: ApiKeyRecord): boolean {
+  function isApiKeyBoundToUser(
+    apiKey: ApiKeyRecord,
+  ): apiKey is ApiKeyRecord & { ownerUserId: string } {
     return (
       typeof apiKey.ownerUserId === "string" &&
       apiKey.ownerUserId.trim().length > 0
@@ -576,10 +502,12 @@ export function createAuthServices(deps: {
     getAccessTokenAuthErrorDetail,
     getPortalPrincipalFromLocals,
     cacheApiKey,
+    hydrateResponseAuthState,
     invalidateApiKeyAuthCacheByToken,
     invalidateApiKeyAuthCacheByOwnerUserId,
     isApiKeyQuotaExceeded,
     ensureUserBillingAllowanceOrNull,
+    primeUserBillingAllowance,
     isUserBillingAllowanceExceeded,
     tryReserveUserBillingRequest,
     releaseUserBillingRequestReservation,

@@ -52,12 +52,6 @@ export const DEFAULT_MODEL_PRICING_USD: ModelPricingRecord[] = [
     output_price_per_million: "4.52",
   },
   {
-    slug: "gpt-5.3-codex-spark",
-    input_price_per_million: "0",
-    cached_input_price_per_million: "0",
-    output_price_per_million: "0",
-  },
-  {
     slug: "gpt-image-2",
     text_input_price_per_million: "5",
     cached_text_input_price_per_million: "1.25",

@@ -4,7 +4,7 @@ import * as openaiApiModule from "../../../openai-api/index.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
 import {
   finalizeOpenAIRouteAccounting,
-  getReadyActiveSourceAccount,
+  getReadyAssignedSourceAccount,
   persistOpenAIResponseLog,
   prepareOpenAIRouteRequest,
   type ActiveSourceAccountDependencies,
@@ -67,6 +67,7 @@ export function registerImageRoutes(
           intentId,
           model,
           startedAtMs,
+          billable: false,
         });
         if (!preparedRequest.ok) {
           alreadyPersistedQuotaLog = preparedRequest.alreadyPersistedQuotaLog;
@@ -77,23 +78,25 @@ export function registerImageRoutes(
         apiKeyId = preparedRequest.apiKeyId;
         ownerUserId = preparedRequest.ownerUserId;
 
-        const activeAccount = await getReadyActiveSourceAccount({ deps });
-        if (!activeAccount.ok) {
-          upstreamStatus = 503;
-          res.status(503).json({
+        const assignedAccount = await getReadyAssignedSourceAccount({
+          deps,
+          ownerUserId,
+        });
+        if (!assignedAccount.ok) {
+          upstreamStatus = 403;
+          res.status(403).json({
             error: {
-              message: "No active upstream account",
-              type: "server_error",
-              code: "upstream_account_unavailable",
+              message: "No upstream account assigned",
+              type: "invalid_request_error",
+              code: "upstream_account_unassigned",
             },
           });
           return;
         }
-
         const runtimeConfig = await deps.getOpenAIApiRuntimeConfig();
         const upstream = await deps.postCodexImageWithTokenRefresh({
           module: openaiApiModule,
-          account: activeAccount.sourceAccount,
+          account: assignedAccount.sourceAccount,
           operation,
           payload: requestBody,
           requestHeaders: getForwardRequestHeaders(req.headers),
@@ -136,6 +139,7 @@ export function registerImageRoutes(
             usageResponsePayload: responsePayload,
             lastErrorPayload: errorPayload,
             serviceTier: null,
+            billable: false,
           });
           persistOpenAIResponseLog({
             deps,
@@ -169,9 +173,8 @@ export function registerImageRoutes(
           console.warn(
             `[logs] failed to write ${req.path} log: ${error instanceof Error ? error.message : String(error)}`,
           );
-        } finally {
-          requestAbort.cleanup();
         }
+        requestAbort.cleanup();
       }
     });
   };

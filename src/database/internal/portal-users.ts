@@ -1,4 +1,9 @@
-import { query } from "../core/db.ts"
+import { query, withTransaction } from "../core/db.ts"
+import {
+  getPortalUserSeatUsage,
+  lockPortalUserSeats,
+  MAX_PORTAL_USERS,
+} from "./portal-user-seats.ts"
 import type {
   PortalUserRecord,
   PortalUserRole,
@@ -39,6 +44,13 @@ function mapPortalUserWithBalanceRow(
   return {
     ...mapPortalUserRow(row),
     balance: Number(row.balance ?? "0"),
+  }
+}
+
+export class PortalUserSeatLimitError extends Error {
+  constructor() {
+    super("All four user seats are already assigned or reserved")
+    this.name = "PortalUserSeatLimitError"
   }
 }
 
@@ -113,19 +125,29 @@ export async function createPortalUser(input: {
     typeof input.balance === "number" && Number.isFinite(input.balance)
       ? Math.max(0, input.balance)
       : 0
-  const result = await query<PortalUserRow>(
-    `
-      INSERT INTO portal_users (
-        username, password_hash, role, enabled, balance
-      )
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING ${PORTAL_USER_COLUMNS}
-    `,
-    [username, passwordHash, role, enabled, balance],
-  )
-  const row = result.rows[0]
-  if (!row) throw new Error("Failed to create portal user")
-  return mapPortalUserWithBalanceRow(row)
+  return withTransaction(async (client) => {
+    await lockPortalUserSeats(client)
+    if (role === "user") {
+      const { users, availableInvitations } =
+        await getPortalUserSeatUsage(client)
+      if (users + availableInvitations >= MAX_PORTAL_USERS) {
+        throw new PortalUserSeatLimitError()
+      }
+    }
+    const result = await client.query<PortalUserRow>(
+      `
+        INSERT INTO portal_users (
+          username, password_hash, role, enabled, balance
+        )
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING ${PORTAL_USER_COLUMNS}
+      `,
+      [username, passwordHash, role, enabled, balance],
+    )
+    const row = result.rows[0]
+    if (!row) throw new Error("Failed to create portal user")
+    return mapPortalUserWithBalanceRow(row)
+  })
 }
 
 export async function updatePortalUsernameById(

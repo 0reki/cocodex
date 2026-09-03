@@ -8,7 +8,7 @@ import type {
 import type { sendWsErrorEvent } from "../../bootstrap/helpers.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
 import {
-  getReadyActiveSourceAccount,
+  getReadyAssignedSourceAccount,
   type ActiveSourceAccountDependencies,
 } from "../../services/openai/openai-route-services.ts";
 import type { ResponseTerminalStatus } from "../../services/openai/transparent-response-proxy.ts";
@@ -57,6 +57,8 @@ type ResponsesWebSocketProxyDependencies = Pick<
   | "enqueueResponseSettlement"
   | "tryReserveResponseRequest"
   | "cancelResponseRequestReservation"
+  | "ensureUserUpstreamQuota"
+  | "settleUserUpstreamQuota"
 > & {
   applyServiceTierBillingMultiplier: typeof applyServiceTierBillingMultiplier;
   normalizeWsCloseCode: typeof normalizeWsCloseCode;
@@ -77,6 +79,9 @@ type ResponsesWebSocketProxyContext = {
   startedAtMs: number;
   upstreamSocket: WsSocket;
   upstreamResponseHeaders: Record<string, string>;
+  sourceAccount: Parameters<
+    ServerServices["ensureUserUpstreamQuota"]
+  >[0]["sourceAccount"];
 };
 
 export class ResponsesWebSocketUpgradeError extends Error {
@@ -172,15 +177,18 @@ export async function prepareResponsesWebSocketProxyContext(
       }
     }
 
-    const activeAccount = await getReadyActiveSourceAccount({ deps });
-    if (!activeAccount.ok) {
+    const assignedAccount = await getReadyAssignedSourceAccount({
+      deps,
+      ownerUserId,
+    });
+    if (!assignedAccount.ok) {
       throw new ResponsesWebSocketUpgradeError(
-        503,
+        403,
         {
           error: {
-            message: "No active upstream account",
-            type: "server_error",
-            code: "upstream_account_unavailable",
+            message: "No upstream account assigned",
+            type: "invalid_request_error",
+            code: "upstream_account_unassigned",
           },
         },
         deps.isRecord,
@@ -211,7 +219,7 @@ export async function prepareResponsesWebSocketProxyContext(
     try {
       upstreamConnection = await deps.connectResponsesWebSocketProxyUpstream({
         openaiApiModule,
-        account: activeAccount.sourceAccount,
+        account: assignedAccount.sourceAccount,
         runtimeConfig,
         requestHeaders: getForwardRequestHeaders(request.headers),
         query: requestUrl.search,
@@ -243,6 +251,7 @@ export async function prepareResponsesWebSocketProxyContext(
       startedAtMs,
       upstreamSocket: upstreamConnection.upstreamSocket,
       upstreamResponseHeaders: upstreamConnection.responseHeaders,
+      sourceAccount: assignedAccount.sourceAccount,
     };
   } catch (error) {
     throw error;
@@ -285,6 +294,9 @@ export function setupResponsesWebSocketProxy(
   let closeCode: number | null = null;
   let closeReason = "";
   let finalized = false;
+  let quotaBlocked = false;
+  let quotaSettlementPending = Promise.resolve();
+  let clientMessageQueue = Promise.resolve();
 
   const getCurrentTurnStartedAtMs = () =>
     activeTurnStartedAtMs ?? context.startedAtMs;
@@ -343,10 +355,6 @@ export function setupResponsesWebSocketProxy(
     errorCode: string | null,
     errorMessage: string | null,
   ) => {
-    if (!deps.shouldPersistModelResponseLog("/v1/responses")) {
-      deps.cancelResponseRequestReservation(reservationId);
-      return;
-    }
     const startedAtMs = getCurrentTurnStartedAtMs();
     const { tokensInfo, totalTokens } = deps.extractResponseUsage({
       response: payload,
@@ -355,34 +363,44 @@ export function setupResponsesWebSocketProxy(
       deps.estimateUsageCost(pricingModelId ?? modelId, tokensInfo),
       serviceTier,
     );
-    deps.enqueueResponseSettlement({
-      settlementId: responseId || reservationId,
-      reservationId,
-      intentId: reservationId,
-      ownerUserId: context.ownerUserId,
-      apiKeyId: context.apiKeyId,
-      charge:
-        typeof cost === "bigint" && cost > 0n
-          ? cost
-          : 0n,
-      isFinal: terminalStatus === "completed",
-      streamEndReason: terminalStatus,
-      path: "/v1/responses",
-      modelId,
-      serviceTier,
-      statusCode: 200,
-      ttfbMs:
-        activeTurnFirstEventAtMs === null
-          ? null
-          : Math.max(0, activeTurnFirstEventAtMs - startedAtMs),
-      latencyMs: Math.max(0, Date.now() - startedAtMs),
-      tokensInfo,
-      totalTokens,
-      cost,
-      errorCode,
-      errorMessage,
-      requestTime: new Date(startedAtMs).toISOString(),
-    });
+    const settlementId = responseId || reservationId;
+    if (!deps.shouldPersistModelResponseLog("/v1/responses")) {
+      deps.cancelResponseRequestReservation(reservationId);
+      return { settlementId, cost, totalTokens };
+    }
+    try {
+      deps.enqueueResponseSettlement({
+        settlementId,
+        reservationId,
+        intentId: reservationId,
+        ownerUserId: context.ownerUserId,
+        apiKeyId: context.apiKeyId,
+        charge: typeof cost === "bigint" && cost > 0n ? cost : 0n,
+        isFinal: terminalStatus === "completed",
+        streamEndReason: terminalStatus,
+        path: "/v1/responses",
+        modelId,
+        serviceTier,
+        statusCode: 200,
+        ttfbMs:
+          activeTurnFirstEventAtMs === null
+            ? null
+            : Math.max(0, activeTurnFirstEventAtMs - startedAtMs),
+        latencyMs: Math.max(0, Date.now() - startedAtMs),
+        tokensInfo,
+        totalTokens,
+        cost,
+        errorCode,
+        errorMessage,
+        requestTime: new Date(startedAtMs).toISOString(),
+      });
+    } catch (error) {
+      deps.cancelResponseRequestReservation(reservationId);
+      console.warn(
+        `[responses-ws] failed to queue terminal settlement: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return { settlementId, cost, totalTokens };
   };
 
   const finalize = () => {
@@ -594,7 +612,7 @@ export function setupResponsesWebSocketProxy(
           : incompleteReason ||
             `Responses websocket turn ended with status ${terminalStatus}`;
     try {
-      persistWsTerminalLog(
+      const quotaUsage = persistWsTerminalLog(
         terminalPayload,
         modelId,
         pricingModelId,
@@ -605,6 +623,37 @@ export function setupResponsesWebSocketProxy(
         errorCode,
         errorMessage,
       );
+      if (quotaUsage && context.ownerUserId) {
+        const ownerUserId = context.ownerUserId;
+        quotaSettlementPending = quotaSettlementPending.then(async () => {
+          try {
+            const quota = await deps.settleUserUpstreamQuota({
+              settlementId: quotaUsage.settlementId,
+              sourceAccount: context.sourceAccount,
+              ownerUserId,
+              model: modelId,
+              cost: quotaUsage.cost,
+              totalTokens: quotaUsage.totalTokens,
+            });
+            if (quota.allowed) return;
+            quotaBlocked = true;
+            deps.sendWsErrorEvent(clientSocket, {
+              status: 429,
+              error: {
+                message: "Upstream weekly user quota exceeded",
+                type: "insufficient_quota",
+                code: "upstream_user_quota_exceeded",
+              },
+            });
+            closeClientSocket(1008, "upstream_user_quota_exceeded");
+            closeUpstreamSocket(1008, "upstream_user_quota_exceeded");
+          } catch (error) {
+            console.warn(
+              `[quota] failed to settle websocket usage: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        });
+      }
     } catch (error) {
       deps.cancelResponseRequestReservation(reservationId);
       console.warn(
@@ -613,7 +662,10 @@ export function setupResponsesWebSocketProxy(
     }
   };
 
-  clientSocket.on("message", (data: WsRawData, isBinary: boolean) => {
+  const handleClientMessage = async (
+    data: WsRawData,
+    isBinary: boolean,
+  ) => {
     if (upstreamSocket.readyState !== deps.WS_READY_STATE_OPEN) {
       deps.sendWsErrorEvent(clientSocket, {
         status: 503,
@@ -633,55 +685,82 @@ export function setupResponsesWebSocketProxy(
     if (!isBinary) {
       const text = deps.wsRawDataToText(data);
       if (text?.trim()) {
+        let parsed: Record<string, unknown> | null = null;
         try {
-          const parsed = JSON.parse(text) as Record<string, unknown>;
-          if (deps.isRecord(parsed) && parsed.type === "response.create") {
-            turnSeq += 1;
-            const reservationId = getCurrentTurnIntentId();
-            const reservation = deps.tryReserveResponseRequest({
-              reservationId,
+          const candidate = JSON.parse(text) as unknown;
+          if (deps.isRecord(candidate)) parsed = candidate;
+        } catch {
+          parsed = null;
+        }
+        if (parsed?.type === "response.create") {
+          await quotaSettlementPending;
+          if (quotaBlocked) return;
+          if (context.ownerUserId) {
+            const requestedModel =
+              typeof parsed.model === "string" && parsed.model.trim()
+                ? parsed.model.trim()
+                : lastRequestedModel;
+            const quota = await deps.ensureUserUpstreamQuota({
+              sourceAccount: context.sourceAccount,
               ownerUserId: context.ownerUserId,
+              model: requestedModel,
             });
-            if (!reservation.ok) {
-              const queueUnavailable = reservation.reason === "queue";
+            if (!quota.allowed) {
+              quotaBlocked = true;
               deps.sendWsErrorEvent(clientSocket, {
-                status: queueUnavailable ? 503 : 429,
+                status: 429,
                 error: {
-                  message: queueUnavailable
-                    ? "Billing settlement is temporarily unavailable"
-                    : "Billing quota exceeded",
-                  type: queueUnavailable
-                    ? "server_error"
-                    : "insufficient_quota",
-                  code: queueUnavailable
-                    ? "settlement_queue_unavailable"
-                    : "insufficient_quota",
+                  message: "Upstream weekly user quota exceeded",
+                  type: "insufficient_quota",
+                  code: "upstream_user_quota_exceeded",
                 },
               });
+              closeClientSocket(1008, "upstream_user_quota_exceeded");
+              closeUpstreamSocket(1008, "upstream_user_quota_exceeded");
               return;
             }
-            pendingTurns.push({
-              intentId: reservationId,
-              serviceTier:
-                deps.resolvePriorityServiceTierForBilling(
-                  parsed.service_tier,
-                ) ?? context.serviceTier,
-              pricingModelId: deps.resolveUsagePricingModelId(
-                typeof parsed.model === "string" && parsed.model.trim()
-                  ? parsed.model.trim()
-                  : lastRequestedModel,
-                parsed,
-              ),
-            });
-            activeReservationIds.add(reservationId);
-            if (typeof parsed.model === "string" && parsed.model.trim()) {
-              lastRequestedModel = parsed.model.trim();
-            }
-            activeTurnStartedAtMs = Date.now();
-            activeTurnFirstEventAtMs = null;
           }
-        } catch {
-          // pass through opaque client payloads as-is
+          turnSeq += 1;
+          const reservationId = getCurrentTurnIntentId();
+          const reservation = deps.tryReserveResponseRequest({
+            reservationId,
+            ownerUserId: context.ownerUserId,
+          });
+          if (!reservation.ok) {
+            const queueUnavailable = reservation.reason === "queue";
+            deps.sendWsErrorEvent(clientSocket, {
+              status: queueUnavailable ? 503 : 429,
+              error: {
+                message: queueUnavailable
+                  ? "Billing settlement is temporarily unavailable"
+                  : "Billing quota exceeded",
+                type: queueUnavailable ? "server_error" : "insufficient_quota",
+                code: queueUnavailable
+                  ? "settlement_queue_unavailable"
+                  : "insufficient_quota",
+              },
+            });
+            return;
+          }
+          pendingTurns.push({
+            intentId: reservationId,
+            serviceTier:
+              deps.resolvePriorityServiceTierForBilling(
+                parsed.service_tier,
+              ) ?? context.serviceTier,
+            pricingModelId: deps.resolveUsagePricingModelId(
+              typeof parsed.model === "string" && parsed.model.trim()
+                ? parsed.model.trim()
+                : lastRequestedModel,
+              parsed,
+            ),
+          });
+          activeReservationIds.add(reservationId);
+          if (typeof parsed.model === "string" && parsed.model.trim()) {
+            lastRequestedModel = parsed.model.trim();
+          }
+          activeTurnStartedAtMs = Date.now();
+          activeTurnFirstEventAtMs = null;
         }
       }
     }
@@ -702,6 +781,26 @@ export function setupResponsesWebSocketProxy(
       closeUpstreamSocket(1011, "forward_failed");
       finalize();
     });
+  };
+
+  clientSocket.on("message", (data: WsRawData, isBinary: boolean) => {
+    clientMessageQueue = clientMessageQueue
+      .then(() => handleClientMessage(data, isBinary))
+      .catch((error) => {
+        console.warn(
+          `[responses-ws] failed to process client payload: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        deps.sendWsErrorEvent(clientSocket, {
+          status: 503,
+          error: {
+            message: "Failed to verify upstream user quota",
+            type: "server_error",
+            code: "upstream_quota_unavailable",
+          },
+        });
+        closeClientSocket(1011, "upstream_quota_unavailable");
+        closeUpstreamSocket(1011, "upstream_quota_unavailable");
+      });
   });
 
   upstreamSocket.on("message", (data: WsRawData, isBinary: boolean) => {

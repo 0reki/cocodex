@@ -3,7 +3,7 @@ import type { Express, Request, Response } from "express";
 import * as openaiApiModule from "../../../openai-api/index.ts";
 import {
   finalizeOpenAIRouteAccounting,
-  getReadyActiveSourceAccount,
+  getReadyAssignedSourceAccount,
   persistOpenAIResponseLog,
   prepareOpenAIRouteRequest,
   type OpenAIResponsesRouteDependencies,
@@ -44,6 +44,11 @@ export function registerResponsesRoutes(
     let lastErrorPayload: Record<string, unknown> | null = null;
     let errorMessage: string | null = null;
     let alreadyPersistedQuotaLog = false;
+    let quotaSourceAccount: Parameters<
+      OpenAIResponsesRouteDependencies["ensureUserUpstreamQuota"]
+    >[0]["sourceAccount"] | null = null;
+    let upstreamRequestStarted = false;
+    let upstreamQuotaRejected = false;
 
     try {
       const preparedRequest = await prepareOpenAIRouteRequest({
@@ -90,22 +95,45 @@ export function registerResponsesRoutes(
         apiKeyId,
       });
 
-      const activeAccount = await getReadyActiveSourceAccount({ deps });
-      if (!activeAccount.ok) {
-        upstreamStatus = 503;
-        res.status(503).json({
+      const assignedAccount = await getReadyAssignedSourceAccount({
+        deps,
+        ownerUserId,
+      });
+      if (!assignedAccount.ok) {
+        upstreamStatus = 403;
+        res.status(403).json({
           error: {
-            message: "No active upstream account",
-            type: "server_error",
-            code: "upstream_account_unavailable",
+            message: "No upstream account assigned",
+            type: "invalid_request_error",
+            code: "upstream_account_unassigned",
+          },
+        });
+        return;
+      }
+      quotaSourceAccount = assignedAccount.sourceAccount;
+      const quota = await deps.ensureUserUpstreamQuota({
+        sourceAccount: assignedAccount.sourceAccount,
+        ownerUserId,
+        model,
+      });
+      if (!quota.allowed) {
+        upstreamQuotaRejected = true;
+        upstreamStatus = 429;
+        errorMessage = "Upstream weekly user quota exceeded";
+        res.status(429).json({
+          error: {
+            message: errorMessage,
+            type: "insufficient_quota",
+            code: "upstream_user_quota_exceeded",
           },
         });
         return;
       }
       const runtimeConfig = await deps.getOpenAIApiRuntimeConfig();
+      upstreamRequestStarted = true;
       const upstream = await deps.postCodexResponsesWithTokenRefresh({
         module: openaiApiModule,
-        account: activeAccount.sourceAccount,
+        account: assignedAccount.sourceAccount,
         payload,
         requestHeaders: getForwardRequestHeaders(req.headers),
         runtimeConfig,
@@ -140,8 +168,10 @@ export function registerResponsesRoutes(
         res.end();
       }
     } finally {
+      let accounting: ReturnType<typeof finalizeOpenAIRouteAccounting> | null =
+        null;
       try {
-        const accounting = await finalizeOpenAIRouteAccounting({
+        accounting = finalizeOpenAIRouteAccounting({
           deps,
           apiKeyId,
           model,
@@ -187,12 +217,14 @@ export function registerResponsesRoutes(
           usage: accounting.usage,
           cost: accounting.cost,
           fallbackErrorCode:
-            protocolFailure ??
-            (endedBeforeTerminal
-              ? "upstream_eof_before_terminal"
-              : errorMessage
-                ? "responses_proxy_failed"
-                : null),
+            upstreamQuotaRejected
+              ? "upstream_user_quota_exceeded"
+              : protocolFailure ??
+                (endedBeforeTerminal
+                  ? "upstream_eof_before_terminal"
+                  : errorMessage
+                    ? "responses_proxy_failed"
+                    : null),
           fallbackErrorMessage:
             errorMessage ??
             (protocolFailure
@@ -206,9 +238,29 @@ export function registerResponsesRoutes(
         console.warn(
           `[logs] failed to write /v1/responses log: ${error instanceof Error ? error.message : String(error)}`,
         );
-      } finally {
-        requestAbort.cleanup();
       }
+      if (
+        accounting &&
+        upstreamRequestStarted &&
+        quotaSourceAccount &&
+        ownerUserId
+      ) {
+        try {
+          await deps.settleUserUpstreamQuota({
+            settlementId: intentId,
+            sourceAccount: quotaSourceAccount,
+            ownerUserId,
+            model,
+            cost: accounting.cost,
+            totalTokens: accounting.usage.totalTokens,
+          });
+        } catch (error) {
+          console.warn(
+            `[quota] failed to settle /v1/responses usage: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      requestAbort.cleanup();
     }
   });
 }
