@@ -321,11 +321,13 @@ export function AccountsPage() {
     content: ReactNode;
   } | null>(null);
 
-  const load = useCallback(() => {
+  const load = useCallback((signal: AbortSignal) => {
     const params = new URLSearchParams({ page: String(page), pageSize: "25" });
     if (status) params.set("status", status);
     if (query) params.set("q", query);
-    return api<OpenAIAccountsResponse>(`/api/openai-accounts?${params}`);
+    return api<OpenAIAccountsResponse>(`/api/openai-accounts?${params}`, {
+      signal,
+    });
   }, [api, page, query, status]);
   const { data, error, loading, reload } = useResource(load);
 

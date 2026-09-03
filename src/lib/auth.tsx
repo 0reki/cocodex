@@ -22,6 +22,11 @@ type AuthContextValue = {
   ready: boolean;
   user: PortalUser | null;
   login: (username: string, password: string) => Promise<void>;
+  register: (
+    inviteToken: string,
+    username: string,
+    password: string,
+  ) => Promise<void>;
   logout: () => void;
   updateCurrentUser: (user: PortalUser) => void;
   api: <T>(path: string, init?: RequestInit) => Promise<T>;
@@ -148,6 +153,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [persist],
   );
 
+  const register = useCallback(
+    async (inviteToken: string, username: string, password: string) => {
+      const response = await fetchJson<AuthResponse>("/api/auth/register", {
+        method: "POST",
+        ...jsonBody({ inviteToken, username, password }),
+      });
+      persist(toSession(response));
+    },
+    [persist],
+  );
+
   const logout = useCallback(() => persist(null), [persist]);
   const updateCurrentUser = useCallback(
     (user: PortalUser) => {
@@ -181,11 +197,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ready,
       user: session?.user ?? null,
       login,
+      register,
       logout,
       updateCurrentUser,
       api,
     }),
-    [api, login, logout, ready, session?.user, updateCurrentUser],
+    [api, login, logout, ready, register, session?.user, updateCurrentUser],
   );
 
   return <AuthContext value={value}>{children}</AuthContext>;

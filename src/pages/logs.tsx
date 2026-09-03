@@ -253,16 +253,17 @@ export function LogsPage() {
   const [history, setHistory] = useState<Array<string | null>>([]);
   const [selected, setSelected] = useState<RequestLog | null>(null);
 
-  const loadLogs = useCallback(() => {
+  const loadLogs = useCallback((signal: AbortSignal) => {
     const params = new URLSearchParams({ limit: "50" });
     if (cursor) params.set("cursor", cursor);
     Object.entries(filters).forEach(([key, value]) => {
       if (value) params.set(key, value);
     });
-    return api<RequestLogsResponse>(`/api/request-logs?${params}`);
+    return api<RequestLogsResponse>(`/api/request-logs?${params}`, { signal });
   }, [api, cursor, filters]);
   const loadKeys = useCallback(
-    () => api<ApiKeysResponse>("/api/api-keys"),
+    (signal: AbortSignal) =>
+      api<ApiKeysResponse>("/api/api-keys", { signal }),
     [api],
   );
   const logs = useResource(loadLogs);

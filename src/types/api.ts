@@ -6,6 +6,7 @@ export type PortalUser = {
   role: PortalRole;
   enabled: boolean;
   balance?: number;
+  sourceAccountId?: string | null;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -101,4 +102,62 @@ export type HourlyStatsResponse = {
 export type UsersResponse = {
   items: PortalUser[];
   count: number;
+};
+
+export type PortalInvitationResponse = {
+  ok: true;
+  invitation: {
+    id: string;
+    expiresAt: string;
+  };
+  registrationPath: string;
+  registrationUrl: string;
+};
+
+export type QuotaWindow = {
+  resetAt: number;
+  usedPercent: number;
+  limitWindowSeconds: number;
+};
+
+export type UserQuotaAllocation = {
+  sourceAccountId: string;
+  quotaPool: "standard" | "spark";
+  resetAt: number;
+  usedPercent: number;
+  carryInPercent: number;
+  carryInUserId: string | null;
+  syncRequired: boolean;
+  initializedAt: string;
+  updatedAt: string;
+  userUsageAmount: number;
+  totalUsageAmount: number;
+  allocatedPercent: number;
+};
+
+export type UserQuotaPool = {
+  available: boolean;
+  usageUnit: "weighted_usd" | "tokens";
+  shortWindow: QuotaWindow | null;
+  weeklyWindow: QuotaWindow | null;
+  allocation: UserQuotaAllocation | null;
+  members: Array<{
+    ownerUserId: string;
+    username: string;
+    role: PortalRole;
+    enabled: boolean;
+    usageAmount: number;
+    allocatedPercent: number;
+  }>;
+};
+
+export type MyUsageResponse = {
+  ok: true;
+  capturedAt: string;
+  limitPercent: number;
+  users: PortalUser[];
+  pools: {
+    standard: UserQuotaPool;
+    spark: UserQuotaPool;
+  };
 };

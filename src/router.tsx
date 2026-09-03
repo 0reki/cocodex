@@ -118,6 +118,13 @@ export const router = createBrowserRouter([
         },
       },
       {
+        path: "/register",
+        lazy: async () => {
+          const module = await import("@/pages/register");
+          return { Component: module.RegisterPage };
+        },
+      },
+      {
         Component: ProtectedRoute,
         children: [
           {
@@ -146,6 +153,13 @@ export const router = createBrowserRouter([
                 lazy: async () => {
                   const module = await import("@/pages/logs");
                   return { Component: module.LogsPage };
+                },
+              },
+              {
+                path: "/usage",
+                lazy: async () => {
+                  const module = await import("@/pages/my-usage");
+                  return { Component: module.MyUsagePage };
                 },
               },
               {

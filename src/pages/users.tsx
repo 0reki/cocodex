@@ -1,9 +1,10 @@
-import { LoaderCircle } from "lucide-react";
+import { Link, LoaderCircle } from "lucide-react";
 import { useCallback, useState, type FormEvent } from "react";
 
 import {
   EmptyState,
   ErrorState,
+  CopyButton,
   InlineNotice,
   LoadingState,
   Modal,
@@ -14,9 +15,22 @@ import { useResource } from "@/hooks/use-resource";
 import { jsonBody } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { formatDate } from "@/lib/format";
-import type { PortalUser, UsersResponse } from "@/types/api";
+import type {
+  OpenAIAccount,
+  OpenAIAccountsResponse,
+  PortalInvitationResponse,
+  PortalUser,
+  UsersResponse,
+} from "@/types/api";
 import { Button } from "@/ui/components/button";
 import { Input } from "@/ui/components/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/ui/components/select";
 import {
   Table,
   TableBody,
@@ -27,6 +41,7 @@ import {
 } from "@/ui/components/table";
 
 type UserMutationResponse = { ok: true; user: PortalUser };
+type UsersPageData = UsersResponse & { accounts: OpenAIAccount[] };
 
 function UserForm({
   item,
@@ -129,7 +144,22 @@ export function UsersPage() {
   const [editing, setEditing] = useState<PortalUser | "new" | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const load = useCallback(() => api<UsersResponse>("/api/users"), [api]);
+  const [invitation, setInvitation] = useState<PortalInvitationResponse | null>(
+    null,
+  );
+  const load = useCallback(
+    async (signal: AbortSignal) => {
+      const [users, accounts] = await Promise.all([
+        api<UsersResponse>("/api/users", { signal }),
+        api<OpenAIAccountsResponse>(
+          "/api/openai-accounts?page=1&pageSize=500",
+          { signal },
+        ),
+      ]);
+      return { ...users, accounts: accounts.items } satisfies UsersPageData;
+    },
+    [api],
+  );
   const { data, error, loading, reload } = useResource(load);
 
   async function setEnabled(item: PortalUser, enabled: boolean) {
@@ -153,6 +183,41 @@ export function UsersPage() {
     }
   }
 
+  async function createInvitation() {
+    setBusy("invitation");
+    setActionError(null);
+    try {
+      setInvitation(
+        await api<PortalInvitationResponse>("/api/user-invitations", {
+          method: "POST",
+        }),
+      );
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "生成邀请失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function assignUpstream(
+    item: PortalUser,
+    sourceAccountId: string | null,
+  ) {
+    setBusy(`upstream:${item.id}`);
+    setActionError(null);
+    try {
+      await api(`/api/users/${item.id}/upstream`, {
+        method: "PUT",
+        ...jsonBody({ sourceAccountId }),
+      });
+      await reload();
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "分配上游失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function saved(user?: PortalUser) {
     if (user && user.id === currentUser?.id) updateCurrentUser(user);
     setEditing(null);
@@ -166,6 +231,19 @@ export function UsersPage() {
       </section>
 
       <div className="flex flex-wrap items-center justify-end gap-2">
+        <Button
+          variant="outline"
+          type="button"
+          disabled={busy === "invitation"}
+          onClick={() => void createInvitation()}
+        >
+          {busy === "invitation" ? (
+            <LoaderCircle className="animate-spin" />
+          ) : (
+            <Link />
+          )}
+          邀请用户
+        </Button>
         <Button type="button" onClick={() => setEditing("new")}>
           新建用户
         </Button>
@@ -188,6 +266,7 @@ export function UsersPage() {
                   <TableHead>用户</TableHead>
                   <TableHead>角色</TableHead>
                   <TableHead>状态</TableHead>
+                  <TableHead>上游账号</TableHead>
                   <TableHead>创建时间</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
@@ -205,6 +284,37 @@ export function UsersPage() {
                       <StatusPill
                         value={item.enabled ? "enabled" : "disabled"}
                       />
+                    </TableCell>
+                    <TableCell>
+                      <Select
+                        value={item.sourceAccountId ?? "unassigned"}
+                        disabled={busy === `upstream:${item.id}`}
+                        onValueChange={(value) =>
+                          void assignUpstream(
+                            item,
+                            value === "unassigned" ? null : value,
+                          )
+                        }
+                      >
+                        <SelectTrigger className="w-60">
+                          <SelectValue placeholder="未分配" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="unassigned">未分配</SelectItem>
+                          {data.accounts.map((account) => (
+                            <SelectItem
+                              key={account.id}
+                              value={account.id}
+                              disabled={account.status === "disabled"}
+                            >
+                              {account.email}
+                              {account.status === "disabled"
+                                ? "（已停用）"
+                                : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDate(item.createdAt)}
@@ -269,6 +379,22 @@ export function UsersPage() {
             onClose={() => setEditing(null)}
             onSaved={saved}
           />
+        </Modal>
+      ) : null}
+
+      {invitation ? (
+        <Modal title="生成完成" onClose={() => setInvitation(null)}>
+          <div>
+            <div className="flex items-center gap-2 rounded-lg border bg-muted/30 p-2">
+              <span className="min-w-0 flex-1 break-all text-sm">
+                {invitation.registrationUrl}
+              </span>
+              <CopyButton
+                value={invitation.registrationUrl}
+                label="复制注册链接"
+              />
+            </div>
+          </div>
         </Modal>
       ) : null}
     </main>

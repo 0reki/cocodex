@@ -287,7 +287,11 @@ export function ApiKeysPage() {
   const [deleteTarget, setDeleteTarget] = useState<ApiKey | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const load = useCallback(() => api<ApiKeysResponse>("/api/api-keys"), [api]);
+  const load = useCallback(
+    (signal: AbortSignal) =>
+      api<ApiKeysResponse>("/api/api-keys", { signal }),
+    [api],
+  );
   const { data, error, loading, reload } = useResource(load);
 
   async function deleteKey(item: ApiKey) {

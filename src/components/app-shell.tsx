@@ -6,6 +6,7 @@ import {
   KeyRound,
   LogOut,
   Monitor,
+  Wallet,
   Moon,
   Sun,
 } from "lucide-react";
@@ -75,6 +76,12 @@ const navItems: NavItem[] = [
     adminOnly: true,
   },
   { href: "/logs", label: "请求日志", icon: Hexagon, section: "workspace" },
+  {
+    href: "/usage",
+    label: "额度信息",
+    icon: Wallet,
+    section: "workspace",
+  },
   { href: "/keys", label: "API Keys", icon: KeyRound, section: "workspace" },
   {
     href: "/users",

@@ -4,7 +4,7 @@ import {
   Coins,
   Zap,
 } from "lucide-react";
-import { lazy, Suspense, useCallback } from "react";
+import { lazy, Suspense, useCallback, useMemo } from "react";
 
 import { ErrorState, LoadingState } from "@/components/ui";
 import { useResource } from "@/hooks/use-resource";
@@ -22,28 +22,76 @@ const ModelHourlyTokensChart = lazy(async () => ({
   default: (await chartModule).ModelHourlyTokensChart,
 }));
 
+const statsCacheTtlMs = 30_000;
+let statsCache: {
+  userId: string;
+  loadedAt: number;
+  data: HourlyStatsResponse;
+} | null = null;
+let statsRequest: {
+  userId: string;
+  promise: Promise<HourlyStatsResponse>;
+} | null = null;
+let statsCacheExpiryTimer: number | undefined;
+
+function storeStatsCache(userId: string, data: HourlyStatsResponse) {
+  const next = { userId, loadedAt: Date.now(), data };
+  statsCache = next;
+  if (statsCacheExpiryTimer !== undefined) {
+    window.clearTimeout(statsCacheExpiryTimer);
+  }
+  statsCacheExpiryTimer = window.setTimeout(() => {
+    if (statsCache === next) statsCache = null;
+    statsCacheExpiryTimer = undefined;
+  }, statsCacheTtlMs);
+}
+
 export function DashboardPage() {
-  const { api } = useAuth();
-  const load = useCallback(
-    () =>
-      api<HourlyStatsResponse>(
-        "/api/request-logs/hourly?lookbackHours=720&maxModels=6",
-      ),
-    [api],
-  );
+  const { api, user } = useAuth();
+  const userId = user?.id;
+  const load = useCallback(() => {
+    const cached = statsCache;
+    if (
+      userId &&
+      cached?.userId === userId &&
+      Date.now() - cached.loadedAt < statsCacheTtlMs
+    ) {
+      return Promise.resolve(cached.data);
+    }
+    if (userId && statsRequest?.userId === userId) {
+      return statsRequest.promise;
+    }
+
+    const promise = api<HourlyStatsResponse>(
+      "/api/request-logs/hourly?lookbackHours=720&maxModels=6",
+    );
+    if (!userId) return promise;
+
+    const request = { userId, promise };
+    statsRequest = request;
+    void promise
+      .then((data) => {
+        if (statsRequest === request) storeStatsCache(userId, data);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (statsRequest === request) statsRequest = null;
+      });
+    return promise;
+  }, [api, userId]);
   const { data, error, loading, reload } = useResource(load);
 
-  const totals = data?.points.reduce(
-    (sum, point) => {
-      Object.values(point.values).forEach((value) => {
+  const totals = useMemo(() => {
+    const sum = { requests: 0, tokens: 0, cost: 0 };
+    for (const point of data?.points ?? []) {
+      for (const value of Object.values(point.values)) {
         sum.requests += value.requests;
         sum.tokens += value.tokens;
         sum.cost += value.cost;
-      });
-      return sum;
-    },
-    { requests: 0, tokens: 0, cost: 0 },
-  ) ?? { requests: 0, tokens: 0, cost: 0 };
+      }
+    }
+    return sum;
+  }, [data]);
 
   const metrics = [
     {
