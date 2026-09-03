@@ -297,6 +297,7 @@ export function setupResponsesWebSocketProxy(
   let quotaBlocked = false;
   let quotaSettlementPending = Promise.resolve();
   let clientMessageQueue = Promise.resolve();
+  let upstreamMessageQueue = Promise.resolve();
 
   const getCurrentTurnStartedAtMs = () =>
     activeTurnStartedAtMs ?? context.startedAtMs;
@@ -314,7 +315,7 @@ export function setupResponsesWebSocketProxy(
     }
     try {
       const startedAtMs = getCurrentTurnStartedAtMs();
-      deps.enqueueResponseSettlement({
+      void deps.enqueueResponseSettlement({
         settlementId: reservationId,
         reservationId,
         intentId: reservationId,
@@ -335,16 +336,21 @@ export function setupResponsesWebSocketProxy(
         errorCode: failureCode,
         errorMessage: failureMessage,
         requestTime: new Date(startedAtMs).toISOString(),
+      }).catch((error) => {
+        deps.cancelResponseRequestReservation(reservationId);
+        console.warn(
+          `[responses-ws] failed to queue failure settlement: ${error instanceof Error ? error.message : String(error)}`,
+        );
       });
     } catch (error) {
       deps.cancelResponseRequestReservation(reservationId);
       console.warn(
-        `[responses-ws] failed to queue failure settlement: ${error instanceof Error ? error.message : String(error)}`,
+        `[responses-ws] failed to create failure settlement: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   };
 
-  const persistWsTerminalLog = (
+  const persistWsTerminalLog = async (
     payload: Record<string, unknown>,
     modelId: string | null,
     pricingModelId: string | null,
@@ -368,38 +374,31 @@ export function setupResponsesWebSocketProxy(
       deps.cancelResponseRequestReservation(reservationId);
       return { settlementId, cost, totalTokens };
     }
-    try {
-      deps.enqueueResponseSettlement({
-        settlementId,
-        reservationId,
-        intentId: reservationId,
-        ownerUserId: context.ownerUserId,
-        apiKeyId: context.apiKeyId,
-        charge: typeof cost === "bigint" && cost > 0n ? cost : 0n,
-        isFinal: terminalStatus === "completed",
-        streamEndReason: terminalStatus,
-        path: "/v1/responses",
-        modelId,
-        serviceTier,
-        statusCode: 200,
-        ttfbMs:
-          activeTurnFirstEventAtMs === null
-            ? null
-            : Math.max(0, activeTurnFirstEventAtMs - startedAtMs),
-        latencyMs: Math.max(0, Date.now() - startedAtMs),
-        tokensInfo,
-        totalTokens,
-        cost,
-        errorCode,
-        errorMessage,
-        requestTime: new Date(startedAtMs).toISOString(),
-      });
-    } catch (error) {
-      deps.cancelResponseRequestReservation(reservationId);
-      console.warn(
-        `[responses-ws] failed to queue terminal settlement: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    await deps.enqueueResponseSettlement({
+      settlementId,
+      reservationId,
+      intentId: reservationId,
+      ownerUserId: context.ownerUserId,
+      apiKeyId: context.apiKeyId,
+      charge: typeof cost === "bigint" && cost > 0n ? cost : 0n,
+      isFinal: terminalStatus === "completed",
+      streamEndReason: terminalStatus,
+      path: "/v1/responses",
+      modelId,
+      serviceTier,
+      statusCode: 200,
+      ttfbMs:
+        activeTurnFirstEventAtMs === null
+          ? null
+          : Math.max(0, activeTurnFirstEventAtMs - startedAtMs),
+      latencyMs: Math.max(0, Date.now() - startedAtMs),
+      tokensInfo,
+      totalTokens,
+      cost,
+      errorCode,
+      errorMessage,
+      requestTime: new Date(startedAtMs).toISOString(),
+    });
     return { settlementId, cost, totalTokens };
   };
 
@@ -477,7 +476,7 @@ export function setupResponsesWebSocketProxy(
     }
   };
 
-  const maybeSettleTerminalUsage = (parsed: Record<string, unknown>) => {
+  const maybeSettleTerminalUsage = async (parsed: Record<string, unknown>) => {
     if (parsed.type === "response.created" && deps.isRecord(parsed.response)) {
       const response = parsed.response as Record<string, unknown>;
       if (typeof response.model === "string" && response.model.trim()) {
@@ -611,54 +610,47 @@ export function setupResponsesWebSocketProxy(
           ? errorPayload.message.trim()
           : incompleteReason ||
             `Responses websocket turn ended with status ${terminalStatus}`;
-    try {
-      const quotaUsage = persistWsTerminalLog(
-        terminalPayload,
-        modelId,
-        pricingModelId,
-        billedServiceTier,
-        responseId,
-        reservationId,
-        terminalStatus,
-        errorCode,
-        errorMessage,
-      );
-      if (quotaUsage && context.ownerUserId) {
-        const ownerUserId = context.ownerUserId;
-        quotaSettlementPending = quotaSettlementPending.then(async () => {
-          try {
-            const quota = await deps.settleUserUpstreamQuota({
-              settlementId: quotaUsage.settlementId,
-              sourceAccount: context.sourceAccount,
-              ownerUserId,
-              model: modelId,
-              cost: quotaUsage.cost,
-              totalTokens: quotaUsage.totalTokens,
-            });
-            if (quota.allowed) return;
-            quotaBlocked = true;
-            deps.sendWsErrorEvent(clientSocket, {
-              status: 429,
-              error: {
-                message: "Upstream weekly user quota exceeded",
-                type: "insufficient_quota",
-                code: "upstream_user_quota_exceeded",
-              },
-            });
-            closeClientSocket(1008, "upstream_user_quota_exceeded");
-            closeUpstreamSocket(1008, "upstream_user_quota_exceeded");
-          } catch (error) {
-            console.warn(
-              `[quota] failed to settle websocket usage: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          }
-        });
-      }
-    } catch (error) {
-      deps.cancelResponseRequestReservation(reservationId);
-      console.warn(
-        `[responses-ws] failed to queue terminal settlement: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    const quotaUsage = await persistWsTerminalLog(
+      terminalPayload,
+      modelId,
+      pricingModelId,
+      billedServiceTier,
+      responseId,
+      reservationId,
+      terminalStatus,
+      errorCode,
+      errorMessage,
+    );
+    if (quotaUsage && context.ownerUserId) {
+      const ownerUserId = context.ownerUserId;
+      quotaSettlementPending = quotaSettlementPending.then(async () => {
+        try {
+          const quota = await deps.settleUserUpstreamQuota({
+            settlementId: quotaUsage.settlementId,
+            sourceAccount: context.sourceAccount,
+            ownerUserId,
+            model: modelId,
+            cost: quotaUsage.cost,
+            totalTokens: quotaUsage.totalTokens,
+          });
+          if (quota.allowed) return;
+          quotaBlocked = true;
+          deps.sendWsErrorEvent(clientSocket, {
+            status: 429,
+            error: {
+              message: "Upstream weekly user quota exceeded",
+              type: "insufficient_quota",
+              code: "upstream_user_quota_exceeded",
+            },
+          });
+          closeClientSocket(1008, "upstream_user_quota_exceeded");
+          closeUpstreamSocket(1008, "upstream_user_quota_exceeded");
+        } catch (error) {
+          console.warn(
+            `[quota] failed to settle websocket usage: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      });
     }
   };
 
@@ -808,23 +800,38 @@ export function setupResponsesWebSocketProxy(
     if (!isBinary && activeTurnFirstEventAtMs === null) {
       activeTurnFirstEventAtMs = Date.now();
     }
-    forwardMessage(upstreamSocket, clientSocket, data, isBinary, () => {
-      closeSource = "forward_failed";
-      closeCode = 1011;
-      closeReason = "forward_failed";
-      closeClientSocket(1011, "forward_failed");
-      closeUpstreamSocket(1011, "forward_failed");
-      finalize();
-    });
+    let settlementTask = Promise.resolve();
     if (!isBinary) {
       const text = deps.wsRawDataToText(data);
       if (text?.trim()) {
         const parsed = deps.parseJsonRecordText(text);
-        if (parsed) {
-          maybeSettleTerminalUsage(parsed);
-        }
+        if (parsed) settlementTask = maybeSettleTerminalUsage(parsed);
       }
     }
+    upstreamMessageQueue = upstreamMessageQueue
+      .then(async () => {
+        await settlementTask;
+        if (clientSocket.readyState !== deps.WS_READY_STATE_OPEN) return;
+        forwardMessage(upstreamSocket, clientSocket, data, isBinary, () => {
+          closeSource = "forward_failed";
+          closeCode = 1011;
+          closeReason = "forward_failed";
+          closeClientSocket(1011, "forward_failed");
+          closeUpstreamSocket(1011, "forward_failed");
+          finalize();
+        });
+      })
+      .catch((error) => {
+        closeSource = "forward_failed";
+        closeCode = 1011;
+        closeReason = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `[responses-ws] failed to persist upstream terminal event: ${closeReason}`,
+        );
+        closeClientSocket(1011, "settlement_wal_failed");
+        closeUpstreamSocket(1011, "settlement_wal_failed");
+        finalize();
+      });
   });
 
   clientSocket.on("close", (code: number, reason: Buffer) => {

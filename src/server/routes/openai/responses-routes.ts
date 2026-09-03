@@ -44,6 +44,7 @@ export function registerResponsesRoutes(
     let lastErrorPayload: Record<string, unknown> | null = null;
     let errorMessage: string | null = null;
     let alreadyPersistedQuotaLog = false;
+    let terminalSettlementPersisted = false;
     let quotaSourceAccount: Parameters<
       OpenAIResponsesRouteDependencies["ensureUserUpstreamQuota"]
     >[0]["sourceAccount"] | null = null;
@@ -143,6 +144,51 @@ export function registerResponsesRoutes(
 
       const observation = await forwardUpstreamResponse(upstream, res, {
         expectEventStream: upstream.ok,
+        onTerminalResponse: async (terminal) => {
+          firstEventAtMs = terminal.firstByteAtMs;
+          finishedAtMs = Date.now();
+          terminalResponsePayload = terminal.terminalResponsePayload;
+          terminalStatus = terminal.terminalStatus;
+          lastErrorPayload = terminal.errorPayload;
+          const accounting = finalizeOpenAIRouteAccounting({
+            deps,
+            apiKeyId,
+            model,
+            pricingModelId,
+            usageResponsePayload: terminal.terminalResponsePayload,
+            lastErrorPayload: terminal.errorPayload,
+            serviceTier,
+          });
+          const completed = terminal.terminalStatus === "completed";
+          await persistOpenAIResponseLog({
+            deps,
+            shouldPersist:
+              !alreadyPersistedQuotaLog &&
+              deps.shouldPersistModelResponseLog(req.path),
+            path: req.path,
+            intentId,
+            isFinal: completed,
+            streamEndReason: terminal.terminalStatus,
+            model,
+            apiKeyId,
+            ownerUserId,
+            charge: accounting.charge,
+            serviceTier,
+            statusCode: upstreamStatus,
+            startedAtMs,
+            firstEventAtMs: terminal.firstByteAtMs,
+            finishedAtMs,
+            usage: accounting.usage,
+            cost: accounting.cost,
+            fallbackErrorCode: completed
+              ? null
+              : `response_${terminal.terminalStatus}`,
+            fallbackErrorMessage: completed
+              ? null
+              : `Responses stream ended with status ${terminal.terminalStatus}`,
+          });
+          terminalSettlementPersisted = true;
+        },
       });
       firstEventAtMs = observation.firstByteAtMs;
       finishedAtMs = observation.finishedAtMs;
@@ -200,7 +246,9 @@ export function registerResponsesRoutes(
         await persistOpenAIResponseLog({
           deps,
           shouldPersist:
-            !alreadyPersistedQuotaLog && deps.shouldPersistModelResponseLog(req.path),
+            !terminalSettlementPersisted &&
+            !alreadyPersistedQuotaLog &&
+            deps.shouldPersistModelResponseLog(req.path),
           path: req.path,
           intentId,
           isFinal: completed,

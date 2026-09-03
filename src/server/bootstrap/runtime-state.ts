@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import type { ApiKeyRecord } from "../../database/index.ts";
 import type { PortalUserSpendAllowanceValue } from "./types.ts";
 import { parseUsdAmount, type UsdAmount } from "../../shared/usd.ts";
@@ -23,7 +25,7 @@ export function createServerRuntimeState() {
   );
   const BILLING_INFLIGHT_RESERVE_USD = positiveUsdAmount(
     process.env.BILLING_INFLIGHT_RESERVE_USD,
-    "1",
+    "5",
   );
   const PRICE_AFTER_272K_INPUT_THRESHOLD_TOKENS = 272_000;
   const RESPONSE_SETTLEMENT_BATCH_SIZE = positiveInteger(
@@ -45,6 +47,21 @@ export function createServerRuntimeState() {
   const RESPONSE_SETTLEMENT_RETRY_MAX_MS = positiveInteger(
     process.env.RESPONSE_SETTLEMENT_RETRY_MAX_MS,
     5_000,
+  );
+  const responseSettlementDataDirectory = process.env.COCODEX_CONFIG_PATH?.trim()
+    ? path.dirname(path.resolve(process.env.COCODEX_CONFIG_PATH.trim()))
+    : path.join(process.cwd(), "data");
+  const RESPONSE_SETTLEMENT_WAL_PATH = path.resolve(
+    process.env.RESPONSE_SETTLEMENT_WAL_PATH?.trim() ||
+      path.join(responseSettlementDataDirectory, "response-settlements.wal"),
+  );
+  const RESPONSE_SETTLEMENT_WAL_COMPACT_AFTER_RECORDS = positiveInteger(
+    process.env.RESPONSE_SETTLEMENT_WAL_COMPACT_AFTER_RECORDS,
+    10_000,
+  );
+  const UPSTREAM_QUOTA_REFRESH_INTERVAL_MS = positiveInteger(
+    process.env.UPSTREAM_QUOTA_REFRESH_INTERVAL_MS,
+    30_000,
   );
 
   const apiKeyAuthLruCache = new Map<
@@ -74,6 +91,9 @@ export function createServerRuntimeState() {
     RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
     RESPONSE_SETTLEMENT_QUEUE_MAX,
     RESPONSE_SETTLEMENT_RETRY_MAX_MS,
+    RESPONSE_SETTLEMENT_WAL_PATH,
+    RESPONSE_SETTLEMENT_WAL_COMPACT_AFTER_RECORDS,
+    UPSTREAM_QUOTA_REFRESH_INTERVAL_MS,
     apiKeyAuthLruCache,
     apiKeyAuthTokenById,
     apiKeyPendingCharges,

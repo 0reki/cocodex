@@ -15,6 +15,9 @@ import {
 
 type PortalTokenKind = "access" | "refresh";
 
+export const PORTAL_PASSWORD_MIN_LENGTH = 8;
+export const PORTAL_PASSWORD_MAX_LENGTH = 128;
+
 export type PortalAccessClaims = {
   sub: string;
   typ: PortalTokenKind;
@@ -31,7 +34,7 @@ function getJwtSecret() {
 }
 
 function getTokenTtlSeconds(kind: PortalTokenKind) {
-  const defaultTtl = kind === "access" ? 60 * 60 * 24 * 10 : 60 * 60 * 24 * 90;
+  const defaultTtl = kind === "access" ? 60 * 60 * 24 * 10 : 60 * 60 * 24 * 30;
   const envName =
     kind === "access"
       ? "ADMIN_ACCESS_TOKEN_TTL_SECONDS"
@@ -143,6 +146,16 @@ export function createPortalInvitationToken() {
 
 export function hashPortalInvitationToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+export function getPortalPasswordValidationError(password: string) {
+  if (password.length < PORTAL_PASSWORD_MIN_LENGTH) {
+    return `Password must be at least ${PORTAL_PASSWORD_MIN_LENGTH} characters`;
+  }
+  if (password.length > PORTAL_PASSWORD_MAX_LENGTH) {
+    return `Password must be at most ${PORTAL_PASSWORD_MAX_LENGTH} characters`;
+  }
+  return null;
 }
 
 function derivePasswordKey(

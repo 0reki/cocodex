@@ -16,6 +16,7 @@ import {
 } from "../../../database/index.ts";
 import {
   createPortalInvitationToken,
+  getPortalPasswordValidationError,
   hashPassword,
   hashPortalInvitationToken,
 } from "../../auth/portal-auth.ts";
@@ -267,6 +268,11 @@ export function registerUserRoutes(
         });
         return;
       }
+      const passwordError = getPortalPasswordValidationError(password);
+      if (passwordError) {
+        res.status(400).json({ ok: false, error: passwordError });
+        return;
+      }
       const user = await deps.createPortalUser({
         username,
         passwordHash: await hashPassword(password),
@@ -313,6 +319,11 @@ export function registerUserRoutes(
         res
           .status(400)
           .json({ ok: false, error: "id and password are required" });
+        return;
+      }
+      const passwordError = getPortalPasswordValidationError(password);
+      if (passwordError) {
+        res.status(400).json({ ok: false, error: passwordError });
         return;
       }
       const updated = await deps.updatePortalUserPasswordById(

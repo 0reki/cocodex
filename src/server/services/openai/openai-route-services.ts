@@ -410,7 +410,7 @@ export function finalizeOpenAIRouteAccounting(args: {
   };
 }
 
-export function persistOpenAIResponseLog(args: {
+export async function persistOpenAIResponseLog(args: {
   deps: OpenAIResponseLogDependencies;
   shouldPersist: boolean;
   path: string;
@@ -457,7 +457,7 @@ export function persistOpenAIResponseLog(args: {
     deps.cancelResponseRequestReservation(intentId);
     return;
   }
-  deps.enqueueResponseSettlement({
+  await deps.enqueueResponseSettlement({
     settlementId: intentId,
     reservationId: intentId,
     intentId,

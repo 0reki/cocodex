@@ -4,7 +4,7 @@ export function createUpstreamErrorServices(deps: {
   isRecord: (value: unknown) => value is Record<string, unknown>;
   enqueueResponseSettlement: (
     input: EnqueueResponseSettlementInput,
-  ) => void;
+  ) => Promise<void>;
 }) {
   function extractUpstreamStatusCode(error: unknown): number | null {
     if (deps.isRecord(error) && typeof error.status === "number") {
@@ -212,7 +212,7 @@ export function createUpstreamErrorServices(deps: {
   }) {
     if (!shouldPersistModelResponseLog(args.requestPath)) return;
     try {
-      deps.enqueueResponseSettlement({
+      await deps.enqueueResponseSettlement({
         settlementId: args.intentId,
         intentId: args.intentId,
         ownerUserId: args.ownerUserId,
@@ -248,7 +248,7 @@ export function createUpstreamErrorServices(deps: {
   }) {
     if (!shouldPersistModelResponseLog(args.requestPath)) return;
     try {
-      deps.enqueueResponseSettlement({
+      await deps.enqueueResponseSettlement({
         settlementId: args.intentId,
         intentId: args.intentId,
         ownerUserId: args.ownerUserId,

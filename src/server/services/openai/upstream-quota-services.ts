@@ -1,6 +1,5 @@
 import * as openaiApiModule from "../../../openai-api/index.ts";
 import type {
-  getUpstreamQuotaWindow,
   getUserUpstreamQuotaAllocation,
   listPortalUserUpstreamAssignments,
   listUpstreamQuotaMemberAllocations,
@@ -90,20 +89,6 @@ function getPoolWindows(
   };
 }
 
-function getWeeklyWindow(
-  usage: Record<string, unknown>,
-  quotaPool: UpstreamQuotaPool,
-) {
-  const windows = getPoolWindows(usage, quotaPool);
-  const weekly = [windows.primary, windows.secondary].find(
-    (window) => window?.limitWindowSeconds === WEEK_SECONDS,
-  );
-  if (!weekly) {
-    throw new Error(`${quotaPool} weekly quota window is unavailable`);
-  }
-  return weekly;
-}
-
 function getQuotaPoolForModel(model: string | null): UpstreamQuotaPool {
   return model?.trim().toLowerCase().includes("spark") ? "spark" : "standard";
 }
@@ -119,15 +104,19 @@ export function createUpstreamQuotaServices(deps: {
     userAgent: string;
     clientVersion: string;
   }>;
-  getUpstreamQuotaWindow: typeof getUpstreamQuotaWindow;
   getUserUpstreamQuotaAllocation: typeof getUserUpstreamQuotaAllocation;
   listUpstreamQuotaMemberAllocations: typeof listUpstreamQuotaMemberAllocations;
   listPortalUserUpstreamAssignments: typeof listPortalUserUpstreamAssignments;
   recordUserUpstreamQuotaUsage: typeof recordUserUpstreamQuotaUsage;
   syncUpstreamQuotaWindow: typeof syncUpstreamQuotaWindow;
+  refreshIntervalMs: number;
 }) {
   const quotaState = new Map<string, UpstreamQuotaMemberAllocations>();
   const settlementTasks = new Map<string, Promise<void>>();
+  const sourceAccounts = new Map<string, SourceAccount>();
+  const sourceAccountRefreshTasks = new Map<string, Promise<void>>();
+  const dirtySourceAccountVersions = new Map<string, number>();
+  let stopped = false;
 
   const quotaKey = (sourceAccountId: string, quotaPool: UpstreamQuotaPool) =>
     `${sourceAccountId}:${quotaPool}`;
@@ -167,58 +156,6 @@ export function createUpstreamQuotaServices(deps: {
     };
   }
 
-  async function hydrateUpstreamQuotaCache(input?: {
-    sourceAccounts?: SourceAccount[];
-  }) {
-    const assignments = await deps.listPortalUserUpstreamAssignments();
-    const sourceAccountIds = [
-      ...new Set(assignments.map((item) => item.sourceAccountId)),
-    ];
-    const sourceAccounts = new Map(
-      (input?.sourceAccounts ?? []).map((account) => [account.id, account]),
-    );
-    await Promise.all(
-      sourceAccountIds.map(async (sourceAccountId) => {
-        const sourceAccount = sourceAccounts.get(sourceAccountId);
-        if (!sourceAccount) return;
-        try {
-          const usage = await fetchUsage(sourceAccount);
-          await Promise.all(
-            (["standard", "spark"] as const).map(async (quotaPool) => {
-              const windows = getPoolWindows(usage, quotaPool);
-              const weeklyWindow = [windows.primary, windows.secondary].find(
-                (window) => window?.limitWindowSeconds === WEEK_SECONDS,
-              );
-              if (!weeklyWindow) return;
-              await deps.syncUpstreamQuotaWindow({
-                sourceAccountId,
-                quotaPool,
-                ...weeklyWindow,
-                carryCurrentUsageOnCreate: true,
-              });
-            }),
-          );
-        } catch (error) {
-          console.warn(
-            `[quota] failed to refresh startup snapshot for ${sourceAccountId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      }),
-    );
-    const snapshots = await Promise.all(
-      sourceAccountIds.flatMap((sourceAccountId) =>
-        (["standard", "spark"] as const).map((quotaPool) =>
-          deps.listUpstreamQuotaMemberAllocations({
-            sourceAccountId,
-            quotaPool,
-          }),
-        ),
-      ),
-    );
-    quotaState.clear();
-    for (const snapshot of snapshots) cacheQuotaState(snapshot);
-  }
-
   async function fetchUsage(sourceAccount: SourceAccount) {
     const runtimeConfig = await deps.getOpenAIApiRuntimeConfig();
     return deps.getCodexUsageWithTokenRefresh({
@@ -229,11 +166,118 @@ export function createUpstreamQuotaServices(deps: {
     });
   }
 
-  async function fetchWeeklyWindow(
-    sourceAccount: SourceAccount,
-    quotaPool: UpstreamQuotaPool,
-  ) {
-    return getWeeklyWindow(await fetchUsage(sourceAccount), quotaPool);
+  async function loadSourceAccountSnapshots(sourceAccountId: string) {
+    const snapshots = await Promise.all(
+      (["standard", "spark"] as const).map((quotaPool) =>
+        deps.listUpstreamQuotaMemberAllocations({
+          sourceAccountId,
+          quotaPool,
+        }),
+      ),
+    );
+    for (const snapshot of snapshots) cacheQuotaState(snapshot);
+  }
+
+  function refreshSourceAccount(sourceAccount: SourceAccount) {
+    sourceAccounts.set(sourceAccount.id, sourceAccount);
+    const current = sourceAccountRefreshTasks.get(sourceAccount.id);
+    if (current) return current;
+
+    const task = (async () => {
+      const usage = await fetchUsage(sourceAccount);
+      await Promise.all(
+        (["standard", "spark"] as const).map(async (quotaPool) => {
+          const windows = getPoolWindows(usage, quotaPool);
+          const weeklyWindow = [windows.primary, windows.secondary].find(
+            (window) => window?.limitWindowSeconds === WEEK_SECONDS,
+          );
+          if (!weeklyWindow) return;
+          await deps.syncUpstreamQuotaWindow({
+            sourceAccountId: sourceAccount.id,
+            quotaPool,
+            ...weeklyWindow,
+            carryCurrentUsageOnCreate: true,
+          });
+        }),
+      );
+      await loadSourceAccountSnapshots(sourceAccount.id);
+    })().finally(() => {
+      if (sourceAccountRefreshTasks.get(sourceAccount.id) === task) {
+        sourceAccountRefreshTasks.delete(sourceAccount.id);
+      }
+    });
+    sourceAccountRefreshTasks.set(sourceAccount.id, task);
+    return task;
+  }
+
+  function markSourceAccountDirty(sourceAccount: SourceAccount) {
+    sourceAccounts.set(sourceAccount.id, sourceAccount);
+    dirtySourceAccountVersions.set(
+      sourceAccount.id,
+      (dirtySourceAccountVersions.get(sourceAccount.id) ?? 0) + 1,
+    );
+  }
+
+  async function refreshDirtySourceAccounts() {
+    if (stopped) return;
+    const pending = [...dirtySourceAccountVersions.entries()];
+    await Promise.all(
+      pending.map(async ([sourceAccountId, version]) => {
+        const sourceAccount = sourceAccounts.get(sourceAccountId);
+        if (!sourceAccount || sourceAccountRefreshTasks.has(sourceAccountId)) {
+          return;
+        }
+        try {
+          await refreshSourceAccount(sourceAccount);
+          if (dirtySourceAccountVersions.get(sourceAccountId) === version) {
+            dirtySourceAccountVersions.delete(sourceAccountId);
+          }
+        } catch (error) {
+          console.warn(
+            `[quota] failed to refresh snapshot for ${sourceAccountId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }),
+    );
+  }
+
+  const refreshTimer = setInterval(() => {
+    void refreshDirtySourceAccounts();
+  }, deps.refreshIntervalMs);
+  refreshTimer.unref();
+
+  async function hydrateUpstreamQuotaCache(input?: {
+    sourceAccounts?: SourceAccount[];
+  }) {
+    const assignments = await deps.listPortalUserUpstreamAssignments();
+    const sourceAccountIds = [
+      ...new Set(assignments.map((item) => item.sourceAccountId)),
+    ];
+    const hydratedSourceAccounts = new Map(
+      (input?.sourceAccounts ?? []).map((account) => [account.id, account]),
+    );
+    sourceAccounts.clear();
+    for (const account of hydratedSourceAccounts.values()) {
+      sourceAccounts.set(account.id, account);
+    }
+    quotaState.clear();
+    await Promise.all(
+      sourceAccountIds.map(async (sourceAccountId) => {
+        const sourceAccount = hydratedSourceAccounts.get(sourceAccountId);
+        if (!sourceAccount) {
+          await loadSourceAccountSnapshots(sourceAccountId);
+          return;
+        }
+        try {
+          await refreshSourceAccount(sourceAccount);
+        } catch (error) {
+          console.warn(
+            `[quota] failed to refresh startup snapshot for ${sourceAccountId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          await loadSourceAccountSnapshots(sourceAccountId);
+        }
+      }),
+    );
   }
 
   function ensureUserUpstreamQuota(input: {
@@ -277,22 +321,13 @@ export function createUpstreamQuotaServices(deps: {
     totalTokens: number | null;
   }) {
     const quotaPool = getQuotaPoolForModel(input.model);
-    let upstreamWindow: QuotaWindow;
-    let synchronized = true;
-    try {
-      upstreamWindow = await fetchWeeklyWindow(input.sourceAccount, quotaPool);
-    } catch (error) {
-      synchronized = false;
-      const current = await deps.getUpstreamQuotaWindow({
-        sourceAccountId: input.sourceAccount.id,
-        quotaPool,
-      });
-      if (!current) throw error;
-      upstreamWindow = {
-        resetAt: current.resetAt,
-        usedPercent: current.usedPercent,
-        limitWindowSeconds: WEEK_SECONDS,
-      };
+    let snapshot = quotaState.get(quotaKey(input.sourceAccount.id, quotaPool));
+    if (!snapshot || snapshot.resetAt <= Math.floor(Date.now() / 1000)) {
+      await refreshSourceAccount(input.sourceAccount);
+      snapshot = quotaState.get(quotaKey(input.sourceAccount.id, quotaPool));
+    }
+    if (!snapshot) {
+      throw new Error(`${quotaPool} weekly quota window is unavailable`);
     }
     const usageAmount =
       quotaPool === "spark"
@@ -303,16 +338,16 @@ export function createUpstreamQuotaServices(deps: {
       sourceAccountId: input.sourceAccount.id,
       quotaPool,
       ownerUserId: input.ownerUserId,
-      resetAt: upstreamWindow.resetAt,
-      usedPercent: upstreamWindow.usedPercent,
+      resetAt: snapshot.resetAt,
+      usedPercent: snapshot.usedPercent,
       usageAmount,
-      synchronized,
+      synchronized: !snapshot.syncRequired,
     });
-    const snapshot = await deps.listUpstreamQuotaMemberAllocations({
+    const updatedSnapshot = await deps.listUpstreamQuotaMemberAllocations({
       sourceAccountId: input.sourceAccount.id,
       quotaPool,
     });
-    cacheQuotaState(snapshot);
+    cacheQuotaState(updatedSnapshot);
     return allocation;
   }
 
@@ -325,13 +360,14 @@ export function createUpstreamQuotaServices(deps: {
     totalTokens: number | null;
   }) {
     const quotaPool = getQuotaPoolForModel(input.model);
+    markSourceAccountDirty(input.sourceAccount);
     const key = quotaKey(input.sourceAccount.id, quotaPool);
     const previous = settlementTasks.get(key) ?? Promise.resolve();
-    let task: Promise<void>;
-    task = previous
+    const task = previous
       .catch(() => undefined)
       .then(async () => {
         await persistUserUpstreamQuota(input);
+        markSourceAccountDirty(input.sourceAccount);
       })
       .catch((error) => {
         console.warn(
@@ -361,6 +397,15 @@ export function createUpstreamQuotaServices(deps: {
   async function flushUpstreamQuotaSettlements() {
     while (settlementTasks.size > 0) {
       await Promise.all(settlementTasks.values());
+    }
+  }
+
+  async function stopUpstreamQuotaServices() {
+    stopped = true;
+    clearInterval(refreshTimer);
+    await flushUpstreamQuotaSettlements();
+    while (sourceAccountRefreshTasks.size > 0) {
+      await Promise.allSettled(sourceAccountRefreshTasks.values());
     }
   }
 
@@ -434,5 +479,6 @@ export function createUpstreamQuotaServices(deps: {
     getUserUpstreamQuotaSummary,
     hydrateUpstreamQuotaCache,
     settleUserUpstreamQuota,
+    stopUpstreamQuotaServices,
   };
 }

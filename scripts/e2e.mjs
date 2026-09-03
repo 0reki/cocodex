@@ -68,6 +68,38 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function createCookieJar() {
+  const cookies = new Map();
+  return {
+    capture(headers) {
+      const values =
+        typeof headers.getSetCookie === "function"
+          ? headers.getSetCookie()
+          : [headers.get("set-cookie")].filter(Boolean);
+      for (const value of values) {
+        const pair = value.split(";", 1)[0] ?? "";
+        const separator = pair.indexOf("=");
+        if (separator < 1) continue;
+        const name = pair.slice(0, separator).trim();
+        const cookieValue = pair.slice(separator + 1).trim();
+        if (!cookieValue) cookies.delete(name);
+        else {
+          cookies.set(name, cookieValue);
+          secrets.add(cookieValue);
+        }
+      }
+    },
+    has(name) {
+      return cookies.has(name);
+    },
+    toHeader() {
+      return [...cookies.entries()]
+        .map(([name, value]) => `${name}=${value}`)
+        .join("; ");
+    },
+  };
+}
+
 async function withStep(label, operation) {
   const startedAt = Date.now();
   try {
@@ -111,7 +143,7 @@ async function loadSourceAccountFixture(databaseUrl, email) {
   await client.connect();
   try {
     const result = await client.query(
-      `SELECT account_id, access_token, refresh_token
+      `SELECT account_id, id_token, access_token, refresh_token
        FROM public.openai_accounts
        WHERE LOWER(email) = LOWER($1)
        LIMIT 1`,
@@ -119,11 +151,12 @@ async function loadSourceAccountFixture(databaseUrl, email) {
     );
     const row = result.rows[0];
     assert(row, `source account fixture ${email} was not found`);
-    for (const field of ["account_id", "access_token", "refresh_token"]) {
+    for (const field of ["account_id", "id_token", "access_token", "refresh_token"]) {
       assert(typeof row[field] === "string" && row[field].trim(), `source account fixture has no ${field}`);
     }
     return {
       accountId: row.account_id.trim(),
+      idToken: row.id_token.trim(),
       accessToken: row.access_token.trim(),
       refreshToken: row.refresh_token.trim(),
     };
@@ -161,6 +194,8 @@ async function request(baseUrl, path, options = {}) {
   const headers = new Headers(options.headers);
   if (options.portalToken) headers.set("authorization", `Bearer ${options.portalToken}`);
   if (options.apiKey) headers.set("authorization", `Bearer ${options.apiKey}`);
+  const cookieHeader = options.cookieJar?.toHeader();
+  if (cookieHeader) headers.set("cookie", cookieHeader);
   if (options.body !== undefined) headers.set("content-type", "application/json");
   try {
     const response = await fetch(`${baseUrl}${path}`, {
@@ -169,6 +204,7 @@ async function request(baseUrl, path, options = {}) {
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: controller.signal,
     });
+    options.cookieJar?.capture(response.headers);
     const text = await response.text();
     let body = null;
     if (text) {
@@ -451,12 +487,12 @@ function assertPublicAccount(account) {
 
 async function main() {
   const databaseUrl = requiredEnv("E2E_DATABASE_URL", "DATABASE_URL");
-  const sourceIdToken = requiredEnv("E2E_SOURCE_ID_TOKEN");
   const sourceFixtureEmail = process.env.E2E_SOURCE_FIXTURE_EMAIL?.trim() ?? "";
   let sourceCredentials = sourceFixtureEmail
     ? null
     : {
         accountId: requiredEnv("E2E_SOURCE_ACCOUNT_ID"),
+        idToken: requiredEnv("E2E_SOURCE_ID_TOKEN"),
         accessToken: requiredEnv("E2E_SOURCE_ACCESS_TOKEN"),
         refreshToken: requiredEnv("E2E_SOURCE_REFRESH_TOKEN"),
       };
@@ -512,6 +548,7 @@ async function main() {
         loadSourceAccountFixture(databaseUrl, sourceFixtureEmail),
       );
       secrets.add(sourceCredentials.accountId);
+      secrets.add(sourceCredentials.idToken);
       secrets.add(sourceCredentials.accessToken);
       secrets.add(sourceCredentials.refreshToken);
     }
@@ -570,28 +607,30 @@ async function main() {
       assert(body?.error?.code === "missing_access_token", `unexpected auth error: ${snippet(body)}`);
     });
 
+    const adminCookieJar = createCookieJar();
     const adminSession = await withStep("登录管理员", async () => {
       const { body } = await request(baseUrl, "/api/auth/login", {
         method: "POST",
+        cookieJar: adminCookieJar,
         body: { username: adminUsername, password: adminPassword },
       });
       assert(body?.user?.role === "admin", `login response has no admin user: ${snippet(body)}`);
       assert(typeof body?.accessToken?.token === "string", `login response has no access token: ${snippet(body)}`);
-      assert(typeof body?.refreshToken?.token === "string", `login response has no refresh token: ${snippet(body)}`);
+      assert(!("refreshToken" in body), `login response exposed a refresh token: ${snippet(body)}`);
+      assert(adminCookieJar.has("cocodex.refresh_token"), "login response has no refresh-token cookie");
       secrets.add(body.accessToken.token);
-      secrets.add(body.refreshToken.token);
       return body;
     });
 
     const adminToken = await withStep("刷新管理员令牌", async () => {
       const { body } = await request(baseUrl, "/api/auth/refresh", {
         method: "POST",
-        body: { refreshToken: adminSession.refreshToken.token },
+        cookieJar: adminCookieJar,
       });
       assert(body?.user?.id === adminSession.user.id, `refresh returned another user: ${snippet(body)}`);
       assert(typeof body?.accessToken?.token === "string", `refresh response has no access token: ${snippet(body)}`);
+      assert(!("refreshToken" in body), `refresh response exposed a refresh token: ${snippet(body)}`);
       secrets.add(body.accessToken.token);
-      secrets.add(body.refreshToken.token);
       return body.accessToken.token;
     });
 
@@ -637,28 +676,28 @@ async function main() {
       });
     });
 
+    const userCookieJar = createCookieJar();
     const userSession = await withStep("登录普通用户并刷新令牌", async () => {
       const { body: loginBody } = await request(baseUrl, "/api/auth/login", {
         method: "POST",
+        cookieJar: userCookieJar,
         body: { username: renamedUserUsername, password: updatedUserPassword },
       });
       assert(loginBody?.user?.id === user.id, `user login returned another user: ${snippet(loginBody)}`);
       const { body: refreshBody } = await request(baseUrl, "/api/auth/refresh", {
         method: "POST",
-        body: { refreshToken: loginBody.refreshToken?.token },
+        cookieJar: userCookieJar,
       });
       assert(typeof refreshBody?.accessToken?.token === "string", `user refresh failed: ${snippet(refreshBody)}`);
       for (const token of [
         loginBody.accessToken?.token,
-        loginBody.refreshToken?.token,
         refreshBody.accessToken?.token,
-        refreshBody.refreshToken?.token,
       ]) {
         if (typeof token === "string") secrets.add(token);
       }
       return {
         accessToken: refreshBody.accessToken.token,
-        refreshToken: refreshBody.refreshToken.token,
+        cookieJar: userCookieJar,
       };
     });
 
@@ -753,7 +792,7 @@ async function main() {
         body: {
           email: sourceEmail,
           accountId: sourceCredentials.accountId,
-          idToken: sourceIdToken,
+          idToken: sourceCredentials.idToken,
           accessToken: sourceCredentials.accessToken,
           refreshToken: sourceCredentials.refreshToken,
         },
@@ -767,7 +806,7 @@ async function main() {
         body: {
           email: secondarySourceEmail,
           accountId: sourceCredentials.accountId,
-          idToken: sourceIdToken,
+          idToken: sourceCredentials.idToken,
           accessToken: sourceCredentials.accessToken,
           refreshToken: sourceCredentials.refreshToken,
         },
@@ -1012,7 +1051,7 @@ async function main() {
       await request(baseUrl, "/api/auth/refresh", {
         method: "POST",
         expectedStatus: 401,
-        body: { refreshToken: userSession.refreshToken },
+        cookieJar: userSession.cookieJar,
       });
       await request(baseUrl, "/api/auth/login", {
         method: "POST",

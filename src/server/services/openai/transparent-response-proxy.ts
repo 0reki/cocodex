@@ -127,7 +127,16 @@ function waitForResponseDrain(res: ExpressResponse): Promise<void> {
 export async function forwardUpstreamResponse(
   upstream: Response,
   res: ExpressResponse,
-  options: { expectEventStream?: boolean; jsonTailBytes?: number } = {},
+  options: {
+    expectEventStream?: boolean;
+    jsonTailBytes?: number;
+    onTerminalResponse?: (input: {
+      terminalResponsePayload: Record<string, unknown>;
+      terminalStatus: ResponseTerminalStatus;
+      errorPayload: Record<string, unknown> | null;
+      firstByteAtMs: number | null;
+    }) => Promise<void>;
+  } = {},
 ): Promise<UpstreamResponseObservation> {
   res.status(upstream.status);
   applyUpstreamResponseHeaders(res, upstream.headers);
@@ -145,9 +154,10 @@ export async function forwardUpstreamResponse(
   let terminalStatus: ResponseTerminalStatus | null = null;
   let errorPayload: Record<string, unknown> | null = null;
 
-  const observePayload = (payload: Record<string, unknown>) => {
+  const observePayload = async (payload: Record<string, unknown>) => {
     responsePayload = payload;
     const observedTerminalStatus = getTerminalStatus(payload);
+    const firstTerminalObservation = terminalStatus === null;
     if (observedTerminalStatus) {
       terminalResponsePayload = isRecord(payload.response)
         ? payload.response
@@ -155,6 +165,19 @@ export async function forwardUpstreamResponse(
       terminalStatus = observedTerminalStatus;
     }
     errorPayload = extractResponseErrorPayload(payload) ?? errorPayload;
+    if (
+      firstTerminalObservation &&
+      terminalResponsePayload &&
+      terminalStatus &&
+      options.onTerminalResponse
+    ) {
+      await options.onTerminalResponse({
+        terminalResponsePayload,
+        terminalStatus,
+        errorPayload,
+        firstByteAtMs,
+      });
+    }
   };
 
   if (!upstream.body) {
@@ -176,20 +199,20 @@ export async function forwardUpstreamResponse(
   let parseBuffer = "";
   let dataLines: string[] = [];
 
-  const flushEvent = () => {
+  const flushEvent = async () => {
     if (dataLines.length === 0) return;
     const data = dataLines.join("\n");
     dataLines = [];
     if (data === "[DONE]") return;
     try {
       const parsed = JSON.parse(data) as unknown;
-      if (isRecord(parsed)) observePayload(parsed);
+      if (isRecord(parsed)) await observePayload(parsed);
     } catch {
       return;
     }
   };
 
-  const observeEventStreamText = (text: string) => {
+  const observeEventStreamText = async (text: string) => {
     parseBuffer += text;
     let lineBreakIndex = parseBuffer.indexOf("\n");
     while (lineBreakIndex !== -1) {
@@ -197,7 +220,7 @@ export async function forwardUpstreamResponse(
       parseBuffer = parseBuffer.slice(lineBreakIndex + 1);
       const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
       if (line === "") {
-        flushEvent();
+        await flushEvent();
       } else if (line.startsWith("data:")) {
         dataLines.push(line.slice(5).trimStart());
       }
@@ -211,9 +234,8 @@ export async function forwardUpstreamResponse(
       if (done) break;
       if (firstByteAtMs === null) firstByteAtMs = Date.now();
       const chunk = Buffer.from(value);
-      const canContinue = res.write(chunk);
       if (isEventStream) {
-        observeEventStreamText(decoder.decode(value, { stream: true }));
+        await observeEventStreamText(decoder.decode(value, { stream: true }));
       } else {
         bodyChunks.push(chunk);
         bodyChunksBytes += chunk.byteLength;
@@ -233,23 +255,24 @@ export async function forwardUpstreamResponse(
           }
         }
       }
+      const canContinue = res.write(chunk);
       if (!canContinue) await waitForResponseDrain(res);
     }
 
     if (isEventStream) {
-      observeEventStreamText(decoder.decode());
+      await observeEventStreamText(decoder.decode());
       if (parseBuffer.trim()) {
         const trailing = parseBuffer.trim();
         if (trailing.startsWith("data:")) {
           dataLines.push(trailing.slice(5).trimStart());
         }
       }
-      flushEvent();
+      await flushEvent();
     } else if (bodyChunks.length > 0) {
       const bodyText = Buffer.concat(bodyChunks, bodyChunksBytes).toString("utf8");
       try {
         const parsed = JSON.parse(bodyText) as unknown;
-        if (isRecord(parsed)) observePayload(parsed);
+        if (isRecord(parsed)) await observePayload(parsed);
       } catch {
         const usage = extractJsonObjectProperty(bodyText, "usage");
         const error = extractJsonObjectProperty(bodyText, "error");

@@ -141,7 +141,7 @@ export function registerImageRoutes(
             serviceTier: null,
             billable: false,
           });
-          persistOpenAIResponseLog({
+          await persistOpenAIResponseLog({
             deps,
             shouldPersist:
               !alreadyPersistedQuotaLog &&

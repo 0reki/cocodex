@@ -68,8 +68,8 @@ pnpm e2e
 小时聚合；结束后会停止服务并删除该 schema 和临时配置，不依赖 OpenResty。
 日常快速回归可设置 `E2E_SKIP_IMAGES=true`，排查失败时可设置
 `E2E_KEEP_SCHEMA=true` 暂时保留测试数据。如果测试库已有可用账号，可设置
-`E2E_SOURCE_FIXTURE_EMAIL`，脚本会只读获取该账号的 Account ID、Access Token 和
-Refresh Token，避免重复填充测试凭据。
+`E2E_SOURCE_FIXTURE_EMAIL`，脚本会只读获取该账号的 Account ID、ID Token、Access
+Token 和 Refresh Token，避免重复填充测试凭据。
 
 ## OpenAI 兼容接口
 
@@ -210,6 +210,12 @@ SSE 在下游写缓冲区满时暂停读取上游；WebSocket 在目标连接出
 Token 分类结算。`GET /v1/models` 实时读取 Codex 上游的
 `/backend-api/codex/models`，不依赖本地模型配置，也不维护模型刷新任务。
 服务不限制用户 RPM 或并发数。
+
+Responses terminal event 会先写入并同步本地 WAL，再下发客户端和异步批量提交
+PostgreSQL。WAL 默认与 `COCODEX_CONFIG_PATH` 位于同一目录，也可通过
+`RESPONSE_SETTLEMENT_WAL_PATH` 覆盖；Docker 示例将其放在持久化的 `/data` 卷中。
+进程启动时会自动重放未确认记录，达到
+`RESPONSE_SETTLEMENT_WAL_COMPACT_AFTER_RECORDS` 后自动压缩。
 
 ## Docker
 

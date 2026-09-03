@@ -12,12 +12,50 @@ import {
 import {
   createPortalTokens,
   ensureBootstrapAdminUser,
+  getPortalPasswordValidationError,
   hashPassword,
   hashPortalInvitationToken,
   verifyPassword,
   verifyPortalToken,
 } from "../../auth/portal-auth.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
+
+const REFRESH_TOKEN_COOKIE = "cocodex.refresh_token";
+
+function refreshTokenCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict" as const,
+    path: "/api/auth",
+  };
+}
+
+function issuePortalTokens(res: Response, userId: string) {
+  const { accessToken, refreshToken } = createPortalTokens({ userId });
+  res.cookie(REFRESH_TOKEN_COOKIE, refreshToken.token, {
+    ...refreshTokenCookieOptions(),
+    expires: new Date(refreshToken.expiresAt * 1000),
+  });
+  return { accessToken };
+}
+
+function readCookie(req: Request, name: string) {
+  const cookieHeader = req.get("cookie") ?? "";
+  for (const part of cookieHeader.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0) continue;
+    const key = part.slice(0, separator).trim();
+    if (key !== name) continue;
+    const value = part.slice(separator + 1).trim();
+    try {
+      return decodeURIComponent(value);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
 
 function publicUser(user: {
   id: string;
@@ -86,8 +124,20 @@ export function registerPortalAuthRoutes(
         return;
       }
 
+      const tokenHash = hashPortalInvitationToken(inviteToken);
+      const invitation = await inspectPortalInvitation(tokenHash);
+      if (!invitation.valid) {
+        res.status(410).json({ ok: false, error: invitation.reason });
+        return;
+      }
+      const passwordError = getPortalPasswordValidationError(password);
+      if (passwordError) {
+        res.status(400).json({ ok: false, error: passwordError });
+        return;
+      }
+
       const user = await registerPortalUserWithInvitation({
-        tokenHash: hashPortalInvitationToken(inviteToken),
+        tokenHash,
         username,
         passwordHash: await hashPassword(password),
       });
@@ -95,7 +145,7 @@ export function registerPortalAuthRoutes(
       res.status(201).json({
         ok: true,
         user: publicUser(user),
-        ...createPortalTokens({ userId: user.id }),
+        ...issuePortalTokens(res, user.id),
       });
     } catch (error) {
       if (error instanceof PortalInvitationError) {
@@ -121,6 +171,7 @@ export function registerPortalAuthRoutes(
   });
 
   app.post("/api/auth/login", async (req: Request, res: Response) => {
+    res.setHeader("cache-control", "no-store");
     try {
       await ensureBootstrapAdminUser();
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -129,6 +180,10 @@ export function registerPortalAuthRoutes(
           ? body.username.trim().toLowerCase()
           : "";
       const password = typeof body.password === "string" ? body.password : "";
+      if (getPortalPasswordValidationError(password)) {
+        res.status(401).json({ ok: false, error: "Invalid credentials" });
+        return;
+      }
       const user = username ? await getPortalUserByUsername(username) : null;
       if (
         !user?.enabled ||
@@ -143,9 +198,7 @@ export function registerPortalAuthRoutes(
       res.json({
         ok: true,
         user: publicUser(user),
-        ...createPortalTokens({
-          userId: user.id,
-        }),
+        ...issuePortalTokens(res, user.id),
       });
     } catch (error) {
       res.status(500).json({
@@ -156,12 +209,12 @@ export function registerPortalAuthRoutes(
   });
 
   app.post("/api/auth/refresh", async (req: Request, res: Response) => {
+    res.setHeader("cache-control", "no-store");
     try {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const refreshToken =
-        typeof body.refreshToken === "string" ? body.refreshToken.trim() : "";
+      const refreshToken = readCookie(req, REFRESH_TOKEN_COOKIE);
       const claims = verifyPortalToken(refreshToken, "refresh");
       if (!claims) {
+        res.clearCookie(REFRESH_TOKEN_COOKIE, refreshTokenCookieOptions());
         res.status(401).json({ ok: false, error: "Invalid refresh token" });
         return;
       }
@@ -169,6 +222,7 @@ export function registerPortalAuthRoutes(
       await ensureDatabaseSchema();
       const user = await getPortalUserById(claims.sub);
       if (!user?.enabled) {
+        res.clearCookie(REFRESH_TOKEN_COOKIE, refreshTokenCookieOptions());
         res.status(401).json({ ok: false, error: "User is unavailable" });
         return;
       }
@@ -178,9 +232,7 @@ export function registerPortalAuthRoutes(
       res.json({
         ok: true,
         user: publicUser(user),
-        ...createPortalTokens({
-          userId: user.id,
-        }),
+        ...issuePortalTokens(res, user.id),
       });
     } catch (error) {
       res.status(500).json({
@@ -188,5 +240,11 @@ export function registerPortalAuthRoutes(
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  });
+
+  app.post("/api/auth/logout", (_req: Request, res: Response) => {
+    res.setHeader("cache-control", "no-store");
+    res.clearCookie(REFRESH_TOKEN_COOKIE, refreshTokenCookieOptions());
+    res.json({ ok: true });
   });
 }

@@ -112,8 +112,7 @@ export function createUpstreamRequestServices(deps: {
     tokens: RefreshedAccountTokens,
   ) {
     const previous = tokenPersistenceTasks.get(accountId) ?? Promise.resolve();
-    let task: Promise<void>;
-    task = previous
+    const task = previous
       .catch(() => undefined)
       .then(async () => {
         await deps.updateOpenAIAccountTokensById(accountId, tokens);

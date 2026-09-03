@@ -4,7 +4,13 @@ import { Pool, type PoolConfig } from "pg";
 
 import { resetDatabasePool } from "../../database/core/db.ts";
 import { getInitSchemaSql } from "../../database/schema/sql.ts";
-import { hashPassword, verifyPassword } from "../auth/portal-auth.ts";
+import {
+  getPortalPasswordValidationError,
+  hashPassword,
+  PORTAL_PASSWORD_MAX_LENGTH,
+  PORTAL_PASSWORD_MIN_LENGTH,
+  verifyPassword,
+} from "../auth/portal-auth.ts";
 import { persistSetupConfig } from "../utils/runtime/env-utils.ts";
 
 type SetupReason =
@@ -94,11 +100,13 @@ function validateAdminUsername(value: unknown) {
 
 function validateAdminPassword(value: unknown) {
   const password = typeof value === "string" ? value : "";
-  if (password.length < 8) {
+  if (getPortalPasswordValidationError(password)) {
     throw new SetupError(
       400,
-      "admin_password_too_short",
-      "管理员密码至少需要 8 个字符",
+      password.length < PORTAL_PASSWORD_MIN_LENGTH
+        ? "admin_password_too_short"
+        : "admin_password_too_long",
+      `管理员密码长度必须在 ${PORTAL_PASSWORD_MIN_LENGTH} 到 ${PORTAL_PASSWORD_MAX_LENGTH} 个字符之间`,
     );
   }
   return password;

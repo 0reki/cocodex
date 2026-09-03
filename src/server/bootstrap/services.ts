@@ -45,7 +45,6 @@ type BootstrapServerServicesDependencies =
   Pick<SettlementDependencies, "flushResponseSettlements"> &
   Pick<
     UpstreamQuotaDependencies,
-    | "getUpstreamQuotaWindow"
     | "getUserUpstreamQuotaAllocation"
     | "listPortalUserUpstreamAssignments"
     | "listUpstreamQuotaMemberAllocations"
@@ -68,6 +67,9 @@ type BootstrapServerServicesDependencies =
     RESPONSE_SETTLEMENT_ID_CACHE_SIZE: number;
     RESPONSE_SETTLEMENT_QUEUE_MAX: number;
     RESPONSE_SETTLEMENT_RETRY_MAX_MS: number;
+    RESPONSE_SETTLEMENT_WAL_PATH: string;
+    RESPONSE_SETTLEMENT_WAL_COMPACT_AFTER_RECORDS: number;
+    UPSTREAM_QUOTA_REFRESH_INTERVAL_MS: number;
   };
 
 export function bootstrapServerServices(
@@ -112,6 +114,9 @@ export function bootstrapServerServices(
     settledIdCacheSize: deps.RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
     queueMaxSize: deps.RESPONSE_SETTLEMENT_QUEUE_MAX,
     retryMaxMs: deps.RESPONSE_SETTLEMENT_RETRY_MAX_MS,
+    walPath: deps.RESPONSE_SETTLEMENT_WAL_PATH,
+    walCompactAfterRecords:
+      deps.RESPONSE_SETTLEMENT_WAL_COMPACT_AFTER_RECORDS,
   });
 
   const upstreamError = createUpstreamErrorServices({
@@ -135,7 +140,6 @@ export function bootstrapServerServices(
     getCodexUsageWithTokenRefresh:
       upstreamRequest.getCodexUsageWithTokenRefresh,
     getOpenAIApiRuntimeConfig: runtime.getOpenAIApiRuntimeConfig,
-    getUpstreamQuotaWindow: deps.getUpstreamQuotaWindow,
     getUserUpstreamQuotaAllocation: deps.getUserUpstreamQuotaAllocation,
     listPortalUserUpstreamAssignments:
       deps.listPortalUserUpstreamAssignments,
@@ -143,6 +147,7 @@ export function bootstrapServerServices(
       deps.listUpstreamQuotaMemberAllocations,
     recordUserUpstreamQuotaUsage: deps.recordUserUpstreamQuotaUsage,
     syncUpstreamQuotaWindow: deps.syncUpstreamQuotaWindow,
+    refreshIntervalMs: deps.UPSTREAM_QUOTA_REFRESH_INTERVAL_MS,
   });
 
   return {

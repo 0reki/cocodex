@@ -19,7 +19,6 @@ import {
   flushResponseSettlements,
   createPortalUser,
   createPortalInvitation,
-  getUpstreamQuotaWindow,
   getUserUpstreamQuotaAllocation,
   listUpstreamQuotaMemberAllocations,
   getPortalUserById,
@@ -46,6 +45,7 @@ import {
   updatePortalUserPasswordById,
   upsertOpenAIAccount,
 } from "./database/index.ts";
+import { resetDatabasePool } from "./database/core/db.ts";
 import {
   loadModelPricingFromEnv,
 } from "./server/utils/index.ts";
@@ -115,6 +115,9 @@ const {
   RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
   RESPONSE_SETTLEMENT_QUEUE_MAX,
   RESPONSE_SETTLEMENT_RETRY_MAX_MS,
+  RESPONSE_SETTLEMENT_WAL_PATH,
+  RESPONSE_SETTLEMENT_WAL_COMPACT_AFTER_RECORDS,
+  UPSTREAM_QUOTA_REFRESH_INTERVAL_MS,
   apiKeyAuthLruCache,
   apiKeyAuthTokenById,
   apiKeyPendingCharges,
@@ -157,10 +160,11 @@ const {
   tryReserveResponseRequest,
   cancelResponseRequestReservation,
   getResponseSettlementQueueHealth,
+  initializeResponseSettlementServices,
   flushAllResponseSettlements,
-  flushUpstreamQuotaSettlements,
   flushUpstreamTokenPersistence,
   stopResponseSettlementServices,
+  stopUpstreamQuotaServices,
   extractResponseUsage,
   estimateUsageCost,
   resolveUsagePricingModelId,
@@ -179,7 +183,6 @@ const {
   lruGet,
   modelPricing,
   listAssignedOpenAIAccounts,
-  getUpstreamQuotaWindow,
   getUserUpstreamQuotaAllocation,
   listUpstreamQuotaMemberAllocations,
   listPortalUserUpstreamAssignments,
@@ -200,6 +203,9 @@ const {
   RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
   RESPONSE_SETTLEMENT_QUEUE_MAX,
   RESPONSE_SETTLEMENT_RETRY_MAX_MS,
+  RESPONSE_SETTLEMENT_WAL_PATH,
+  RESPONSE_SETTLEMENT_WAL_COMPACT_AFTER_RECORDS,
+  UPSTREAM_QUOTA_REFRESH_INTERVAL_MS,
   apiKeyAuthLruCache,
   apiKeyAuthTokenById,
   apiKeyPendingCharges,
@@ -268,7 +274,7 @@ app.use((req, res, next) => {
       ? IMAGE_JSON_BODY_LIMIT_BYTES
       : JSON_BODY_LIMIT_BYTES;
     const compressed = await readRequestBodyBuffer(req, bodyLimitBytes);
-    const decompressed = await zstdDecompressBuffer(compressed);
+    const decompressed = await zstdDecompressBuffer(compressed, bodyLimitBytes);
     if (decompressed.byteLength > bodyLimitBytes) {
       res.status(413).json({
         error: {
@@ -308,7 +314,9 @@ app.use((req, res, next) => {
         Number.isFinite(error.status)
         ? Math.trunc(error.status)
         : null;
-    if (status === 413) {
+    const code =
+      isRecord(error) && typeof error.code === "string" ? error.code : null;
+    if (status === 413 || code === "ERR_BUFFER_TOO_LARGE") {
       res.status(413).json({
         error: {
           message: "Request payload too large",
@@ -758,6 +766,7 @@ httpServer.on("upgrade", (request, socket, head) => {
 
 async function startServer() {
   if (!process.env.DATABASE_URL?.trim()) {
+    await initializeResponseSettlementServices();
     httpServer.listen(port, host, () => {
       console.log("[setup] initialization required; open the web setup page");
       console.log(`[backend] listening at http://${host}:${port}`);
@@ -784,6 +793,7 @@ async function startServer() {
       sourceAccounts: assignedAccounts.map((item) => item.account),
     });
     hydrateResponseAuthState({ apiKeys, users });
+    await initializeResponseSettlementServices();
   }
   httpServer.listen(port, host, () => {
     console.log(`[backend] listening at http://${host}:${port}`);
@@ -807,12 +817,16 @@ async function shutdown(signal: NodeJS.Signals) {
     );
   }
   await closePromise;
-  await Promise.all([
-    flushAllResponseSettlements(),
-    flushUpstreamQuotaSettlements(),
-  ]);
-  await flushUpstreamTokenPersistence();
-  await stopResponseSettlementServices();
+  try {
+    await Promise.all([
+      flushAllResponseSettlements(),
+      stopUpstreamQuotaServices(),
+    ]);
+    await flushUpstreamTokenPersistence();
+    await stopResponseSettlementServices();
+  } finally {
+    await resetDatabasePool();
+  }
 }
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {

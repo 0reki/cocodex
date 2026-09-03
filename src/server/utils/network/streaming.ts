@@ -23,7 +23,10 @@ export async function readRequestBodyBuffer(
       total += buffer.length;
       if (total > maxBytes) {
         cleanup();
-        reject(new Error("Request body too large"));
+        req.resume();
+        reject(
+          Object.assign(new Error("Request body too large"), { status: 413 }),
+        );
         return;
       }
       chunks.push(buffer);
@@ -49,14 +52,21 @@ export async function readRequestBodyBuffer(
   return Buffer.concat(chunks);
 }
 
-export function zstdDecompressBuffer(buffer: Buffer): Promise<Buffer> {
+export function zstdDecompressBuffer(
+  buffer: Buffer,
+  maxOutputLength: number,
+): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {
-    zlib.zstdDecompress(buffer, (error, result) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-      resolve(Buffer.isBuffer(result) ? result : Buffer.from(result));
-    });
+    zlib.zstdDecompress(
+      buffer,
+      { maxOutputLength },
+      (error, result) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(Buffer.isBuffer(result) ? result : Buffer.from(result));
+      },
+    );
   });
 }
