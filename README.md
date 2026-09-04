@@ -33,9 +33,20 @@ pnpm dev
 环境变量：
 
 - `VITE_API_PROXY_TARGET`：开发服务器的 `/api`、`/v1` 代理目标。
-- `VITE_API_BASE_URL`：浏览器直接请求的 API 基址；同源部署时留空。
+- `VITE_API_BASE_URL`：管理 API 基址；同源部署时留空。
 - `API_PROXY_TARGET`：生产静态服务器的 `/api`、`/v1`、`/health` 代理目标。
 - `WEB_HOST` / `WEB_PORT`：生产静态服务器监听地址与端口。
+
+模型接口入口由运行时的 `public/config.json` 配置。复制
+`public/config.example.json` 后填写实际入口；该文件已被 Git 忽略，生产环境也可以将
+配置直接挂载到容器的 `/app/dist/config.json`。API Key 页面会展示所有入口，并让
+Codex、curl 和 TypeScript 示例跟随当前选择切换。
+
+```bash
+cp public/config.example.json public/config.json
+```
+
+每个 `baseUrl` 填写入口的 HTTP(S) 基址，不包含末尾的 `/v1`。
 
 ## 验证与构建
 

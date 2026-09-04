@@ -1,0 +1,14 @@
+{
+  "openaiApiEndpoints": [
+    {
+      "id": "default",
+      "label": "默认入口",
+      "baseUrl": "https://api.example.com"
+    },
+    {
+      "id": "region",
+      "label": "区域入口",
+      "baseUrl": "https://api-region.example.com"
+    }
+  ]
+}

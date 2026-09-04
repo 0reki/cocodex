@@ -79,7 +79,9 @@ function appendVary(current, value) {
 async function sendFile(req, res, filePath, cacheControl) {
   let responsePath = filePath;
   let contentEncoding = null;
-  const isCompressible = compressibleExtensions.has(path.extname(filePath));
+  const isCompressible =
+    cacheControl !== "no-store" &&
+    compressibleExtensions.has(path.extname(filePath));
 
   if (isCompressible) {
     for (const encoding of acceptedEncodings(req)) {
@@ -219,9 +221,11 @@ const server = createServer(async (req, res) => {
           req,
           res,
           candidate,
-          relativePath.startsWith("assets/")
-            ? "public, max-age=31536000, immutable"
-            : "public, max-age=300",
+          relativePath === "config.json"
+            ? "no-store"
+            : relativePath.startsWith("assets/")
+              ? "public, max-age=31536000, immutable"
+              : "public, max-age=300",
         );
         return;
       }

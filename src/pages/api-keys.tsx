@@ -1,5 +1,5 @@
 import { CalendarDays, LoaderCircle, Pencil, Trash } from "lucide-react";
-import { useCallback, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import {
   CopyButton,
@@ -14,6 +14,10 @@ import { useResource } from "@/hooks/use-resource";
 import { jsonBody } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { formatDate, formatUsd } from "@/lib/format";
+import {
+  loadOpenAIApiEndpoints,
+  type OpenAIApiEndpoint,
+} from "@/lib/runtime-config";
 import type { ApiKey, ApiKeysResponse } from "@/types/api";
 import { Button } from "@/ui/components/button";
 import { Calendar } from "@/ui/components/calendar";
@@ -212,10 +216,29 @@ function CodeTabs({ codes }: { codes: Record<string, string> }) {
 }
 
 function ApiDocs() {
-  const baseUrl = useMemo(() => {
-    const configured = import.meta.env.VITE_API_BASE_URL?.trim();
-    return (configured || window.location.origin).replace(/\/+$/, "");
+  const [endpoints, setEndpoints] = useState<OpenAIApiEndpoint[]>([
+    {
+      id: "same-origin",
+      label: "当前站点",
+      baseUrl: window.location.origin,
+    },
+  ]);
+  const [selectedEndpointId, setSelectedEndpointId] = useState("same-origin");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadOpenAIApiEndpoints(controller.signal).then((loadedEndpoints) => {
+      if (controller.signal.aborted) return;
+      setEndpoints(loadedEndpoints);
+      setSelectedEndpointId(loadedEndpoints[0]?.id ?? "same-origin");
+    });
+    return () => controller.abort();
   }, []);
+
+  const selectedEndpoint =
+    endpoints.find((endpoint) => endpoint.id === selectedEndpointId) ??
+    endpoints[0];
+  const baseUrl = selectedEndpoint?.baseUrl ?? window.location.origin;
   const responsesCurl = `curl ${baseUrl}/v1/responses \\
   -H "Authorization: Bearer <YOUR_API_KEY>" \\
   -H "Content-Type: application/json" \\
@@ -258,6 +281,23 @@ supports_websockets = false`;
   return (
     <section className="grid gap-4">
       <h2 className="text-lg font-semibold">API 使用方式</h2>
+      {endpoints.length > 1 ? (
+        <div className="flex flex-wrap gap-2" aria-label="API 入口">
+          {endpoints.map((endpoint) => (
+            <Button
+              key={endpoint.id}
+              type="button"
+              size="sm"
+              variant={
+                endpoint.id === selectedEndpointId ? "default" : "outline"
+              }
+              onClick={() => setSelectedEndpointId(endpoint.id)}
+            >
+              {endpoint.label}
+            </Button>
+          ))}
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-1.5 text-sm">
         <span className="font-medium">API Endpoint:</span>
         <code className="rounded bg-muted px-1.5 py-0.5">{baseUrl}</code>
