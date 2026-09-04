@@ -322,7 +322,15 @@ export function createUpstreamQuotaServices(deps: {
   }) {
     const quotaPool = getQuotaPoolForModel(input.model);
     let snapshot = quotaState.get(quotaKey(input.sourceAccount.id, quotaPool));
-    if (!snapshot || snapshot.resetAt <= Math.floor(Date.now() / 1000)) {
+    const shouldRefreshUnusedSparkWindow =
+      quotaPool === "spark" &&
+      snapshot?.usedPercent === 0 &&
+      snapshot.totalUsageAmount === 0;
+    if (
+      !snapshot ||
+      snapshot.resetAt <= Math.floor(Date.now() / 1000) ||
+      shouldRefreshUnusedSparkWindow
+    ) {
       await refreshSourceAccount(input.sourceAccount);
       snapshot = quotaState.get(quotaKey(input.sourceAccount.id, quotaPool));
     }

@@ -97,6 +97,28 @@ async function lockWindow(
   return result.rows[0] ? mapWindow(result.rows[0]) : null;
 }
 
+async function hasTrackedWindowUsage(
+  client: PoolClient,
+  sourceAccountId: string,
+  quotaPool: UpstreamQuotaPool,
+  resetAt: number,
+) {
+  const result = await client.query<{ found: boolean }>(
+    `
+      SELECT EXISTS (
+        SELECT 1
+        FROM upstream_user_window_usage
+        WHERE source_account_id = $1::uuid
+          AND quota_pool = $2
+          AND reset_at = $3
+          AND usage_amount > 0
+      ) AS found
+    `,
+    [sourceAccountId, quotaPool, resetAt],
+  );
+  return result.rows[0]?.found === true;
+}
+
 async function syncWindowWithClient(
   client: PoolClient,
   input: {
@@ -149,20 +171,29 @@ async function syncWindowWithClient(
     return syncWindowWithClient(client, input);
   }
 
-  if (input.resetAt < current.resetAt) return current;
+  const startsNewCycle = input.usedPercent < current.usedPercent;
+  const hasTrackedUsage = await hasTrackedWindowUsage(
+    client,
+    input.sourceAccountId,
+    input.quotaPool,
+    current.resetAt,
+  );
+  const preserveResetAt =
+    !startsNewCycle && (current.carryInPercent > 0 || hasTrackedUsage);
+  const nextResetAt = preserveResetAt ? current.resetAt : input.resetAt;
   const result = await client.query<UpstreamQuotaWindowRow>(
     `
       UPDATE upstream_quota_windows
       SET
         reset_at = $2,
         used_percent = CASE
-          WHEN reset_at = $2 THEN GREATEST(used_percent, $3)
-          ELSE $3
+          WHEN $6::boolean THEN $3
+          ELSE GREATEST(used_percent, $3)
         END,
-        carry_in_percent = CASE WHEN reset_at = $2 THEN carry_in_percent ELSE 0 END,
-        carry_in_user_id = CASE WHEN reset_at = $2 THEN carry_in_user_id ELSE NULL END,
+        carry_in_percent = CASE WHEN $6::boolean THEN 0 ELSE carry_in_percent END,
+        carry_in_user_id = CASE WHEN $6::boolean THEN NULL ELSE carry_in_user_id END,
         sync_required = NOT $4::boolean,
-        initialized_at = CASE WHEN reset_at = $2 THEN initialized_at ELSE now() END,
+        initialized_at = CASE WHEN $6::boolean THEN now() ELSE initialized_at END,
         updated_at = now()
       WHERE source_account_id = $1::uuid AND quota_pool = $5
       RETURNING
@@ -171,10 +202,11 @@ async function syncWindowWithClient(
     `,
     [
       input.sourceAccountId,
-      input.resetAt,
+      nextResetAt,
       input.usedPercent,
       input.markSynchronized,
       input.quotaPool,
+      startsNewCycle,
     ],
   );
   const row = result.rows[0];
