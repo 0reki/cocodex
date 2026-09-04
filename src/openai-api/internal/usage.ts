@@ -1,6 +1,7 @@
 import {
   CHATGPT_CODEX_DAILY_USAGE_URL,
   CHATGPT_CODEX_USAGE_URL,
+  DEFAULT_CODEX_ORIGINATOR,
   DEFAULT_USER_AGENT,
 } from "./runtime-constants.ts";
 import type {
@@ -8,7 +9,23 @@ import type {
   GetCodexUsageOptions,
 } from "./runtime-types.ts";
 
-function usageHeaders(options: GetCodexUsageOptions) {
+function codexUsageHeaders(options: GetCodexUsageOptions) {
+  const accessToken = options.accessToken.trim();
+  const clientVersion = options.clientVersion.trim();
+  if (!accessToken) throw new Error("Missing accessToken");
+  if (!clientVersion) throw new Error("Missing clientVersion");
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    originator: DEFAULT_CODEX_ORIGINATOR,
+    "User-Agent": `${DEFAULT_CODEX_ORIGINATOR}/${clientVersion}`,
+  };
+  const accountId = options.accountId?.trim();
+  if (accountId) headers["ChatGPT-Account-Id"] = accountId;
+  return headers;
+}
+
+function analyticsUsageHeaders(options: GetCodexUsageOptions) {
   const accessToken = options.accessToken.trim();
   const clientVersion = options.clientVersion.trim();
   if (!accessToken) throw new Error("Missing accessToken");
@@ -31,6 +48,7 @@ async function getUsageJson(
   url: string,
   path: string,
   options: GetCodexUsageOptions,
+  headers: Record<string, string>,
 ) {
   const timeoutSignal = AbortSignal.timeout(10_000);
   const signal = options.signal
@@ -38,7 +56,7 @@ async function getUsageJson(
     : timeoutSignal;
   const response = await fetch(url, {
     method: "GET",
-    headers: usageHeaders(options),
+    headers,
     signal,
   });
   const text = await response.text();
@@ -59,7 +77,12 @@ async function getUsageJson(
 }
 
 export function getCodexUsage(options: GetCodexUsageOptions) {
-  return getUsageJson(CHATGPT_CODEX_USAGE_URL, "/backend-api/wham/usage", options);
+  return getUsageJson(
+    CHATGPT_CODEX_USAGE_URL,
+    "/backend-api/wham/usage",
+    options,
+    codexUsageHeaders(options),
+  );
 }
 
 export function getCodexDailyWorkspaceUsage(
@@ -74,5 +97,6 @@ export function getCodexDailyWorkspaceUsage(
     url.toString(),
     "/backend-api/wham/analytics/daily-workspace-usage-counts",
     options,
+    analyticsUsageHeaders(options),
   );
 }
