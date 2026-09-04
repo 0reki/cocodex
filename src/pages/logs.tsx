@@ -165,7 +165,9 @@ function getTokens(tokensInfo: Record<string, unknown> | null) {
       : null;
   return {
     input: formatToken(tokensInfo?.input_tokens),
-    cachedInput: formatToken(details?.cached_tokens),
+    cachedInput: formatToken(
+      tokensInfo?.cached_input_tokens ?? details?.cached_tokens,
+    ),
     output: formatToken(tokensInfo?.output_tokens),
     total: formatToken(tokensInfo?.total_tokens),
   };
