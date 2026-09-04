@@ -23,7 +23,10 @@ import type {
   resolveFastServiceTierForBilling,
   wsRawDataToText,
 } from "../../utils/index.ts";
-import { getForwardRequestHeaders } from "../../utils/index.ts";
+import {
+  getForwardRequestHeaders,
+  resolveResponseServiceTierForBilling,
+} from "../../utils/index.ts";
 
 type FastServiceTier = ReturnType<
   typeof resolveFastServiceTierForBilling
@@ -279,7 +282,7 @@ export function setupResponsesWebSocketProxy(
     serviceTier: FastServiceTier;
     pricingModelId: string | null;
   }> = [];
-  const responseServiceTierById = new Map<string, FastServiceTier>();
+  const responseServiceTierById = new Map<string, string | null>();
   const responsePricingModelIdById = new Map<string, string | null>();
   const responseReservationIdById = new Map<string, string>();
   const activeReservationIds = new Set<string>();
@@ -354,7 +357,7 @@ export function setupResponsesWebSocketProxy(
     payload: Record<string, unknown>,
     modelId: string | null,
     pricingModelId: string | null,
-    serviceTier: FastServiceTier,
+    serviceTier: string | null,
     responseId: string,
     reservationId: string,
     terminalStatus: ResponseTerminalStatus,
@@ -366,9 +369,13 @@ export function setupResponsesWebSocketProxy(
       response: payload,
     });
     const billedModelId = pricingModelId ?? modelId;
+    const resolvedServiceTier = resolveResponseServiceTierForBilling(
+      payload.service_tier,
+      serviceTier,
+    );
     const cost = deps.applyServiceTierBillingMultiplier(
       deps.estimateUsageCost(billedModelId, tokensInfo),
-      serviceTier,
+      resolvedServiceTier.fastServiceTier,
       billedModelId,
     );
     const settlementId = responseId || reservationId;
@@ -387,7 +394,7 @@ export function setupResponsesWebSocketProxy(
       streamEndReason: terminalStatus,
       path: "/v1/responses",
       modelId,
-      serviceTier,
+      serviceTier: resolvedServiceTier.serviceTier,
       statusCode: 200,
       ttfbMs:
         activeTurnFirstEventAtMs === null
@@ -488,10 +495,10 @@ export function setupResponsesWebSocketProxy(
         typeof response.id === "string" ? response.id.trim() : "";
       if (responseId) {
         const pendingTurn = pendingTurns.shift();
-        const responseTier =
-          deps.resolveFastServiceTierForBilling(response.service_tier) ??
-          pendingTurn?.serviceTier ??
-          context.serviceTier;
+        const responseTier = resolveResponseServiceTierForBilling(
+          response.service_tier,
+          pendingTurn?.serviceTier ?? context.serviceTier,
+        ).serviceTier;
         responseServiceTierById.set(responseId, responseTier);
         if (pendingTurn) {
           responseReservationIdById.set(responseId, pendingTurn.intentId);
@@ -563,16 +570,13 @@ export function setupResponsesWebSocketProxy(
       responseId && responseReservationIdById.has(responseId)
         ? null
         : pendingTurns.shift();
-    let billedServiceTier = deps.resolveFastServiceTierForBilling(
-      terminalPayload.service_tier,
-    );
-    if (billedServiceTier === null && responseId) {
-      billedServiceTier = responseServiceTierById.get(responseId) ?? null;
+    let serviceTier = responseId
+      ? responseServiceTierById.get(responseId) ?? null
+      : null;
+    if (serviceTier === null) {
+      serviceTier = pendingTurn?.serviceTier ?? null;
     }
-    if (billedServiceTier === null) {
-      billedServiceTier = pendingTurn?.serviceTier ?? null;
-    }
-    billedServiceTier ??= context.serviceTier;
+    serviceTier ??= context.serviceTier;
     const pricingModelId =
       (responseId ? responsePricingModelIdById.get(responseId) : null) ??
       pendingTurn?.pricingModelId ??
@@ -616,7 +620,7 @@ export function setupResponsesWebSocketProxy(
       terminalPayload,
       modelId,
       pricingModelId,
-      billedServiceTier,
+      serviceTier,
       responseId,
       reservationId,
       terminalStatus,

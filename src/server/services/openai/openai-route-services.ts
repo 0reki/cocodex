@@ -5,6 +5,7 @@ import type {
   resolveOpenAIUpstreamAccountId,
   resolveFastServiceTierForBilling,
 } from "../../utils/index.ts";
+import { resolveResponseServiceTierForBilling } from "../../utils/index.ts";
 
 export type OpenAIRequestPreparationDependencies = Pick<
   ServerServices,
@@ -394,10 +395,14 @@ export function finalizeOpenAIRouteAccounting(args: {
     : lastErrorPayload;
   const usage = deps.extractResponseUsage(usageSource);
   const billedModelId = pricingModelId ?? model;
+  const resolvedServiceTier = resolveResponseServiceTierForBilling(
+    usageResponsePayload?.service_tier,
+    serviceTier,
+  );
   const cost = billable
     ? deps.applyServiceTierBillingMultiplier(
         deps.estimateUsageCost(billedModelId, usage.tokensInfo),
-        serviceTier,
+        resolvedServiceTier.fastServiceTier,
         billedModelId,
       )
     : null;
@@ -409,6 +414,7 @@ export function finalizeOpenAIRouteAccounting(args: {
     usage,
     cost,
     charge: shouldCharge ? cost : 0n,
+    serviceTier: resolvedServiceTier.serviceTier,
   };
 }
 
@@ -423,7 +429,7 @@ export async function persistOpenAIResponseLog(args: {
   apiKeyId: string | null;
   ownerUserId: string | null;
   charge: bigint;
-  serviceTier: FastServiceTier;
+  serviceTier: string | null;
   statusCode: number | null;
   startedAtMs: number;
   firstEventAtMs: number | null;
