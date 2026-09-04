@@ -6,7 +6,6 @@ import { createResponseSettlementServices } from "../services/openai/response-se
 import { createUpstreamRequestServices } from "../services/openai/upstream-request-services.ts";
 import { createUpstreamQuotaServices } from "../services/openai/upstream-quota-services.ts";
 import { createUpstreamErrorServices } from "../services/openai/upstream-error-services.ts";
-import type { UsdAmount } from "../../shared/usd.ts";
 
 type AuthDependencies = Parameters<typeof createAuthServices>[0];
 type SourceAccountDependencies = Parameters<
@@ -33,10 +32,6 @@ type BootstrapServerServicesDependencies =
     | "apiKeyAuthLruCache"
     | "apiKeyAuthTokenById"
     | "apiKeyPendingCharges"
-    | "billingAllowanceLruCache"
-    | "billingPendingChargesByOwnerId"
-    | "billingReservationById"
-    | "billingReservedAmountsByOwnerId"
     | "getPortalUserById"
   > &
   Pick<SourceAccountDependencies, "listAssignedOpenAIAccounts"> &
@@ -59,8 +54,6 @@ type BootstrapServerServicesDependencies =
   > & {
     DEFAULT_OPENAI_API_USER_AGENT: string;
     DEFAULT_OPENAI_API_CLIENT_VERSION: string;
-    BILLING_OVERDRAFT_LIMIT_USD: UsdAmount;
-    BILLING_INFLIGHT_RESERVE_USD: UsdAmount;
     RESPONSE_SETTLEMENT_BATCH_SIZE: number;
     RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS: number;
     RESPONSE_SETTLEMENT_ID_CACHE_SIZE: number;
@@ -84,12 +77,6 @@ export function bootstrapServerServices(
     apiKeyAuthLruCache: deps.apiKeyAuthLruCache,
     apiKeyAuthTokenById: deps.apiKeyAuthTokenById,
     apiKeyPendingCharges: deps.apiKeyPendingCharges,
-    billingAllowanceLruCache: deps.billingAllowanceLruCache,
-    billingOverdraftLimitUsd: deps.BILLING_OVERDRAFT_LIMIT_USD,
-    billingInflightReserveUsd: deps.BILLING_INFLIGHT_RESERVE_USD,
-    billingPendingChargesByOwnerId: deps.billingPendingChargesByOwnerId,
-    billingReservationById: deps.billingReservationById,
-    billingReservedAmountsByOwnerId: deps.billingReservedAmountsByOwnerId,
     getPortalUserById: deps.getPortalUserById,
   });
 
@@ -101,13 +88,6 @@ export function bootstrapServerServices(
     flushResponseSettlements: deps.flushResponseSettlements,
     applyApiKeyPendingCharge: auth.applyApiKeyPendingCharge,
     settleApiKeyPendingCharge: auth.settleApiKeyPendingCharge,
-    applyUserBillingAllowanceChargeCache:
-      auth.applyUserBillingAllowanceChargeCache,
-    settleUserBillingAllowanceChargeCache:
-      auth.settleUserBillingAllowanceChargeCache,
-    tryReserveUserBillingRequest: auth.tryReserveUserBillingRequest,
-    releaseUserBillingRequestReservation:
-      auth.releaseUserBillingRequestReservation,
     batchSize: deps.RESPONSE_SETTLEMENT_BATCH_SIZE,
     flushIntervalMs: deps.RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS,
     settledIdCacheSize: deps.RESPONSE_SETTLEMENT_ID_CACHE_SIZE,

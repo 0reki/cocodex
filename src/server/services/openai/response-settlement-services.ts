@@ -223,20 +223,6 @@ export function createResponseSettlementServices(deps: {
     accepted: boolean,
     committedUsedUsd?: string,
   ) => void;
-  applyUserBillingAllowanceChargeCache: (
-    ownerUserId: string | null,
-    amounts: { chargedFromBalance: UsdAmount },
-  ) => void;
-  settleUserBillingAllowanceChargeCache: (
-    ownerUserId: string | null,
-    amount: UsdAmount,
-    accepted: boolean,
-  ) => void;
-  tryReserveUserBillingRequest: (
-    ownerUserId: string,
-    reservationId: string,
-  ) => boolean;
-  releaseUserBillingRequestReservation: (reservationId: string) => void;
   batchSize: number;
   flushIntervalMs: number;
   settledIdCacheSize: number;
@@ -359,11 +345,6 @@ export function createResponseSettlementServices(deps: {
     if (settlement.charge > 0n && settlement.apiKeyId) {
       deps.applyApiKeyPendingCharge(settlement.apiKeyId, settlement.charge);
     }
-    if (settlement.charge > 0n && settlement.ownerUserId) {
-      deps.applyUserBillingAllowanceChargeCache(settlement.ownerUserId, {
-        chargedFromBalance: settlement.charge,
-      });
-    }
   }
 
   async function initializeResponseSettlementServices() {
@@ -456,8 +437,7 @@ export function createResponseSettlementServices(deps: {
 
   function tryReserveResponseRequest(input: {
     reservationId: string;
-    ownerUserId: string | null;
-  }): { ok: true } | { ok: false; reason: "billing" | "queue" } {
+  }): { ok: true } | { ok: false; reason: "queue" } {
     const reservationId = input.reservationId.trim();
     if (!reservationId || stopped || !initialized || walFailure) {
       return { ok: false, reason: "queue" };
@@ -472,21 +452,14 @@ export function createResponseSettlementServices(deps: {
     if (getOccupiedQueueSize() >= deps.queueMaxSize) {
       return { ok: false, reason: "queue" };
     }
-    const ownerUserId = input.ownerUserId?.trim() || null;
-    if (
-      ownerUserId &&
-      !deps.tryReserveUserBillingRequest(ownerUserId, reservationId)
-    ) {
-      return { ok: false, reason: "billing" };
-    }
     reservedIds.add(reservationId);
     return { ok: true };
   }
 
   function cancelResponseRequestReservation(reservationId: string) {
     const normalized = reservationId.trim();
-    if (!normalized || !reservedIds.delete(normalized)) return;
-    deps.releaseUserBillingRequestReservation(normalized);
+    if (!normalized) return;
+    reservedIds.delete(normalized);
   }
 
   function getResponseSettlementQueueHealth() {
@@ -576,9 +549,7 @@ export function createResponseSettlementServices(deps: {
       .then(() => {
         walFailure = null;
         walPendingIds.delete(settlementId);
-        if (reservedIds.delete(reservationId)) {
-          deps.releaseUserBillingRequestReservation(reservationId);
-        }
+        reservedIds.delete(reservationId);
         pending.set(settlementId, settlement);
         queuedIds.add(settlementId);
         applyPendingCharge(settlement);
@@ -588,9 +559,7 @@ export function createResponseSettlementServices(deps: {
       .catch((error) => {
         walFailure = asError(error);
         walPendingIds.delete(settlementId);
-        if (reservedIds.delete(reservationId)) {
-          deps.releaseUserBillingRequestReservation(reservationId);
-        }
+        reservedIds.delete(reservationId);
         throw error;
       })
       .finally(() => {
@@ -642,13 +611,6 @@ export function createResponseSettlementServices(deps: {
             item.charge,
             wasAccepted,
             result.apiKeyUsedUsd[item.apiKeyId],
-          );
-        }
-        if (item.charge > 0n && item.ownerUserId) {
-          deps.settleUserBillingAllowanceChargeCache(
-            item.ownerUserId,
-            item.charge,
-            wasAccepted,
           );
         }
         cacheSettledIds.add(item.settlementId);

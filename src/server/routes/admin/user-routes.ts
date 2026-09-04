@@ -31,7 +31,6 @@ type UserRouteDependencies = Pick<
   | "invalidateActiveSourceAccount"
   | "invalidateApiKeyAuthCacheByOwnerUserId"
   | "cacheApiKey"
-  | "primeUserBillingAllowance"
 > & {
   listPortalUsers: typeof listPortalUsers;
   createPortalUser: typeof createPortalUser;
@@ -50,7 +49,6 @@ function publicUser(
     username: string;
     role: "admin" | "user";
     enabled: boolean;
-    balance?: number;
     createdAt: string;
     updatedAt: string;
   },
@@ -61,7 +59,6 @@ function publicUser(
     username: user.username,
     role: user.role,
     enabled: user.enabled,
-    ...(typeof user.balance === "number" ? { balance: user.balance } : {}),
     ...(sourceAccountId !== undefined ? { sourceAccountId } : {}),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -278,9 +275,7 @@ export function registerUserRoutes(
         passwordHash: await hashPassword(password),
         role: "user",
         enabled: true,
-        balance: 0,
       });
-      deps.primeUserBillingAllowance(user.id, user.balance);
       res.status(201).json({ ok: true, user: publicUser(user, null) });
     } catch (error) {
       sendUserWriteError(res, error);

@@ -4,7 +4,7 @@ import {
   lockPortalUserSeats,
   MAX_PORTAL_USERS,
 } from "./portal-user-seats.ts";
-import type { PortalUserWithBalanceRecord } from "./types.ts";
+import type { PortalUserRecord } from "./types.ts";
 
 export type PortalInvitationErrorCode =
   | "invitation_invalid"
@@ -107,7 +107,7 @@ export async function registerPortalUserWithInvitation(input: {
   tokenHash: string;
   username: string;
   passwordHash: string;
-}): Promise<PortalUserWithBalanceRecord> {
+}): Promise<PortalUserRecord> {
   return withTransaction(async (client) => {
     await lockPortalUserSeats(client);
     const invitationResult = await client.query<InvitationRow>(
@@ -155,18 +155,17 @@ export async function registerPortalUserWithInvitation(input: {
       password_hash: string;
       role: string;
       enabled: boolean;
-      balance: number | string | null;
       created_at: Date;
       updated_at: Date;
     }>(
       `
         INSERT INTO portal_users (
-          username, password_hash, role, enabled, balance
+          username, password_hash, role, enabled
         )
-        VALUES ($1, $2, 'user', true, 0)
+        VALUES ($1, $2, 'user', true)
         RETURNING
           id, username, password_hash, role, enabled,
-          balance, created_at, updated_at
+          created_at, updated_at
       `,
       [input.username.trim().toLowerCase(), input.passwordHash.trim()],
     );
@@ -188,7 +187,6 @@ export async function registerPortalUserWithInvitation(input: {
       passwordHash: user.password_hash,
       role: user.role === "admin" ? "admin" : "user",
       enabled: user.enabled,
-      balance: Number(user.balance ?? "0"),
       createdAt: user.created_at.toISOString(),
       updatedAt: user.updated_at.toISOString(),
     };

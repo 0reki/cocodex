@@ -1,8 +1,7 @@
 import path from "node:path";
 
 import type { ApiKeyRecord } from "../../database/index.ts";
-import type { PortalUserSpendAllowanceValue } from "./types.ts";
-import { parseUsdAmount, type UsdAmount } from "../../shared/usd.ts";
+import type { UsdAmount } from "../../shared/usd.ts";
 
 export function createServerRuntimeState() {
   const positiveInteger = (value: string | undefined, fallback: number) => {
@@ -11,22 +10,8 @@ export function createServerRuntimeState() {
       ? Math.floor(parsed)
       : fallback;
   };
-  const positiveUsdAmount = (value: string | undefined, fallback: string) => {
-    const parsed = parseUsdAmount(value ?? fallback);
-    const fallbackAmount = parseUsdAmount(fallback);
-    if (fallbackAmount === null) throw new Error("Invalid USD fallback");
-    return parsed !== null && parsed > 0n ? parsed : fallbackAmount;
-  };
   const DEFAULT_OPENAI_API_USER_AGENT = "node/22.14.0";
   const DEFAULT_OPENAI_API_CLIENT_VERSION = "0.152.0";
-  const BILLING_OVERDRAFT_LIMIT_USD = positiveUsdAmount(
-    process.env.BILLING_OVERDRAFT_LIMIT_USD,
-    "10",
-  );
-  const BILLING_INFLIGHT_RESERVE_USD = positiveUsdAmount(
-    process.env.BILLING_INFLIGHT_RESERVE_USD,
-    "5",
-  );
   const RESPONSE_SETTLEMENT_BATCH_SIZE = positiveInteger(
     process.env.RESPONSE_SETTLEMENT_BATCH_SIZE,
     200,
@@ -69,21 +54,9 @@ export function createServerRuntimeState() {
   >();
   const apiKeyAuthTokenById = new Map<string, string>();
   const apiKeyPendingCharges = new Map<string, UsdAmount>();
-  const billingAllowanceLruCache = new Map<
-    string,
-    { value: PortalUserSpendAllowanceValue; expiresAtMs: number }
-  >();
-  const billingPendingChargesByOwnerId = new Map<string, UsdAmount>();
-  const billingReservationById = new Map<
-    string,
-    { ownerUserId: string; amount: UsdAmount }
-  >();
-  const billingReservedAmountsByOwnerId = new Map<string, UsdAmount>();
   return {
     DEFAULT_OPENAI_API_USER_AGENT,
     DEFAULT_OPENAI_API_CLIENT_VERSION,
-    BILLING_OVERDRAFT_LIMIT_USD,
-    BILLING_INFLIGHT_RESERVE_USD,
     RESPONSE_SETTLEMENT_BATCH_SIZE,
     RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS,
     RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
@@ -95,9 +68,5 @@ export function createServerRuntimeState() {
     apiKeyAuthLruCache,
     apiKeyAuthTokenById,
     apiKeyPendingCharges,
-    billingAllowanceLruCache,
-    billingPendingChargesByOwnerId,
-    billingReservationById,
-    billingReservedAmountsByOwnerId,
   };
 }

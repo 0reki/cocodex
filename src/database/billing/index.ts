@@ -1,8 +1,4 @@
 export {
-  getOrCreatePortalUserBillingProfile,
-  getPortalUserSpendAllowance,
-} from "../internal/billing-profile.ts"
-export {
   getUpstreamQuotaWindow,
   getUserUpstreamQuotaAllocation,
   listUpstreamQuotaMemberAllocations,

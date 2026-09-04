@@ -15,7 +15,6 @@ export type OpenAIRequestPreparationDependencies = Pick<
   | "isApiKeyQuotaExceeded"
   | "persistQuotaExceededLog"
   | "isApiKeyBoundToUser"
-  | "ensureUserBillingAllowanceOrNull"
   | "tryReserveResponseRequest"
 >;
 
@@ -153,200 +152,29 @@ export async function prepareOpenAIRouteRequest(args: {
   }
 
   const ownerUserId = apiKey.ownerUserId;
-  if (!billable) {
-    const reservation = deps.tryReserveResponseRequest({
-      reservationId: intentId,
-      ownerUserId: null,
+  const reservation = deps.tryReserveResponseRequest({
+    reservationId: intentId,
+  });
+  if (!reservation.ok) {
+    res.status(503).json({
+      error: {
+        message: "Request log settlement is temporarily unavailable",
+        type: "server_error",
+        code: "settlement_queue_unavailable",
+      },
     });
-    if (!reservation.ok) {
-      res.status(503).json({
-        error: {
-          message: "Request log settlement is temporarily unavailable",
-          type: "server_error",
-          code: "settlement_queue_unavailable",
-        },
-      });
-      return {
-        ok: false as const,
-        alreadyPersistedQuotaLog: false,
-        apiKeyId: apiKey.id,
-        ownerUserId,
-      };
-    }
     return {
-      ok: true as const,
+      ok: false as const,
+      alreadyPersistedQuotaLog: false,
       apiKeyId: apiKey.id,
       ownerUserId,
     };
   }
-  if (ownerUserId) {
-    const allowanceResult = await ensureBillingAllowanceOrRespond({
-      req,
-      res,
-      deps,
-      ownerUserId,
-      apiKeyId: apiKey.id,
-      intentId,
-      model,
-      startedAtMs,
-    });
-    if (!allowanceResult.ok) {
-      return {
-        ok: false as const,
-        alreadyPersistedQuotaLog: true,
-        apiKeyId: apiKey.id,
-        ownerUserId,
-      };
-    }
-
-    return {
-      ok: true as const,
-      apiKeyId: apiKey.id,
-      ownerUserId,
-    };
-  }
-
   return {
     ok: true as const,
     apiKeyId: apiKey.id,
     ownerUserId,
   };
-}
-
-export async function ensureBillingAllowanceOrRespond(args: {
-  req: Request;
-  res: Response;
-  deps: Pick<
-    OpenAIRequestPreparationDependencies,
-    | "ensureUserBillingAllowanceOrNull"
-    | "persistShortCircuitErrorLog"
-    | "tryReserveResponseRequest"
-  >;
-  ownerUserId: string | null;
-  apiKeyId: string | null;
-  intentId: string;
-  model: string | null;
-  startedAtMs: number;
-}) {
-  const {
-    req,
-    res,
-    deps,
-    ownerUserId,
-    apiKeyId,
-    intentId,
-    model,
-    startedAtMs,
-  } = args;
-
-  if (!ownerUserId) {
-    return { ok: true as const };
-  }
-
-  const allowance = await deps.ensureUserBillingAllowanceOrNull(ownerUserId);
-  if (!allowance) {
-    await persistBillingAdmissionError({
-      req,
-      res,
-      deps,
-      ownerUserId,
-      apiKeyId,
-      intentId,
-      model,
-      startedAtMs,
-      status: 429,
-      code: "insufficient_quota",
-      message: "Billing quota exceeded",
-    });
-    return { ok: false as const };
-  }
-
-  const reservation = deps.tryReserveResponseRequest({
-    reservationId: intentId,
-    ownerUserId,
-  });
-  if (!reservation.ok) {
-    const queueUnavailable = reservation.reason === "queue";
-    const status = queueUnavailable ? 503 : 429;
-    const code = queueUnavailable
-      ? "settlement_queue_unavailable"
-      : "insufficient_quota";
-    const message = queueUnavailable
-      ? "Billing settlement is temporarily unavailable"
-      : "Billing quota exceeded";
-    if (!queueUnavailable) {
-      await deps.persistShortCircuitErrorLog({
-        requestPath: req.path,
-        intentId,
-        model,
-        keyId: apiKeyId,
-        ownerUserId,
-        startedAtMs,
-        statusCode: status,
-        errorCode: code,
-        errorMessage: message,
-      });
-    }
-    res.status(status).json({
-      error: {
-        message,
-        type: queueUnavailable ? "server_error" : "insufficient_quota",
-        code,
-      },
-    });
-    return { ok: false as const };
-  }
-
-  return { ok: true as const };
-}
-
-async function persistBillingAdmissionError(args: {
-  req: Request;
-  res: Response;
-  deps: Pick<
-    OpenAIRequestPreparationDependencies,
-    "persistShortCircuitErrorLog"
-  >;
-  ownerUserId: string;
-  apiKeyId: string | null;
-  intentId: string;
-  model: string | null;
-  startedAtMs: number;
-  status: number;
-  code: string;
-  message: string;
-}) {
-  const {
-    req,
-    res,
-    deps,
-    ownerUserId,
-    apiKeyId,
-    intentId,
-    model,
-    startedAtMs,
-    status,
-    code,
-    message,
-  } = args;
-  await deps.persistShortCircuitErrorLog({
-    requestPath: req.path,
-    intentId,
-    model,
-    keyId: apiKeyId,
-    ownerUserId,
-    startedAtMs,
-    statusCode: status,
-    errorCode: code,
-    errorMessage: message,
-  });
-  res.status(status).json({
-    error: {
-      message,
-      type: "insufficient_quota",
-      code,
-    },
-  });
 }
 
 export async function getReadyAssignedSourceAccount(args: {

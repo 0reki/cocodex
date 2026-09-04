@@ -14,7 +14,6 @@ CREATE TABLE IF NOT EXISTS portal_users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
   enabled BOOLEAN NOT NULL DEFAULT true,
-  balance NUMERIC(20, 8) NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
 );

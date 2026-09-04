@@ -40,8 +40,6 @@ type PrepareResponsesWebSocketDependencies =
       | "getApiKeyAuthErrorDetail"
       | "isApiKeyQuotaExceeded"
       | "isApiKeyBoundToUser"
-      | "ensureUserBillingAllowanceOrNull"
-      | "isUserBillingAllowanceExceeded"
       | "getOpenAIApiRuntimeConfig"
       | "connectResponsesWebSocketProxyUpstream"
       | "extractErrorInfo"
@@ -160,26 +158,6 @@ export async function prepareResponsesWebSocketProxyContext(
   const ownerUserId = apiKey.ownerUserId;
 
   try {
-    if (ownerUserId) {
-      const allowance = await deps.ensureUserBillingAllowanceOrNull(ownerUserId);
-      if (
-        !allowance ||
-        deps.isUserBillingAllowanceExceeded(ownerUserId)
-      ) {
-        throw new ResponsesWebSocketUpgradeError(
-          429,
-          {
-            error: {
-              message: "Billing quota exceeded",
-              type: "insufficient_quota",
-              code: "insufficient_quota",
-            },
-          },
-          deps.isRecord,
-        );
-      }
-    }
-
     const assignedAccount = await getReadyAssignedSourceAccount({
       deps,
       ownerUserId,
@@ -722,20 +700,14 @@ export function setupResponsesWebSocketProxy(
           const reservationId = getCurrentTurnIntentId();
           const reservation = deps.tryReserveResponseRequest({
             reservationId,
-            ownerUserId: context.ownerUserId,
           });
           if (!reservation.ok) {
-            const queueUnavailable = reservation.reason === "queue";
             deps.sendWsErrorEvent(clientSocket, {
-              status: queueUnavailable ? 503 : 429,
+              status: 503,
               error: {
-                message: queueUnavailable
-                  ? "Billing settlement is temporarily unavailable"
-                  : "Billing quota exceeded",
-                type: queueUnavailable ? "server_error" : "insufficient_quota",
-                code: queueUnavailable
-                  ? "settlement_queue_unavailable"
-                  : "insufficient_quota",
+                message: "Request log settlement is temporarily unavailable",
+                type: "server_error",
+                code: "settlement_queue_unavailable",
               },
             });
             return;

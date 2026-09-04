@@ -107,8 +107,6 @@ loadBackendEnv();
 const {
   DEFAULT_OPENAI_API_USER_AGENT,
   DEFAULT_OPENAI_API_CLIENT_VERSION,
-  BILLING_OVERDRAFT_LIMIT_USD,
-  BILLING_INFLIGHT_RESERVE_USD,
   RESPONSE_SETTLEMENT_BATCH_SIZE,
   RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS,
   RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
@@ -120,10 +118,6 @@ const {
   apiKeyAuthLruCache,
   apiKeyAuthTokenById,
   apiKeyPendingCharges,
-  billingAllowanceLruCache,
-  billingPendingChargesByOwnerId,
-  billingReservationById,
-  billingReservedAmountsByOwnerId,
 } = createServerRuntimeState();
 const modelPricing = loadModelPricingFromEnv();
 
@@ -140,15 +134,12 @@ const {
   invalidateApiKeyAuthCacheByToken,
   invalidateApiKeyAuthCacheByOwnerUserId,
   isApiKeyQuotaExceeded,
-  ensureUserBillingAllowanceOrNull,
-  isUserBillingAllowanceExceeded,
   isApiKeyBoundToUser,
   getAssignedSourceAccount,
   hydrateResponseAuthState,
   hydrateSourceAccountCache,
   hydrateUpstreamQuotaCache,
   invalidateActiveSourceAccount,
-  primeUserBillingAllowance,
   extractErrorInfo,
   buildPassthroughUpstreamError,
   isAbortError,
@@ -194,8 +185,6 @@ const {
   resolveOpenAIUpstreamAccountId,
   DEFAULT_OPENAI_API_USER_AGENT,
   DEFAULT_OPENAI_API_CLIENT_VERSION,
-  BILLING_OVERDRAFT_LIMIT_USD,
-  BILLING_INFLIGHT_RESERVE_USD,
   RESPONSE_SETTLEMENT_BATCH_SIZE,
   RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS,
   RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
@@ -207,10 +196,6 @@ const {
   apiKeyAuthLruCache,
   apiKeyAuthTokenById,
   apiKeyPendingCharges,
-  billingAllowanceLruCache,
-  billingPendingChargesByOwnerId,
-  billingReservationById,
-  billingReservedAmountsByOwnerId,
 });
 
 const app = express();
@@ -376,7 +361,7 @@ app.use((req, res, next) => {
 });
 
 registerSetupRoutes(app);
-registerPortalAuthRoutes(app, { primeUserBillingAllowance });
+registerPortalAuthRoutes(app);
 
 app.use(async (req, res, next) => {
   try {
@@ -456,7 +441,6 @@ registerResponsesRoutes(app, {
   isApiKeyQuotaExceeded,
   persistQuotaExceededLog,
   isApiKeyBoundToUser,
-  ensureUserBillingAllowanceOrNull,
   tryReserveResponseRequest,
   getAssignedSourceAccount,
   getOpenAIApiRuntimeConfig,
@@ -484,7 +468,6 @@ registerImageRoutes(app, {
   isApiKeyQuotaExceeded,
   persistQuotaExceededLog,
   isApiKeyBoundToUser,
-  ensureUserBillingAllowanceOrNull,
   tryReserveResponseRequest,
   getAssignedSourceAccount,
   getOpenAIApiRuntimeConfig,
@@ -532,7 +515,6 @@ registerUserRoutes(app, {
   hydrateUpstreamQuotaCache,
   invalidateActiveSourceAccount,
   invalidateApiKeyAuthCacheByOwnerUserId,
-  primeUserBillingAllowance,
   listApiKeys,
   listPortalUsers,
   listPortalUserUpstreamAssignments,
@@ -650,8 +632,6 @@ httpServer.on("upgrade", (request, socket, head) => {
           getApiKeyAuthErrorDetail,
           isApiKeyQuotaExceeded,
           isApiKeyBoundToUser,
-          ensureUserBillingAllowanceOrNull,
-          isUserBillingAllowanceExceeded,
           getAssignedSourceAccount,
           resolveOpenAIUpstreamAccountId,
           getOpenAIApiRuntimeConfig,

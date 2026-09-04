@@ -122,19 +122,6 @@ export async function flushResponseSettlements(
         WHERE keys.id = charges.key_id
         RETURNING keys.id, keys.used
       ),
-      user_charges AS (
-        SELECT owner_user_id, SUM(charge) AS amount
-        FROM accepted
-        WHERE owner_user_id IS NOT NULL AND charge > 0
-        GROUP BY owner_user_id
-      ),
-      updated_users AS (
-        UPDATE portal_users users
-        SET balance = COALESCE(users.balance, 0) - charges.amount
-        FROM user_charges charges
-        WHERE users.id = charges.owner_user_id
-        RETURNING users.id
-      ),
       rollup_values AS (
         SELECT
           date_trunc('hour', request_time) AS hour_bucket,

@@ -2,7 +2,6 @@ import type { Express, Request, Response } from "express";
 
 import {
   ensureDatabaseSchema,
-  getPortalUserSpendAllowance,
   getPortalUserById,
   getPortalUserByUsername,
   inspectPortalInvitation,
@@ -18,7 +17,6 @@ import {
   verifyPassword,
   verifyPortalToken,
 } from "../../auth/portal-auth.ts";
-import type { ServerServices } from "../../bootstrap/services.ts";
 
 const REFRESH_TOKEN_COOKIE = "cocodex.refresh_token";
 
@@ -71,10 +69,7 @@ function publicUser(user: {
   };
 }
 
-export function registerPortalAuthRoutes(
-  app: Express,
-  deps: Pick<ServerServices, "primeUserBillingAllowance">,
-) {
+export function registerPortalAuthRoutes(app: Express) {
   app.get(
     "/api/auth/invitations/:token",
     async (req: Request, res: Response) => {
@@ -141,7 +136,6 @@ export function registerPortalAuthRoutes(
         username,
         passwordHash: await hashPassword(password),
       });
-      deps.primeUserBillingAllowance(user.id, 0);
       res.status(201).json({
         ok: true,
         user: publicUser(user),
@@ -192,9 +186,6 @@ export function registerPortalAuthRoutes(
         res.status(401).json({ ok: false, error: "Invalid credentials" });
         return;
       }
-      const allowance = await getPortalUserSpendAllowance(user.id);
-      deps.primeUserBillingAllowance(user.id, allowance.balance);
-
       res.json({
         ok: true,
         user: publicUser(user),
@@ -226,9 +217,6 @@ export function registerPortalAuthRoutes(
         res.status(401).json({ ok: false, error: "User is unavailable" });
         return;
       }
-      const allowance = await getPortalUserSpendAllowance(user.id);
-      deps.primeUserBillingAllowance(user.id, allowance.balance);
-
       res.json({
         ok: true,
         user: publicUser(user),

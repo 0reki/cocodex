@@ -26,11 +26,6 @@ export type PortalAccessTokenFailureReason =
   | "invalid_access_token"
   | "user_unavailable";
 
-type PortalUserSpendAllowanceValue = {
-  balance: UsdAmount;
-  totalAvailable: UsdAmount;
-};
-
 export function createAuthServices(deps: {
   lruGet: <K, V extends { expiresAtMs: number }>(
     cache: Map<K, V>,
@@ -42,18 +37,6 @@ export function createAuthServices(deps: {
   >;
   apiKeyAuthTokenById: Map<string, string>;
   apiKeyPendingCharges: Map<string, UsdAmount>;
-  billingAllowanceLruCache: Map<
-    string,
-    { value: PortalUserSpendAllowanceValue; expiresAtMs: number }
-  >;
-  billingOverdraftLimitUsd: UsdAmount;
-  billingInflightReserveUsd: UsdAmount;
-  billingPendingChargesByOwnerId: Map<string, UsdAmount>;
-  billingReservationById: Map<
-    string,
-    { ownerUserId: string; amount: UsdAmount }
-  >;
-  billingReservedAmountsByOwnerId: Map<string, UsdAmount>;
   getPortalUserById: (id: string) => Promise<PortalUserRecord | null>;
 }) {
   function storeApiKey(apiKey: ApiKeyRecord) {
@@ -281,38 +264,12 @@ export function createAuthServices(deps: {
     return used + pending >= quota;
   }
 
-  function ensureUserBillingAllowanceOrNull(ownerUserId: string | null) {
-    if (!ownerUserId) return null;
-    const ownerId = ownerUserId.trim();
-    if (!ownerId) return null;
-    const cached = deps.lruGet(deps.billingAllowanceLruCache, ownerId);
-    if (cached) return cached.value;
-    return null;
-  }
-
-  function primeUserBillingAllowance(ownerUserId: string, balance: unknown) {
-    const ownerId = ownerUserId.trim();
-    const amount =
-      typeof balance === "bigint" ? balance : parseUsdAmount(balance);
-    if (!ownerId || amount === null) return;
-    const effectiveBalance =
-      amount - (deps.billingPendingChargesByOwnerId.get(ownerId) ?? 0n);
-    deps.billingAllowanceLruCache.set(ownerId, {
-      value: {
-        balance: effectiveBalance,
-        totalAvailable: effectiveBalance,
-      },
-      expiresAtMs: Number.POSITIVE_INFINITY,
-    });
-  }
-
   function hydrateResponseAuthState(input: {
     apiKeys: ApiKeyRecord[];
-    users: Array<{ id: string; enabled: boolean; balance: unknown }>;
+    users: Array<{ id: string; enabled: boolean }>;
   }) {
     deps.apiKeyAuthLruCache.clear();
     deps.apiKeyAuthTokenById.clear();
-    deps.billingAllowanceLruCache.clear();
     const enabledUserIds = new Set(
       input.users.filter((user) => user.enabled).map((user) => user.id),
     );
@@ -320,139 +277,6 @@ export function createAuthServices(deps: {
       if (apiKey.ownerUserId && enabledUserIds.has(apiKey.ownerUserId)) {
         storeApiKey(apiKey);
       }
-    }
-    for (const user of input.users) {
-      primeUserBillingAllowance(user.id, user.balance);
-    }
-  }
-
-  function applyUserBillingAllowanceChargeCache(
-    ownerUserId: string | null,
-    amounts: {
-      chargedFromBalance: UsdAmount;
-    },
-  ) {
-    const ownerId = ownerUserId?.trim();
-    if (!ownerId) return;
-    const chargedFromBalance =
-      typeof amounts.chargedFromBalance === "bigint" &&
-      amounts.chargedFromBalance > 0n
-        ? amounts.chargedFromBalance
-        : 0n;
-    if (chargedFromBalance <= 0n) return;
-
-    deps.billingPendingChargesByOwnerId.set(
-      ownerId,
-      (deps.billingPendingChargesByOwnerId.get(ownerId) ?? 0n) +
-        chargedFromBalance,
-    );
-
-    const cached = deps.billingAllowanceLruCache.get(ownerId) ?? null;
-    if (!cached) return;
-
-    const nextBalance = cached.value.balance - chargedFromBalance;
-    const next: PortalUserSpendAllowanceValue = {
-      balance: nextBalance,
-      totalAvailable: nextBalance,
-    };
-    deps.billingAllowanceLruCache.set(ownerId, {
-      value: next,
-      expiresAtMs: Number.POSITIVE_INFINITY,
-    });
-  }
-
-  function settleUserBillingAllowanceChargeCache(
-    ownerUserId: string | null,
-    amount: UsdAmount,
-    accepted: boolean,
-  ) {
-    const ownerId = ownerUserId?.trim();
-    if (!ownerId || amount <= 0n) return;
-
-    const pending =
-      (deps.billingPendingChargesByOwnerId.get(ownerId) ?? 0n) - amount;
-    if (pending > 0n) {
-      deps.billingPendingChargesByOwnerId.set(ownerId, pending);
-    } else {
-      deps.billingPendingChargesByOwnerId.delete(ownerId);
-    }
-    if (accepted) return;
-
-    const cached = deps.billingAllowanceLruCache.get(ownerId) ?? null;
-    if (!cached) return;
-    const balance = cached.value.balance + amount;
-    deps.billingAllowanceLruCache.set(ownerId, {
-      value: { balance, totalAvailable: balance },
-      expiresAtMs: Number.POSITIVE_INFINITY,
-    });
-  }
-
-  function isUserBillingAllowanceExceeded(ownerUserId: string | null) {
-    const ownerId = ownerUserId?.trim();
-    if (!ownerId) return true;
-    const cached = deps.billingAllowanceLruCache.get(ownerId) ?? null;
-    if (!cached) return true;
-    const reserved =
-      deps.billingReservedAmountsByOwnerId.get(ownerId) ?? 0n;
-    return (
-      cached.value.totalAvailable - reserved <=
-      -deps.billingOverdraftLimitUsd
-    );
-  }
-
-  function tryReserveUserBillingRequest(
-    ownerUserId: string,
-    reservationId: string,
-  ) {
-    const ownerId = ownerUserId.trim();
-    const normalizedReservationId = reservationId.trim();
-    if (!ownerId || !normalizedReservationId) return false;
-
-    const existing = deps.billingReservationById.get(normalizedReservationId);
-    if (existing) return existing.ownerUserId === ownerId;
-
-    const cached = deps.billingAllowanceLruCache.get(ownerId) ?? null;
-    if (!cached) return false;
-    const currentlyReserved =
-      deps.billingReservedAmountsByOwnerId.get(ownerId) ?? 0n;
-    const amount = deps.billingInflightReserveUsd;
-    if (
-      cached.value.totalAvailable - currentlyReserved - amount <
-      -deps.billingOverdraftLimitUsd
-    ) {
-      return false;
-    }
-
-    deps.billingReservationById.set(normalizedReservationId, {
-      ownerUserId: ownerId,
-      amount,
-    });
-    deps.billingReservedAmountsByOwnerId.set(
-      ownerId,
-      currentlyReserved + amount,
-    );
-    return true;
-  }
-
-  function releaseUserBillingRequestReservation(reservationId: string) {
-    const normalizedReservationId = reservationId.trim();
-    if (!normalizedReservationId) return;
-    const reservation = deps.billingReservationById.get(
-      normalizedReservationId,
-    );
-    if (!reservation) return;
-    deps.billingReservationById.delete(normalizedReservationId);
-
-    const remaining =
-      (deps.billingReservedAmountsByOwnerId.get(reservation.ownerUserId) ??
-        0n) - reservation.amount;
-    if (remaining > 0n) {
-      deps.billingReservedAmountsByOwnerId.set(
-        reservation.ownerUserId,
-        remaining,
-      );
-    } else {
-      deps.billingReservedAmountsByOwnerId.delete(reservation.ownerUserId);
     }
   }
 
@@ -506,13 +330,6 @@ export function createAuthServices(deps: {
     invalidateApiKeyAuthCacheByToken,
     invalidateApiKeyAuthCacheByOwnerUserId,
     isApiKeyQuotaExceeded,
-    ensureUserBillingAllowanceOrNull,
-    primeUserBillingAllowance,
-    isUserBillingAllowanceExceeded,
-    tryReserveUserBillingRequest,
-    releaseUserBillingRequestReservation,
-    applyUserBillingAllowanceChargeCache,
-    settleUserBillingAllowanceChargeCache,
     isApiKeyBoundToUser,
     applyApiKeyPendingCharge,
     settleApiKeyPendingCharge,

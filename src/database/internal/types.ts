@@ -40,22 +40,6 @@ export type PortalUserRecord = {
   updatedAt: string
 }
 
-export type PortalUserWithBalanceRecord = PortalUserRecord & {
-  balance: number
-}
-
-export type PortalUserBillingProfileRecord = {
-  userId: string
-  balanceUsd: string
-  createdAt: string
-  updatedAt: string
-}
-
-export type PortalUserSpendAllowance = {
-  balance: bigint
-  totalAvailable: bigint
-}
-
 export type DatabaseSelfCheckIssue = {
   id: string
   level: "warning" | "error"
