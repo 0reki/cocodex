@@ -365,9 +365,11 @@ export function setupResponsesWebSocketProxy(
     const { tokensInfo, totalTokens } = deps.extractResponseUsage({
       response: payload,
     });
+    const billedModelId = pricingModelId ?? modelId;
     const cost = deps.applyServiceTierBillingMultiplier(
-      deps.estimateUsageCost(pricingModelId ?? modelId, tokensInfo),
+      deps.estimateUsageCost(billedModelId, tokensInfo),
       serviceTier,
+      billedModelId,
     );
     const settlementId = responseId || reservationId;
     if (!deps.shouldPersistModelResponseLog("/v1/responses")) {

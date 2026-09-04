@@ -393,10 +393,12 @@ export function finalizeOpenAIRouteAccounting(args: {
     ? { response: usageResponsePayload }
     : lastErrorPayload;
   const usage = deps.extractResponseUsage(usageSource);
+  const billedModelId = pricingModelId ?? model;
   const cost = billable
     ? deps.applyServiceTierBillingMultiplier(
-        deps.estimateUsageCost(pricingModelId ?? model, usage.tokensInfo),
+        deps.estimateUsageCost(billedModelId, usage.tokensInfo),
         serviceTier,
+        billedModelId,
       )
     : null;
   const shouldCharge =

@@ -310,24 +310,50 @@ export function createModelServices(deps: {
         ]) ?? 0,
       ),
     );
-    const cachedInputTokens = Math.max(
-      0,
-      Math.trunc(
-        getNestedNumberFromRecord(tokensInfo, [
-          "cached_input_tokens",
-          "cachedInputTokens",
-          "input_tokens_details.cached_tokens",
-        ]) ??
-          getNestedNumberFromRecord(
-            isRecord(tokensInfo.input_tokens_details)
-              ? (tokensInfo.input_tokens_details as Record<string, unknown>)
-              : null,
-            ["cached_tokens"],
-          ) ??
-          0,
+    const cachedInputTokens = Math.min(
+      inputTokens,
+      Math.max(
+        0,
+        Math.trunc(
+          getNestedNumberFromRecord(tokensInfo, [
+            "cached_input_tokens",
+            "cachedInputTokens",
+            "input_tokens_details.cached_tokens",
+          ]) ??
+            getNestedNumberFromRecord(
+              isRecord(tokensInfo.input_tokens_details)
+                ? (tokensInfo.input_tokens_details as Record<string, unknown>)
+                : null,
+              ["cached_tokens"],
+            ) ??
+            0,
+        ),
       ),
     );
-    const billableInputTokens = Math.max(0, inputTokens - cachedInputTokens);
+    const cacheWriteInputTokens = Math.min(
+      inputTokens - cachedInputTokens,
+      Math.max(
+        0,
+        Math.trunc(
+          getNestedNumberFromRecord(tokensInfo, [
+            "cache_write_input_tokens",
+            "cacheWriteInputTokens",
+            "input_tokens_details.cache_write_tokens",
+          ]) ??
+            getNestedNumberFromRecord(
+              isRecord(tokensInfo.input_tokens_details)
+                ? (tokensInfo.input_tokens_details as Record<string, unknown>)
+                : null,
+              ["cache_write_tokens"],
+            ) ??
+            0,
+        ),
+      ),
+    );
+    const billableInputTokens = Math.max(
+      0,
+      inputTokens - cachedInputTokens - cacheWriteInputTokens,
+    );
     const outputTokens = Math.max(
       0,
       Math.trunc(
@@ -337,7 +363,8 @@ export function createModelServices(deps: {
         ]) ?? 0,
       ),
     );
-    const totalInputTokens = billableInputTokens + cachedInputTokens;
+    const totalInputTokens = inputTokens;
+    const pricedInputTokens = billableInputTokens + cachedInputTokens;
 
     let totalPriceWeightedTokens = 0n;
     let hasCost = false;
@@ -382,14 +409,21 @@ export function createModelServices(deps: {
       totalInputTokens,
       deps.priceAfter272kInputThresholdTokens,
     );
-    const regularBillableInputTokens =
+    const regularPricedInputTokens =
       totalInputTokens > 0
         ? Math.floor(
-            (billableInputTokens * regularInputTokens) / totalInputTokens,
+            (pricedInputTokens * regularInputTokens) / totalInputTokens,
+          )
+        : 0;
+    const regularBillableInputTokens =
+      pricedInputTokens > 0
+        ? Math.floor(
+            (billableInputTokens * regularPricedInputTokens) /
+              pricedInputTokens,
           )
         : 0;
     const regularCachedInputTokens =
-      regularInputTokens - regularBillableInputTokens;
+      regularPricedInputTokens - regularBillableInputTokens;
     const overflowBillableInputTokens = Math.max(
       0,
       billableInputTokens - regularBillableInputTokens,
