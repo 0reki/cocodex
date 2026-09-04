@@ -236,7 +236,7 @@ async function inspectSessionFiles(files) {
   return { providers, fields };
 }
 
-async function openDatabase(file, options) {
+async function openDatabase(file, options = {}) {
   let sqlite;
   try {
     sqlite = await import("node:sqlite");
