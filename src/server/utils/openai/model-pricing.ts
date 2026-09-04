@@ -4,6 +4,12 @@ export type ModelPricingRecord = Record<string, unknown> & {
 
 export const DEFAULT_MODEL_PRICING_USD: ModelPricingRecord[] = [
   {
+    slug: "gpt-6-astra",
+    input_price_per_million: "10",
+    cached_input_price_per_million: "1",
+    output_price_per_million: "50",
+  },
+  {
     slug: "gpt-5.6-sol",
     input_price_per_million: "4",
     cached_input_price_per_million: "0.4",

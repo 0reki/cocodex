@@ -193,6 +193,7 @@ SSE 在下游写缓冲区满时暂停读取上游；WebSocket 在目标连接出
 
 | 计费项 | Input | Cached input | Output |
 | --- | ---: | ---: | ---: |
+| GPT-6 Astra | $10 | $1 | $50 |
 | GPT-5.6 Sol | $4 | $0.4 | $20 |
 | Daybreak Blue | $4 | $0.4 | $20 |
 | Daybreak Red | $12.5 | $1.25 | $75 |
