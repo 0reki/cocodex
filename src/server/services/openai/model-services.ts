@@ -81,7 +81,6 @@ function extractImageTokenUsage(
 }
 
 export function createModelServices(deps: {
-  priceAfter272kInputThresholdTokens: number;
   modelPricing: Array<Record<string, unknown>>;
 }) {
   function buildOpenAIModelsList(sourceModels: Array<Record<string, unknown>>) {
@@ -286,20 +285,6 @@ export function createModelServices(deps: {
     const inputRate = readPrice(model.input_price_per_million);
     const cachedInputRate = readPrice(model.cached_input_price_per_million);
     const outputRate = readPrice(model.output_price_per_million);
-    const inputRateAfter400k = readPrice(
-      model.input_price_per_million_after_400k_tokens,
-    );
-    const cachedInputRateAfter400k = readPrice(
-      model.cached_input_price_per_million_after_400k_tokens,
-    );
-    const outputRateAfter400k = readPrice(
-      model.output_price_per_million_after_400k_tokens,
-    );
-    const doublesAfter400k = model.double_price_after_400k_tokens === true;
-    const hasExplicitAfter400kPricing =
-      inputRateAfter400k !== null ||
-      cachedInputRateAfter400k !== null ||
-      outputRateAfter400k !== null;
 
     const inputTokens = Math.max(
       0,
@@ -363,9 +348,6 @@ export function createModelServices(deps: {
         ]) ?? 0,
       ),
     );
-    const totalInputTokens = inputTokens;
-    const pricedInputTokens = billableInputTokens + cachedInputTokens;
-
     let totalPriceWeightedTokens = 0n;
     let hasCost = false;
     const addCost = (tokens: number, rate: UsdAmount | null) => {
@@ -374,75 +356,9 @@ export function createModelServices(deps: {
       hasCost = true;
     };
     const resolvedCachedInputRate = cachedInputRate ?? inputRate;
-    if (!hasExplicitAfter400kPricing && !doublesAfter400k) {
-      addCost(billableInputTokens, inputRate);
-      addCost(cachedInputTokens, resolvedCachedInputRate);
-      addCost(outputTokens, outputRate);
-      return hasCost
-        ? divideUsdAmount(totalPriceWeightedTokens, 1_000_000n)
-        : null;
-    }
-
-    const overflowInputRate =
-      inputRateAfter400k ??
-      (hasExplicitAfter400kPricing
-        ? inputRate
-        : inputRate !== null && doublesAfter400k
-          ? inputRate * 2n
-          : inputRate);
-    const overflowCachedInputRate =
-      cachedInputRateAfter400k ??
-      (hasExplicitAfter400kPricing
-        ? resolvedCachedInputRate
-        : resolvedCachedInputRate !== null && doublesAfter400k
-          ? resolvedCachedInputRate * 2n
-          : resolvedCachedInputRate);
-    const overflowOutputRate =
-      outputRateAfter400k ??
-      (hasExplicitAfter400kPricing
-        ? outputRate
-        : outputRate !== null && doublesAfter400k
-          ? outputRate * 2n
-          : outputRate);
-
-    const regularInputTokens = Math.min(
-      totalInputTokens,
-      deps.priceAfter272kInputThresholdTokens,
-    );
-    const regularPricedInputTokens =
-      totalInputTokens > 0
-        ? Math.floor(
-            (pricedInputTokens * regularInputTokens) / totalInputTokens,
-          )
-        : 0;
-    const regularBillableInputTokens =
-      pricedInputTokens > 0
-        ? Math.floor(
-            (billableInputTokens * regularPricedInputTokens) /
-              pricedInputTokens,
-          )
-        : 0;
-    const regularCachedInputTokens =
-      regularPricedInputTokens - regularBillableInputTokens;
-    const overflowBillableInputTokens = Math.max(
-      0,
-      billableInputTokens - regularBillableInputTokens,
-    );
-    const overflowCachedInputTokens = Math.max(
-      0,
-      cachedInputTokens - regularCachedInputTokens,
-    );
-    const inputThresholdExceeded =
-      totalInputTokens > deps.priceAfter272kInputThresholdTokens;
-    const regularOutputTokens = inputThresholdExceeded ? 0 : outputTokens;
-    const overflowOutputTokens = inputThresholdExceeded ? outputTokens : 0;
-
-    addCost(regularBillableInputTokens, inputRate);
-    addCost(regularCachedInputTokens, resolvedCachedInputRate);
-    addCost(regularOutputTokens, outputRate);
-    addCost(overflowBillableInputTokens, overflowInputRate);
-    addCost(overflowCachedInputTokens, overflowCachedInputRate);
-    addCost(overflowOutputTokens, overflowOutputRate);
+    addCost(billableInputTokens, inputRate);
+    addCost(cachedInputTokens, resolvedCachedInputRate);
+    addCost(outputTokens, outputRate);
     return hasCost
       ? divideUsdAmount(totalPriceWeightedTokens, 1_000_000n)
       : null;

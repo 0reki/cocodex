@@ -61,7 +61,6 @@ type BootstrapServerServicesDependencies =
     DEFAULT_OPENAI_API_CLIENT_VERSION: string;
     BILLING_OVERDRAFT_LIMIT_USD: UsdAmount;
     BILLING_INFLIGHT_RESERVE_USD: UsdAmount;
-    PRICE_AFTER_272K_INPUT_THRESHOLD_TOKENS: number;
     RESPONSE_SETTLEMENT_BATCH_SIZE: number;
     RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS: number;
     RESPONSE_SETTLEMENT_ID_CACHE_SIZE: number;
@@ -125,7 +124,6 @@ export function bootstrapServerServices(
   });
 
   const model = createModelServices({
-    priceAfter272kInputThresholdTokens: deps.PRICE_AFTER_272K_INPUT_THRESHOLD_TOKENS,
     modelPricing: deps.modelPricing,
   });
 
