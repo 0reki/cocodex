@@ -50,6 +50,18 @@ export type PostCodexResponsesOptions = {
   signal?: AbortSignal;
 };
 
+export type PostCodexSearchOptions = {
+  accessToken: string;
+  accountId?: string;
+  version: string;
+  sessionId: string;
+  requestHeaders?: HeadersInit;
+  payload: Record<string, unknown>;
+  userAgent?: string;
+  originator?: string;
+  signal?: AbortSignal;
+};
+
 export type CodexImageOperation = "generations" | "edits";
 
 export type PostCodexImageOptions = {

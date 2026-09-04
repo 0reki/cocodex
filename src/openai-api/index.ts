@@ -5,6 +5,7 @@ export {
   requestCodexDeviceCode,
 } from "./internal/device-auth.ts"
 export { postCodexImage } from "./internal/images.ts"
+export { postCodexSearch } from "./internal/search.ts"
 export {
   getCodexDailyWorkspaceUsage,
   getCodexUsage,
@@ -25,6 +26,7 @@ export type {
   GetCodexModelsOptions,
   GetCodexUsageOptions,
   PostCodexImageOptions,
+  PostCodexSearchOptions,
   PostCodexResponsesOptions,
   RefreshCodexTokensOptions,
 } from "./internal/runtime-types.ts"

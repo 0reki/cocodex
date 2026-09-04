@@ -8,6 +8,8 @@ export const CHATGPT_CODEX_DAILY_USAGE_URL =
   "https://chatgpt.com/backend-api/wham/analytics/daily-workspace-usage-counts";
 export const CHATGPT_CODEX_RESPONSES_URL =
   "https://chatgpt.com/backend-api/codex/responses";
+export const CHATGPT_CODEX_SEARCH_URL =
+  "https://chatgpt.com/backend-api/codex/alpha/search";
 export const CHATGPT_CODEX_RESPONSES_WS_URL =
   "wss://chatgpt.com/backend-api/codex/responses";
 export const CHATGPT_CODEX_IMAGE_GENERATIONS_URL =

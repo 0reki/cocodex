@@ -93,11 +93,12 @@ export function registerPublicOpenAIRoutes(
         account: assignedAccount.sourceAccount,
         runtimeConfig,
       });
+      const models = Array.isArray(upstream.models) ? upstream.models : [];
       res.json({
+        ...upstream,
+        models,
         object: "list",
-        data: deps.buildOpenAIModelsList(
-          Array.isArray(upstream.models) ? upstream.models : [],
-        ),
+        data: deps.buildOpenAIModelsList(models),
       });
     } catch (error) {
       const errorInfo = deps.extractErrorInfo(error);

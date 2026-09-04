@@ -67,6 +67,16 @@ type OpenAIApiModule = {
     userAgent?: string;
     signal?: AbortSignal;
   }) => Promise<Response>;
+  postCodexSearch?: (args: {
+    accessToken: string;
+    accountId?: string;
+    version: string;
+    sessionId: string;
+    requestHeaders?: HeadersInit;
+    payload: Record<string, unknown>;
+    userAgent?: string;
+    signal?: AbortSignal;
+  }) => Promise<Response>;
   connectCodexResponsesWebSocket?: (args: {
     accessToken: string;
     accountId?: string;
@@ -485,6 +495,46 @@ export function createUpstreamRequestServices(deps: {
     return callUpstream(refreshedToken);
   }
 
+  async function postCodexSearchWithTokenRefresh(params: {
+    module: OpenAIApiModule;
+    account: UpstreamSourceAccountRecord;
+    payload: Record<string, unknown>;
+    requestHeaders?: HeadersInit;
+    runtimeConfig: RuntimeConfig;
+    signal?: AbortSignal;
+  }): Promise<Response> {
+    const { module, account, payload, requestHeaders, runtimeConfig, signal } =
+      params;
+    if (typeof module.postCodexSearch !== "function") {
+      throw new Error(
+        "postCodexSearch is not exported from the internal OpenAI module",
+      );
+    }
+    const { accessToken, accountId } = requireActiveAccount(account);
+    const sessionId = deps.randomUUID();
+    const callUpstream = (token: string) =>
+      module.postCodexSearch!({
+        accessToken: token,
+        accountId,
+        version: runtimeConfig.clientVersion,
+        sessionId,
+        requestHeaders,
+        payload,
+        userAgent: runtimeConfig.userAgent,
+        signal,
+      });
+
+    const response = await callUpstream(accessToken);
+    if (!(await shouldRefreshResponse(response))) return response;
+    const refreshedToken = await refreshAccessToken({
+      module,
+      account,
+      runtimeConfig,
+      failedAccessToken: accessToken,
+    });
+    return callUpstream(refreshedToken);
+  }
+
   async function connectCodexResponsesWebSocketWithTokenRefresh(params: {
     module: OpenAIApiModule;
     account: UpstreamSourceAccountRecord;
@@ -565,6 +615,7 @@ export function createUpstreamRequestServices(deps: {
     getCodexUsageWithTokenRefresh,
     flushUpstreamTokenPersistence,
     postCodexImageWithTokenRefresh,
+    postCodexSearchWithTokenRefresh,
     postCodexResponsesWithTokenRefresh,
     connectResponsesWebSocketProxyUpstream,
   };
