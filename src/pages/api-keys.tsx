@@ -273,7 +273,7 @@ name = "OpenAI"
 base_url = "${baseUrl}/v1"
 wire_api = "responses"
 requires_openai_auth = true
-supports_websockets = false`;
+supports_websockets = true`;
   const codexAuth = `{
   "OPENAI_API_KEY": "<YOUR_API_KEY>"
 }`;
