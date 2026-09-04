@@ -217,6 +217,19 @@ Token 分类结算。`GET /v1/models` 实时读取 Codex 上游的
 `/backend-api/codex/models`，不依赖本地模型配置，也不维护模型刷新任务。
 服务不限制用户 RPM 或并发数。
 
+## Codex 历史会话 Provider 迁移
+
+关闭所有 Codex CLI、桌面端和 IDE 插件后，使用 Node.js 22.5 或更高版本运行：
+
+```bash
+node scripts/migrate-codex-session-provider.mjs
+```
+
+脚本会交互式选择将历史会话迁移到 `OpenAI`，或还原为内置的 `openai`。每次修改前
+都会备份会话 JSONL 和 Codex 状态数据库，并同时更新两类数据，避免历史列表与恢复
+会话使用不同的 Provider。也可以使用 `--status`、`--to-openai`、`--restore` 和
+`--codex-home PATH` 参数。
+
 Responses terminal event 会先写入并同步本地 WAL，再下发客户端和异步批量提交
 PostgreSQL。WAL 默认与 `COCODEX_CONFIG_PATH` 位于同一目录，也可通过
 `RESPONSE_SETTLEMENT_WAL_PATH` 覆盖；Docker 示例将其放在持久化的 `/data` 卷中。
