@@ -20,13 +20,13 @@ import type {
   applyServiceTierBillingMultiplier,
   normalizeWsCloseCode,
   normalizeWsCloseReason,
-  resolvePriorityServiceTierForBilling,
+  resolveFastServiceTierForBilling,
   wsRawDataToText,
 } from "../../utils/index.ts";
 import { getForwardRequestHeaders } from "../../utils/index.ts";
 
-type PriorityServiceTier = ReturnType<
-  typeof resolvePriorityServiceTierForBilling
+type FastServiceTier = ReturnType<
+  typeof resolveFastServiceTierForBilling
 >;
 
 type PrepareResponsesWebSocketDependencies =
@@ -44,7 +44,7 @@ type PrepareResponsesWebSocketDependencies =
       | "extractErrorInfo"
       | "buildPassthroughUpstreamError"
     > & {
-      resolvePriorityServiceTierForBilling: typeof resolvePriorityServiceTierForBilling;
+      resolveFastServiceTierForBilling: typeof resolveFastServiceTierForBilling;
       isRecord: typeof isRecord;
     };
 
@@ -63,7 +63,7 @@ type ResponsesWebSocketProxyDependencies = Pick<
   applyServiceTierBillingMultiplier: typeof applyServiceTierBillingMultiplier;
   normalizeWsCloseCode: typeof normalizeWsCloseCode;
   normalizeWsCloseReason: typeof normalizeWsCloseReason;
-  resolvePriorityServiceTierForBilling: typeof resolvePriorityServiceTierForBilling;
+  resolveFastServiceTierForBilling: typeof resolveFastServiceTierForBilling;
   sendWsErrorEvent: typeof sendWsErrorEvent;
   wsRawDataToText: typeof wsRawDataToText;
   parseJsonRecordText: typeof parseJsonRecordText;
@@ -75,7 +75,7 @@ type ResponsesWebSocketProxyDependencies = Pick<
 type ResponsesWebSocketProxyContext = {
   apiKeyId: string;
   ownerUserId: string | null;
-  serviceTier: PriorityServiceTier;
+  serviceTier: FastServiceTier;
   startedAtMs: number;
   upstreamSocket: WsSocket;
   upstreamResponseHeaders: Record<string, string>;
@@ -106,7 +106,7 @@ export async function prepareResponsesWebSocketProxyContext(
 ): Promise<ResponsesWebSocketProxyContext> {
   const startedAtMs = Date.now();
   const requestUrl = new URL(request.url ?? "/v1/responses", "http://localhost");
-  const requestedServiceTier = deps.resolvePriorityServiceTierForBilling(
+  const requestedServiceTier = deps.resolveFastServiceTierForBilling(
     requestUrl.searchParams.get("service_tier"),
   );
   const { apiKey, reason: apiKeyAuthFailureReason } =
@@ -276,10 +276,10 @@ export function setupResponsesWebSocketProxy(
   let turnSeq = 0;
   const pendingTurns: Array<{
     intentId: string;
-    serviceTier: PriorityServiceTier;
+    serviceTier: FastServiceTier;
     pricingModelId: string | null;
   }> = [];
-  const responseServiceTierById = new Map<string, PriorityServiceTier>();
+  const responseServiceTierById = new Map<string, FastServiceTier>();
   const responsePricingModelIdById = new Map<string, string | null>();
   const responseReservationIdById = new Map<string, string>();
   const activeReservationIds = new Set<string>();
@@ -354,7 +354,7 @@ export function setupResponsesWebSocketProxy(
     payload: Record<string, unknown>,
     modelId: string | null,
     pricingModelId: string | null,
-    serviceTier: PriorityServiceTier,
+    serviceTier: FastServiceTier,
     responseId: string,
     reservationId: string,
     terminalStatus: ResponseTerminalStatus,
@@ -489,7 +489,7 @@ export function setupResponsesWebSocketProxy(
       if (responseId) {
         const pendingTurn = pendingTurns.shift();
         const responseTier =
-          deps.resolvePriorityServiceTierForBilling(response.service_tier) ??
+          deps.resolveFastServiceTierForBilling(response.service_tier) ??
           pendingTurn?.serviceTier ??
           context.serviceTier;
         responseServiceTierById.set(responseId, responseTier);
@@ -563,7 +563,7 @@ export function setupResponsesWebSocketProxy(
       responseId && responseReservationIdById.has(responseId)
         ? null
         : pendingTurns.shift();
-    let billedServiceTier = deps.resolvePriorityServiceTierForBilling(
+    let billedServiceTier = deps.resolveFastServiceTierForBilling(
       terminalPayload.service_tier,
     );
     if (billedServiceTier === null && responseId) {
@@ -739,7 +739,7 @@ export function setupResponsesWebSocketProxy(
           pendingTurns.push({
             intentId: reservationId,
             serviceTier:
-              deps.resolvePriorityServiceTierForBilling(
+              deps.resolveFastServiceTierForBilling(
                 parsed.service_tier,
               ) ?? context.serviceTier,
             pricingModelId: deps.resolveUsagePricingModelId(

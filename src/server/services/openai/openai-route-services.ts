@@ -3,7 +3,7 @@ import type { ServerServices } from "../../bootstrap/services.ts";
 import type {
   applyServiceTierBillingMultiplier,
   resolveOpenAIUpstreamAccountId,
-  resolvePriorityServiceTierForBilling,
+  resolveFastServiceTierForBilling,
 } from "../../utils/index.ts";
 
 export type OpenAIRequestPreparationDependencies = Pick<
@@ -59,11 +59,11 @@ export type OpenAIResponsesRouteDependencies =
       | "shouldPersistModelResponseLog"
       | "resolveUsagePricingModelId"
     > & {
-      resolvePriorityServiceTierForBilling: typeof resolvePriorityServiceTierForBilling;
+      resolveFastServiceTierForBilling: typeof resolveFastServiceTierForBilling;
     };
 
-type PriorityServiceTier = ReturnType<
-  typeof resolvePriorityServiceTierForBilling
+type FastServiceTier = ReturnType<
+  typeof resolveFastServiceTierForBilling
 >;
 type ResponseUsage = ReturnType<ServerServices["extractResponseUsage"]>;
 
@@ -375,7 +375,7 @@ export function finalizeOpenAIRouteAccounting(args: {
   pricingModelId?: string | null;
   usageResponsePayload: Record<string, unknown> | null;
   lastErrorPayload: Record<string, unknown> | null;
-  serviceTier: PriorityServiceTier;
+  serviceTier: FastServiceTier;
   billable?: boolean;
 }) {
   const {
@@ -423,7 +423,7 @@ export async function persistOpenAIResponseLog(args: {
   apiKeyId: string | null;
   ownerUserId: string | null;
   charge: bigint;
-  serviceTier: PriorityServiceTier;
+  serviceTier: FastServiceTier;
   statusCode: number | null;
   startedAtMs: number;
   firstEventAtMs: number | null;

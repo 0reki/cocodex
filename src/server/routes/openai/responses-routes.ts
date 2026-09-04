@@ -28,7 +28,7 @@ export function registerResponsesRoutes(
       typeof requestBody.model === "string" && requestBody.model.trim()
         ? requestBody.model.trim()
         : null;
-    const serviceTier = deps.resolvePriorityServiceTierForBilling(
+    const serviceTier = deps.resolveFastServiceTierForBilling(
       requestBody.service_tier,
     );
     const pricingModelId = deps.resolveUsagePricingModelId(model, requestBody);

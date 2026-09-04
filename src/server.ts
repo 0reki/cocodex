@@ -68,7 +68,7 @@ import {
   applyServiceTierBillingMultiplier,
   generateApiKeyValue,
   loadBackendEnv,
-  resolvePriorityServiceTierForBilling,
+  resolveFastServiceTierForBilling,
   resolveOpenAIUpstreamAccountId,
 } from "./server/utils/index.ts";
 import {
@@ -451,7 +451,7 @@ registerPublicOpenAIRoutes(app, {
 
 registerResponsesRoutes(app, {
   createRequestAbortContext,
-  resolvePriorityServiceTierForBilling,
+  resolveFastServiceTierForBilling,
   authenticateApiKeyWithReason,
   getApiKeyAuthErrorDetail,
   persistShortCircuitErrorLog,
@@ -647,7 +647,7 @@ httpServer.on("upgrade", (request, socket, head) => {
       context = await prepareResponsesWebSocketProxyContext(
         {
           isRecord,
-          resolvePriorityServiceTierForBilling,
+          resolveFastServiceTierForBilling,
           authenticateApiKeyByAuthorizationHeaderWithReason,
           getApiKeyAuthErrorDetail,
           isApiKeyQuotaExceeded,
@@ -714,7 +714,7 @@ httpServer.on("upgrade", (request, socket, head) => {
             resolveUsagePricingModelId,
             normalizeWsCloseCode,
             normalizeWsCloseReason,
-            resolvePriorityServiceTierForBilling,
+            resolveFastServiceTierForBilling,
             sendWsErrorEvent,
             wsRawDataToText,
             parseJsonRecordText,

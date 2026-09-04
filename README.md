@@ -206,9 +206,9 @@ SSE 在下游写缓冲区满时暂停读取上游；WebSocket 在目标连接出
 | GPT-Image-2 image tokens | $8 | $2 | $30 |
 | GPT-Image-2 text tokens | $5 | $1.25 | $10 |
 
-缓存写入 Token 不计费。`service_tier: "priority"` 启用 fast 模式时，GPT-6 Astra、
-GPT-5.6 系列和 GPT-5.5 的额度消耗按标准模式的 2.5 倍结算，GPT-5.4 按 2 倍结算；
-其他模型不应用 fast 计费倍率。
+缓存写入 Token 不计费。`service_tier: "fast"` 启用 fast 模式；兼容
+`service_tier: "priority"`。GPT-6 Astra、GPT-5.6 系列和 GPT-5.5 的额度消耗按
+标准模式的 2.5 倍结算，GPT-5.4 按 2 倍结算；其他模型不应用 fast 计费倍率。
 
 `OPENAI_MODEL_PRICING_JSON` 可按 `slug` 覆盖或补充内置美元价格。Daybreak 价格按
 请求中的 `access_programs.cyber` 选择；GPT-Image-2 按 usage 中的 text/image

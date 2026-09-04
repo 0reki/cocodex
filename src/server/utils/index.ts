@@ -5,10 +5,12 @@ export {
   persistSetupConfig,
 } from "./runtime/env-utils.ts";
 export {
+  FAST_SERVICE_TIER,
   PRIORITY_SERVICE_TIER,
   applyServiceTierBillingMultiplier,
-  resolvePriorityServiceTierForBilling,
+  resolveFastServiceTierForBilling,
 } from "./openai/service-tier.ts";
+export type { FastServiceTier } from "./openai/service-tier.ts";
 export {
   DEFAULT_MODEL_PRICING_USD,
   loadModelPricingFromEnv,

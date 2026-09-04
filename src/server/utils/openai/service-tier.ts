@@ -1,8 +1,12 @@
 import { divideUsdAmount } from "../../../shared/usd.ts";
 
+export const FAST_SERVICE_TIER = "fast" as const;
 export const PRIORITY_SERVICE_TIER = "priority" as const;
+export type FastServiceTier =
+  | typeof FAST_SERVICE_TIER
+  | typeof PRIORITY_SERVICE_TIER;
 
-function getPriorityBillingRatio(modelId: string | null | undefined) {
+function getFastBillingRatio(modelId: string | null | undefined) {
   const normalizedModelId = modelId
     ?.trim()
     .toLowerCase()
@@ -23,20 +27,27 @@ function getPriorityBillingRatio(modelId: string | null | undefined) {
 
 export function applyServiceTierBillingMultiplier(
   cost: bigint | null,
-  serviceTier: typeof PRIORITY_SERVICE_TIER | null | undefined,
+  serviceTier: FastServiceTier | null | undefined,
   modelId: string | null,
 ): bigint | null {
   if (cost === null) return null;
-  if (serviceTier !== PRIORITY_SERVICE_TIER) return cost;
-  const ratio = getPriorityBillingRatio(modelId);
+  if (
+    serviceTier !== FAST_SERVICE_TIER &&
+    serviceTier !== PRIORITY_SERVICE_TIER
+  ) {
+    return cost;
+  }
+  const ratio = getFastBillingRatio(modelId);
   return divideUsdAmount(cost * ratio.numerator, ratio.denominator);
 }
 
-export function resolvePriorityServiceTierForBilling(
+export function resolveFastServiceTierForBilling(
   value: unknown,
-): typeof PRIORITY_SERVICE_TIER | null {
-  return typeof value === "string" &&
-    value.trim().toLowerCase() === PRIORITY_SERVICE_TIER
-    ? PRIORITY_SERVICE_TIER
+): FastServiceTier | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized === FAST_SERVICE_TIER ||
+    normalized === PRIORITY_SERVICE_TIER
+    ? normalized
     : null;
 }
