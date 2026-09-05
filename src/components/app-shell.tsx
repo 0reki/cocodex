@@ -36,7 +36,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/ui/components/sidebar";
-import { Spinner } from "@/ui/components/spinner";
+import { FullScreenSpinner } from "@/ui/components/spinner";
 import {
   ThemeToggler,
   type Resolved,
@@ -161,11 +161,7 @@ export function AppShell() {
           />
           <SidebarInset className="min-w-0">
             <section className="relative min-h-0 flex-1 overflow-y-auto">
-              {isNavigating ? (
-                <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/60 backdrop-blur-[1px]">
-                  <Spinner />
-                </div>
-              ) : null}
+              {isNavigating ? <FullScreenSpinner label="正在切换页面" /> : null}
               <Outlet />
             </section>
           </SidebarInset>

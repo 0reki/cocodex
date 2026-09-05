@@ -1,11 +1,5 @@
-import {
-  AlertCircle,
-  Box,
-  Check,
-  Copy,
-  LoaderCircle,
-  RefreshCw,
-} from "lucide-react";
+import { FullScreenSpinner } from "@/ui/components/spinner";
+import { AlertCircle, Box, Check, Copy, RefreshCw } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { Badge } from "@/ui/components/badge";
@@ -53,15 +47,7 @@ export function PageHeader({
 }
 
 export function LoadingState({ label = "正在加载" }: { label?: string }) {
-  return (
-    <div
-      className="flex min-h-32 items-center justify-center gap-2 rounded-xl border text-sm text-muted-foreground"
-      aria-live="polite"
-    >
-      <LoaderCircle className="size-4 animate-spin" />
-      <span>{label}</span>
-    </div>
-  );
+  return <FullScreenSpinner label={label} />;
 }
 
 export function ErrorState({

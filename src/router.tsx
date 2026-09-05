@@ -1,4 +1,4 @@
-import { LoaderCircle } from "lucide-react";
+import { FullScreenSpinner } from "@/ui/components/spinner";
 import { useCallback, useEffect, useState } from "react";
 import {
   Navigate,
@@ -51,14 +51,7 @@ function SetupBoundary() {
     );
   }
   if (!status) {
-    return (
-      <main className="grid min-h-dvh place-items-center p-4">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <LoaderCircle className="size-4 animate-spin" />
-          正在检查初始化状态
-        </div>
-      </main>
-    );
+    return <FullScreenSpinner label="正在检查初始化状态" />;
   }
 
   if (status.setupRequired && location.pathname !== "/setup") {
@@ -74,14 +67,7 @@ function ProtectedRoute() {
   const { ready, user } = useAuth();
   const location = useLocation();
   if (!ready) {
-    return (
-      <main className="grid min-h-dvh place-items-center p-4">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <LoaderCircle className="size-4 animate-spin" />
-          正在恢复会话
-        </div>
-      </main>
-    );
+    return <FullScreenSpinner label="正在恢复会话" />;
   }
   if (!user) {
     const next = `${location.pathname}${location.search}`;

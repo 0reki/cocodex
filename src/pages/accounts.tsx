@@ -1,9 +1,5 @@
-import {
-  ArrowUpRight,
-  Check,
-  EllipsisVertical,
-  LoaderCircle,
-} from "lucide-react";
+import { Spinner } from "@/ui/components/spinner";
+import { ArrowUpRight, Check, EllipsisVertical } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -227,7 +223,7 @@ function AccountDeviceAuth({
             取消
           </Button>
           <Button type="button" disabled>
-            <LoaderCircle className="animate-spin" />
+            <Spinner />
             等待授权
           </Button>
         </footer>
@@ -248,7 +244,7 @@ function AccountDeviceAuth({
         <Button type="button" disabled={starting} onClick={() => void start()}>
           {starting ? (
             <>
-              <LoaderCircle className="animate-spin" />
+              <Spinner />
               <span className="sr-only">处理中</span>
             </>
           ) : (
@@ -321,14 +317,20 @@ export function AccountsPage() {
     content: ReactNode;
   } | null>(null);
 
-  const load = useCallback((signal: AbortSignal) => {
-    const params = new URLSearchParams({ page: String(page), pageSize: "25" });
-    if (status) params.set("status", status);
-    if (query) params.set("q", query);
-    return api<OpenAIAccountsResponse>(`/api/openai-accounts?${params}`, {
-      signal,
-    });
-  }, [api, page, query, status]);
+  const load = useCallback(
+    (signal: AbortSignal) => {
+      const params = new URLSearchParams({
+        page: String(page),
+        pageSize: "25",
+      });
+      if (status) params.set("status", status);
+      if (query) params.set("q", query);
+      return api<OpenAIAccountsResponse>(`/api/openai-accounts?${params}`, {
+        signal,
+      });
+    },
+    [api, page, query, status],
+  );
   const { data, error, loading, reload } = useResource(load);
 
   useEffect(() => {

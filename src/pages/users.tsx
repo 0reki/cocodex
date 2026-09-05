@@ -1,4 +1,5 @@
-import { Link, LoaderCircle } from "lucide-react";
+import { Spinner } from "@/ui/components/spinner";
+import { Link } from "lucide-react";
 import { useCallback, useState, type FormEvent } from "react";
 
 import {
@@ -132,7 +133,7 @@ function UserForm({
         <Button type="submit" disabled={submitting}>
           {submitting ? (
             <>
-              <LoaderCircle className="animate-spin" />
+              <Spinner />
               <span className="sr-only">处理中</span>
             </>
           ) : (
@@ -242,11 +243,7 @@ export function UsersPage() {
           disabled={busy === "invitation"}
           onClick={() => void createInvitation()}
         >
-          {busy === "invitation" ? (
-            <LoaderCircle className="animate-spin" />
-          ) : (
-            <Link />
-          )}
+          {busy === "invitation" ? <Spinner /> : <Link />}
           邀请用户
         </Button>
         <Button type="button" onClick={() => setEditing("new")}>

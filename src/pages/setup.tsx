@@ -1,9 +1,5 @@
-import {
-  CheckCircle2,
-  Database,
-  LoaderCircle,
-  ShieldCheck,
-} from "lucide-react";
+import { Spinner } from "@/ui/components/spinner";
+import { CheckCircle2, Database, ShieldCheck } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { useOutletContext } from "react-router";
 
@@ -183,7 +179,7 @@ export function SetupPage() {
               </Button>
             ) : (
               <Button type="submit" size="lg" disabled={submitting}>
-                {submitting ? <LoaderCircle className="animate-spin" /> : null}
+                {submitting ? <Spinner /> : null}
                 {submitting ? "正在初始化" : "完成设置"}
               </Button>
             )}

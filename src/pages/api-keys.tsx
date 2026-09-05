@@ -1,4 +1,5 @@
-import { CalendarDays, LoaderCircle, Pencil, Trash } from "lucide-react";
+import { Spinner } from "@/ui/components/spinner";
+import { CalendarDays, Pencil, Trash } from "lucide-react";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import {
@@ -169,7 +170,7 @@ function KeyForm({
         <Button type="submit" disabled={submitting}>
           {submitting ? (
             <>
-              <LoaderCircle className="animate-spin" />
+              <Spinner />
               <span className="sr-only">处理中</span>
             </>
           ) : (
@@ -331,8 +332,7 @@ export function ApiKeysPage() {
   const [deleting, setDeleting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const load = useCallback(
-    (signal: AbortSignal) =>
-      api<ApiKeysResponse>("/api/api-keys", { signal }),
+    (signal: AbortSignal) => api<ApiKeysResponse>("/api/api-keys", { signal }),
     [api],
   );
   const { data, error, loading, reload } = useResource(load);
@@ -529,7 +529,7 @@ export function ApiKeysPage() {
               >
                 {deleting ? (
                   <>
-                    <LoaderCircle className="animate-spin" />
+                    <Spinner />
                     <span className="sr-only">处理中</span>
                   </>
                 ) : (

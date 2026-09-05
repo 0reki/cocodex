@@ -1,4 +1,4 @@
-import { LoaderCircle } from "lucide-react";
+import { FullScreenSpinner } from "@/ui/components/spinner";
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router";
 
@@ -100,12 +100,7 @@ export function RegisterPage() {
 
   return (
     <AuthPage heading="创建账号">
-      {validating ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <LoaderCircle className="size-4 animate-spin" />
-          正在校验注册链接
-        </div>
-      ) : null}
+      {validating ? <FullScreenSpinner label="正在校验注册链接" /> : null}
 
       {!validating && !valid ? (
         <div className="grid w-full gap-4">

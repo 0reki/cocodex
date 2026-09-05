@@ -1,4 +1,4 @@
-import { LoaderCircle } from "lucide-react";
+import { Spinner } from "@/ui/components/spinner";
 import type { ReactNode } from "react";
 
 import codexShellLogoUrl from "@/assets/codex-shell-logo.svg";
@@ -128,7 +128,7 @@ export function AuthSubmitButton({
         disabled={disabled || submitting}
         className="relative z-1 inline-flex h-12 w-full cursor-pointer items-center justify-center gap-2 rounded-lg bg-foreground px-4 text-base font-medium text-background transition-colors hover:bg-foreground/90 disabled:cursor-not-allowed disabled:opacity-60"
       >
-        {submitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
+        {submitting ? <Spinner /> : null}
         {submitting ? submittingLabel : idleLabel}
       </button>
     </div>
