@@ -1,8 +1,8 @@
 import {
   CODEX_OAUTH_CLIENT_ID,
-  DEFAULT_USER_AGENT,
   OPENAI_OAUTH_TOKEN_URL,
 } from "./runtime-constants.ts";
+import { getCodexUserAgent } from "./client-identity.ts";
 import type {
   CodexTokenRefreshResponse,
   RefreshCodexTokensOptions,
@@ -25,7 +25,7 @@ export async function refreshCodexTokens(
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
-      "User-Agent": options.userAgent ?? DEFAULT_USER_AGENT,
+      "User-Agent": getCodexUserAgent(),
     },
     body: JSON.stringify({
       client_id: options.clientId?.trim() || CODEX_OAUTH_CLIENT_ID,

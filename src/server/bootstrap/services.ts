@@ -52,8 +52,6 @@ type BootstrapServerServicesDependencies =
     | "resolveOpenAIUpstreamAccountId"
     | "updateOpenAIAccountTokensById"
   > & {
-    DEFAULT_OPENAI_API_USER_AGENT: string;
-    DEFAULT_OPENAI_API_CLIENT_VERSION: string;
     RESPONSE_SETTLEMENT_BATCH_SIZE: number;
     RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS: number;
     RESPONSE_SETTLEMENT_ID_CACHE_SIZE: number;
@@ -67,10 +65,7 @@ type BootstrapServerServicesDependencies =
 export function bootstrapServerServices(
   deps: BootstrapServerServicesDependencies,
 ) {
-  const runtime = createOpenAIRuntimeServices({
-    defaultOpenAIApiUserAgent: deps.DEFAULT_OPENAI_API_USER_AGENT,
-    defaultOpenAIApiClientVersion: deps.DEFAULT_OPENAI_API_CLIENT_VERSION,
-  });
+  const runtime = createOpenAIRuntimeServices();
 
   const auth = createAuthServices({
     lruGet: deps.lruGet,

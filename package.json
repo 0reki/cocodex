@@ -10,6 +10,7 @@
     "lint": "eslint src",
     "lint:fix": "eslint src --fix",
     "typecheck": "tsc --noEmit",
+    "test": "node --test scripts/client-identity.test.mjs",
     "e2e": "node --env-file-if-exists=.env.e2e scripts/e2e.mjs",
     "docker:up": "docker compose --env-file .env.docker up --build",
     "docker:down": "docker compose down"

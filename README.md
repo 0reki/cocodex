@@ -82,7 +82,7 @@ Token 和 Refresh Token，避免重复填充测试凭据。
 服务保留 Responses 协议适配，包括 Codex 请求体规范化。
 `POST /v1/responses` 仅接受 `stream: true`，并以 SSE 形式透传上游事件；不提供
 非流式结果组装。客户端端到端请求头和 WebSocket 查询参数会继续转发，服务只
-替换上游 `Authorization` 并设置当前用户获分配账号对应的 `chatgpt-account-id`。计费和
+替换上游 `Authorization`、统一生成 Codex `User-Agent`，并设置当前用户获分配账号对应的 `chatgpt-account-id`。计费和
 请求日志旁路观察上游响应。
 
 图像接口适配 Codex 客户端的 JSON 请求格式，并转发到订阅账号的 Codex Images
@@ -187,8 +187,25 @@ SSE 在下游写缓冲区满时暂停读取上游；WebSocket 在目标连接出
 对应来源连接，待发送完成后继续读取。两者都只传播传输层背压，不增加限流、丢包
 或代理自定义的断开阈值。
 
-上游 User-Agent 和客户端版本通过 `OPENAI_API_USER_AGENT`、
-`CODEX_CLIENT_VERSION` 环境变量配置。内置价格已按 `25 credits = $1` 换算为
+上游 User-Agent 统一为 `codex_cli_rs/{version} ({系统} {系统版本}; {架构}) unknown`，
+包括代理、模型列表、用量、OAuth 刷新和设备码登录。代理请求的 UA 使用该请求实际
+转发的 `version`；其他请求使用后端解析的版本。后端无交互终端，因此终端标识为
+`unknown`。客户端 UA 会被覆盖，旧的 `OPENAI_API_USER_AGENT` 配置不再生效。
+
+`CODEX_CLIENT_VERSION=auto`（未配置时也是此行为）通过 GitHub REST API
+`GET https://api.github.com/repos/openai/codex/releases/latest` 查询最新稳定版本。
+每个进程在首次使用时后台查询，之后有请求时最多每 6 小时刷新一次；并发查询合并，
+使用 ETag 条件请求。查询不阻塞业务请求，成功版本缓存在内存，重启后重新查询；
+首次查询完成前使用内置版本 `0.153.4`。查询超时、限流或返回异常时继续使用已有版本，
+至少 1 小时后重试，并遵守更长的 `Retry-After` / `X-RateLimit-Reset`。
+可设置 `CODEX_CLIENT_VERSION=0.153.4` 固定版本并停止 GitHub 查询。已有部署若仍设置
+具体版本，需改为 `auto` 并重启才能启用自动查询。自动更新只更新客户端标识，
+不会下载或执行 GitHub 内容，也不保证新协议自动兼容。
+
+`CODEX_GITHUB_TOKEN` 可选，仅发送给 GitHub API，不会发往 OpenAI 或客户端。
+公开 Release 支持匿名查询；共享出口 IP 遇到匿名限流时可配置 Token。
+
+内置价格已按 `25 credits = $1` 换算为
 美元/百万 Token：
 
 | 计费项 | Input | Cached input | Output |

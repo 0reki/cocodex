@@ -16,6 +16,5 @@ export const CHATGPT_CODEX_IMAGE_GENERATIONS_URL =
   "https://chatgpt.com/backend-api/codex/images/generations";
 export const CHATGPT_CODEX_IMAGE_EDITS_URL =
   "https://chatgpt.com/backend-api/codex/images/edits";
-export const DEFAULT_USER_AGENT = "Apifox/1.0.0 (https://apifox.com)";
 export const DEFAULT_CODEX_ORIGINATOR = "codex_cli_rs";
 export const DEFAULT_CODEX_SANDBOX = "windows_elevated";

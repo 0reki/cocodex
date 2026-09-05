@@ -1,7 +1,7 @@
 import {
   CHATGPT_CODEX_MODELS_URL,
-  DEFAULT_USER_AGENT,
 } from "./runtime-constants.ts";
+import { buildCodexUserAgent } from "./client-identity.ts";
 import type {
   CodexModelsResponse,
   GetCodexModelsOptions,
@@ -17,7 +17,7 @@ export async function getCodexModels(
   if (!clientVersion) throw new Error("Missing clientVersion");
 
   const headers: Record<string, string> = {
-    "User-Agent": options.userAgent ?? DEFAULT_USER_AGENT,
+    "User-Agent": buildCodexUserAgent(clientVersion),
     Accept: "application/json",
     Authorization: `Bearer ${accessToken}`,
     version: clientVersion,

@@ -2,6 +2,7 @@ import {
   CODEX_OAUTH_CLIENT_ID,
   OPENAI_OAUTH_TOKEN_URL,
 } from "./runtime-constants.ts";
+import { getCodexUserAgent } from "./client-identity.ts";
 
 const OPENAI_ACCOUNTS_API_URL = "https://auth.openai.com/api/accounts";
 const CODEX_DEVICE_VERIFICATION_URL = "https://auth.openai.com/codex/device";
@@ -70,6 +71,7 @@ export async function requestCodexDeviceCode(): Promise<CodexDeviceCode> {
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
+        "User-Agent": getCodexUserAgent(),
       },
       body: JSON.stringify({ client_id: CODEX_OAUTH_CLIENT_ID }),
     },
@@ -109,6 +111,7 @@ export async function pollCodexDeviceAuth(input: {
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
+        "User-Agent": getCodexUserAgent(),
       },
       body: JSON.stringify({
         device_auth_id: input.deviceAuthId,
@@ -132,6 +135,7 @@ export async function pollCodexDeviceAuth(input: {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Accept: "application/json",
+      "User-Agent": getCodexUserAgent(),
     },
     body: new URLSearchParams({
       grant_type: "authorization_code",

@@ -10,8 +10,6 @@ export function createServerRuntimeState() {
       ? Math.floor(parsed)
       : fallback;
   };
-  const DEFAULT_OPENAI_API_USER_AGENT = "node/22.14.0";
-  const DEFAULT_OPENAI_API_CLIENT_VERSION = "0.153.4";
   const RESPONSE_SETTLEMENT_BATCH_SIZE = positiveInteger(
     process.env.RESPONSE_SETTLEMENT_BATCH_SIZE,
     200,
@@ -56,8 +54,6 @@ export function createServerRuntimeState() {
   const apiKeyAuthTokenById = new Map<string, string>();
   const apiKeyPendingCharges = new Map<string, UsdAmount>();
   return {
-    DEFAULT_OPENAI_API_USER_AGENT,
-    DEFAULT_OPENAI_API_CLIENT_VERSION,
     RESPONSE_SETTLEMENT_BATCH_SIZE,
     RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS,
     RESPONSE_SETTLEMENT_ID_CACHE_SIZE,

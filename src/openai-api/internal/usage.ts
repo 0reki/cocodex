@@ -2,8 +2,8 @@ import {
   CHATGPT_CODEX_DAILY_USAGE_URL,
   CHATGPT_CODEX_USAGE_URL,
   DEFAULT_CODEX_ORIGINATOR,
-  DEFAULT_USER_AGENT,
 } from "./runtime-constants.ts";
+import { buildCodexUserAgent } from "./client-identity.ts";
 import type {
   GetCodexDailyWorkspaceUsageOptions,
   GetCodexUsageOptions,
@@ -18,7 +18,7 @@ function codexUsageHeaders(options: GetCodexUsageOptions) {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
     originator: DEFAULT_CODEX_ORIGINATOR,
-    "User-Agent": `${DEFAULT_CODEX_ORIGINATOR}/${clientVersion}`,
+    "User-Agent": buildCodexUserAgent(clientVersion),
   };
   const accountId = options.accountId?.trim();
   if (accountId) headers["ChatGPT-Account-Id"] = accountId;
@@ -36,7 +36,7 @@ function analyticsUsageHeaders(options: GetCodexUsageOptions) {
     Authorization: `Bearer ${accessToken}`,
     "OpenAI-Beta": "codex-1",
     originator: "codex-tui",
-    "User-Agent": options.userAgent ?? DEFAULT_USER_AGENT,
+    "User-Agent": buildCodexUserAgent(clientVersion),
     version: clientVersion,
   };
   const accountId = options.accountId?.trim();

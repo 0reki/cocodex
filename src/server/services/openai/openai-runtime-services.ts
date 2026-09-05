@@ -1,17 +1,15 @@
 import type { Request, Response } from "express";
+import {
+  buildCodexUserAgent,
+  getCodexClientVersion,
+} from "../../../openai-api/internal/client-identity.ts";
 
-export function createOpenAIRuntimeServices(deps: {
-  defaultOpenAIApiUserAgent: string;
-  defaultOpenAIApiClientVersion: string;
-}) {
+export function createOpenAIRuntimeServices() {
   function getOpenAIApiRuntimeConfig() {
+    const clientVersion = getCodexClientVersion();
     return Promise.resolve({
-      userAgent:
-        process.env.OPENAI_API_USER_AGENT?.trim() ||
-        deps.defaultOpenAIApiUserAgent,
-      clientVersion:
-        process.env.CODEX_CLIENT_VERSION?.trim() ||
-        deps.defaultOpenAIApiClientVersion,
+      userAgent: buildCodexUserAgent(clientVersion),
+      clientVersion,
     });
   }
 

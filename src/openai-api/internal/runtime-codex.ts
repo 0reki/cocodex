@@ -2,8 +2,8 @@ import zlib from "node:zlib";
 import {
   DEFAULT_CODEX_ORIGINATOR,
   DEFAULT_CODEX_SANDBOX,
-  DEFAULT_USER_AGENT,
 } from "./runtime-constants.ts";
+import { buildCodexUserAgent } from "./client-identity.ts";
 
 const CLIENT_ACCOUNT_HEADERS = [
   "chatgpt-account-id",
@@ -52,9 +52,7 @@ export function buildCodexTransportHeaders(args: {
   if (!isProxyRequest && !forwarded.has("x-codex-turn-metadata")) {
     forwarded.set("x-codex-turn-metadata", buildCodexTurnMetadataHeader());
   }
-  if (!isProxyRequest && !forwarded.has("user-agent")) {
-    forwarded.set("user-agent", args.userAgent ?? DEFAULT_USER_AGENT);
-  }
+  forwarded.set("user-agent", buildCodexUserAgent(forwarded.get("version")!));
   const accountId = args.accountId?.trim();
   if (accountId) {
     forwarded.set("chatgpt-account-id", accountId);
