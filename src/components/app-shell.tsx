@@ -36,7 +36,10 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/ui/components/sidebar";
-import { FullScreenSpinner } from "@/ui/components/spinner";
+import {
+  ContentSpinner,
+  LoadingContainerContext,
+} from "@/ui/components/spinner";
 import {
   ThemeToggler,
   type Resolved,
@@ -136,6 +139,9 @@ export function AppShell() {
   const { user } = useAuth();
   const location = useLocation();
   const [isNavigating, setIsNavigating] = useState(false);
+  const [loadingContainer, setLoadingContainer] = useState<HTMLElement | null>(
+    null,
+  );
   const lastPath = useRef(location.pathname);
   const visibleNavItems = useMemo(
     () => navItems.filter((item) => !item.adminOnly || user?.role === "admin"),
@@ -160,9 +166,16 @@ export function AppShell() {
             onNavigate={() => setIsNavigating(true)}
           />
           <SidebarInset className="min-w-0">
-            <section className="relative min-h-0 flex-1 overflow-y-auto">
-              {isNavigating ? <FullScreenSpinner label="正在切换页面" /> : null}
-              <Outlet />
+            <section
+              ref={setLoadingContainer}
+              className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+            >
+              <LoadingContainerContext value={loadingContainer}>
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <Outlet />
+                </div>
+                {isNavigating ? <ContentSpinner label="正在切换页面" /> : null}
+              </LoadingContainerContext>
             </section>
           </SidebarInset>
         </div>

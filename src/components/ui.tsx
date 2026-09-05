@@ -1,4 +1,4 @@
-import { FullScreenSpinner } from "@/ui/components/spinner";
+import { ContentSpinner } from "@/ui/components/spinner";
 import { AlertCircle, Box, Check, Copy, RefreshCw } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
@@ -47,7 +47,7 @@ export function PageHeader({
 }
 
 export function LoadingState({ label = "正在加载" }: { label?: string }) {
-  return <FullScreenSpinner label={label} />;
+  return <ContentSpinner label={label} />;
 }
 
 export function ErrorState({
