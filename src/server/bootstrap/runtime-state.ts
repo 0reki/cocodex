@@ -11,7 +11,7 @@ export function createServerRuntimeState() {
       : fallback;
   };
   const DEFAULT_OPENAI_API_USER_AGENT = "node/22.14.0";
-  const DEFAULT_OPENAI_API_CLIENT_VERSION = "0.152.0";
+  const DEFAULT_OPENAI_API_CLIENT_VERSION = "0.153.4";
   const RESPONSE_SETTLEMENT_BATCH_SIZE = positiveInteger(
     process.env.RESPONSE_SETTLEMENT_BATCH_SIZE,
     200,
@@ -32,9 +32,10 @@ export function createServerRuntimeState() {
     process.env.RESPONSE_SETTLEMENT_RETRY_MAX_MS,
     5_000,
   );
-  const responseSettlementDataDirectory = process.env.COCODEX_CONFIG_PATH?.trim()
-    ? path.dirname(path.resolve(process.env.COCODEX_CONFIG_PATH.trim()))
-    : path.join(process.cwd(), "data");
+  const responseSettlementDataDirectory =
+    process.env.COCODEX_CONFIG_PATH?.trim()
+      ? path.dirname(path.resolve(process.env.COCODEX_CONFIG_PATH.trim()))
+      : path.join(process.cwd(), "data");
   const RESPONSE_SETTLEMENT_WAL_PATH = path.resolve(
     process.env.RESPONSE_SETTLEMENT_WAL_PATH?.trim() ||
       path.join(responseSettlementDataDirectory, "response-settlements.wal"),
