@@ -93,7 +93,13 @@ export function registerPublicOpenAIRoutes(
         account: assignedAccount.sourceAccount,
         runtimeConfig,
       });
-      const models = Array.isArray(upstream.models) ? upstream.models : [];
+      const models = (Array.isArray(upstream.models) ? upstream.models : []).map(
+        (model) =>
+          // Spark is available through our subscription proxy despite its public API flag.
+          model.slug === "gpt-5.3-codex-spark"
+            ? { ...model, supported_in_api: true }
+            : model,
+      );
       res.json({
         ...upstream,
         models,
