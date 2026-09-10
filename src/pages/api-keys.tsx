@@ -275,12 +275,22 @@ const data = await response.json();`;
 name = "OpenAI"
 base_url = "${baseUrl}/v1"
 wire_api = "responses"
-requires_openai_auth = true
+requires_openai_auth = false
 supports_websockets = true
-supports_standalone_web_search = true`;
-  const codexAuth = `{
-  "OPENAI_API_KEY": "<YOUR_API_KEY>"
-}`;
+supports_standalone_web_search = true
+
+[model_providers.OpenAI.auth]
+command = "node"
+args = ["-p", "process.argv[1]", "--", "<YOUR_API_KEY>"]
+
+[model_providers.OpenAI.http_headers]
+x-openai-actor-authorization = "enabled"
+
+[features]
+image_generation = true
+
+[features.context_management]
+experimental_mode = true`;
 
   return (
     <section className="grid gap-4">
@@ -309,9 +319,7 @@ supports_standalone_web_search = true`;
       </div>
       <div className="grid gap-2">
         <h3 className="text-sm font-medium">Codex 配置</h3>
-        <CodeTabs
-          codes={{ "config.toml": codexConfig, "auth.json": codexAuth }}
-        />
+        <CodeTabs codes={{ "config.toml": codexConfig }} />
       </div>
       <div className="grid gap-2">
         <h3 className="text-sm font-medium">Responses API</h3>
