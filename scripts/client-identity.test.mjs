@@ -119,11 +119,14 @@ test("proxy UA follows the forwarded version while credentials remain account-bo
       requestHeaders: {
         "user-agent": userAgent, version: "0.200.0", authorization: "Bearer client-key",
         "chatgpt-account-id": "client-account", "x-custom": "preserved",
+        "X-OpenAI-Actor-Authorization": "enabled", "x-codex-image-turn-id": "image-turn",
       },
     });
     assert.equal(headers["user-agent"], buildCodexUserAgent("0.200.0"));
     assert.equal(headers.authorization, "Bearer upstream-token");
     assert.equal(headers["chatgpt-account-id"], "assigned-account");
+    assert.equal(new Headers(headers).has("x-openai-actor-authorization"), false);
+    assert.equal(headers["x-codex-image-turn-id"], "image-turn");
     assert.equal(headers["x-custom"], "preserved");
     assert.equal(headers.version, "0.200.0");
   }

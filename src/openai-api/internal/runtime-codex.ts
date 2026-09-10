@@ -11,6 +11,8 @@ const CLIENT_ACCOUNT_HEADERS = [
   "openai-project",
   "x-oai-attestation",
   "x-openai-fedramp",
+  // The client uses this header to enable image tools; upstream uses our account auth.
+  "x-openai-actor-authorization",
 ] as const;
 
 export function buildCodexTurnMetadataHeader(
