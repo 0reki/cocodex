@@ -392,7 +392,6 @@ app.use(async (req, res, next) => {
       req.path === "/api/api-keys" ||
       req.path.startsWith("/api/api-keys/") ||
       req.path === "/api/my-usage" ||
-      req.path.startsWith("/api/users/") && req.path.endsWith("/device-id/reset") ||
       req.path === "/api/request-logs" ||
       req.path.startsWith("/api/request-logs/");
     if (isApiPath && !nonAdminAllowed && principal.role !== "admin") {
