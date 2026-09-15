@@ -224,6 +224,13 @@ export function UsersPage() {
     }
   }
 
+  async function resetDeviceId(item: PortalUser) {
+    if (!window.confirm(`确定重置 ${item.username} 的设备 ID 吗？`)) return;
+    setBusy(`device:${item.id}`);
+    try { await api(`/api/users/${item.id}/device-id/reset`, { method: "POST" }); await reload(); }
+    catch (cause) { setActionError(cause instanceof Error ? cause.message : "重置设备 ID 失败"); }
+    finally { setBusy(null); }
+  }
 
   function saved(user?: PortalUser) {
     if (user && user.id === currentUser?.id) updateCurrentUser(user);
@@ -270,6 +277,7 @@ export function UsersPage() {
                   <TableHead>角色</TableHead>
                   <TableHead>状态</TableHead>
                   <TableHead>上游账号</TableHead>
+                  <TableHead>设备 ID</TableHead>
                   <TableHead>创建时间</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
@@ -319,6 +327,9 @@ export function UsersPage() {
                         </SelectContent>
                       </Select>
                     </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2"><code className="max-w-36 truncate text-xs">{item.deviceId ?? "-"}</code><CopyButton value={item.deviceId ?? ""} /></div>
+                    </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDate(item.createdAt)}
                     </TableCell>
@@ -331,6 +342,7 @@ export function UsersPage() {
                         >
                           编辑
                         </Button>
+                        {item.id === currentUser?.id ? <Button variant="outline" type="button" disabled={busy === `device:${item.id}`} onClick={() => void resetDeviceId(item)}>重置设备 ID</Button> : null}
                         {item.enabled ? (
                           <Tooltip
                             content={
