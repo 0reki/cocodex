@@ -1,11 +1,13 @@
 import { Gauge, PackagePlus, type LucideIcon } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 
 import {
   ErrorState,
   LoadingState,
   PageHeader,
   Tooltip,
+  CopyButton,
+  InlineNotice,
 } from "@/components/ui";
 import { useResource } from "@/hooks/use-resource";
 import { useAuth } from "@/lib/auth";
@@ -15,6 +17,7 @@ import type {
   QuotaWindow,
   UserQuotaPool,
 } from "@/types/api";
+import { Button } from "@/ui/components/button";
 
 const userColors = ["#2563eb", "#f97316", "#16a34a", "#a855f7"];
 
@@ -139,13 +142,24 @@ function QuotaRow({
 }
 
 export function MyUsagePage() {
-  const { api } = useAuth();
+  const { api, user: currentUser } = useAuth();
+  const [deviceBusy, setDeviceBusy] = useState(false);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
   const load = useCallback(
     (signal: AbortSignal) =>
       api<MyUsageResponse>("/api/my-usage", { signal }),
     [api],
   );
   const { data, error, loading, reload } = useResource(load);
+
+  async function resetDeviceId() {
+    const user = data?.users.find((item) => item.id === currentUser?.id);
+    if (!user?.deviceId || !window.confirm("确定重置当前用户的设备 ID 吗？")) return;
+    setDeviceBusy(true); setDeviceError(null);
+    try { await api(`/api/users/${user.id}/device-id/reset`, { method: "POST" }); await reload(); }
+    catch (cause) { setDeviceError(cause instanceof Error ? cause.message : "重置设备 ID 失败"); }
+    finally { setDeviceBusy(false); }
+  }
 
   return (
     <main className="flex w-full flex-col gap-5 px-3 py-3 sm:gap-6 sm:px-4 sm:py-4 lg:px-5">
@@ -159,6 +173,7 @@ export function MyUsagePage() {
       {data ? (
         <>
           {error ? <ErrorState message={error} retry={() => void reload()} /> : null}
+          {data.users.find((item) => item.id === currentUser?.id)?.deviceId ? <section className="rounded-xl border p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">设备 ID</h2><p className="mt-1 text-sm text-muted-foreground">用于当前用户的上游请求设备标识</p></div><Button variant="outline" disabled={deviceBusy} onClick={() => void resetDeviceId()}>重置设备 ID</Button></div><div className="mt-4 flex items-center gap-2"><code className="rounded bg-muted px-2 py-1 text-sm">{data.users.find((item) => item.id === currentUser?.id)!.deviceId}</code><CopyButton value={data.users.find((item) => item.id === currentUser?.id)?.deviceId ?? ""} /></div>{deviceError ? <InlineNotice tone="error">{deviceError}</InlineNotice> : null}</section> : null}
           <div className="divide-y rounded-xl border bg-background p-5">
             <QuotaRow
               title="标准"
