@@ -14,9 +14,14 @@ CREATE TABLE IF NOT EXISTS portal_users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
   enabled BOOLEAN NOT NULL DEFAULT true,
+  device_id TEXT NOT NULL DEFAULT encode(gen_random_bytes(16), 'hex'),
   created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
 );
+ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS device_id TEXT;
+UPDATE portal_users SET device_id = encode(gen_random_bytes(16), 'hex') WHERE device_id IS NULL;
+ALTER TABLE portal_users ALTER COLUMN device_id SET DEFAULT encode(gen_random_bytes(16), 'hex');
+ALTER TABLE portal_users ALTER COLUMN device_id SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_portal_users_role ON portal_users (role);
 CREATE INDEX IF NOT EXISTS idx_portal_users_enabled ON portal_users (enabled);

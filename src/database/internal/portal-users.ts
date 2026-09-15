@@ -15,12 +15,13 @@ type PortalUserRow = {
   password_hash: string
   role: string
   enabled: boolean
+  device_id: string
   created_at: Date
   updated_at: Date
 }
 
 const PORTAL_USER_COLUMNS = `
-  id, username, password_hash, role, enabled, created_at, updated_at
+  id, username, password_hash, role, enabled, device_id, created_at, updated_at
 `
 
 function mapPortalUserRow(row: PortalUserRow): PortalUserRecord {
@@ -31,9 +32,15 @@ function mapPortalUserRow(row: PortalUserRow): PortalUserRecord {
     passwordHash: row.password_hash,
     role,
     enabled: row.enabled,
+    deviceId: row.device_id,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   }
+}
+
+export async function resetPortalUserDeviceIdById(id: string) {
+  const result = await query<PortalUserRow>(`UPDATE portal_users SET device_id = encode(gen_random_bytes(16), 'hex') WHERE id = $1::uuid RETURNING ${PORTAL_USER_COLUMNS}`, [id.trim()])
+  return result.rows[0] ? mapPortalUserRow(result.rows[0]) : null
 }
 
 export class PortalUserSeatLimitError extends Error {

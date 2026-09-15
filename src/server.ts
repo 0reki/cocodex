@@ -43,6 +43,7 @@ import {
   updateOpenAIAccountTokensById,
   updatePortalUsernameById,
   updatePortalUserPasswordById,
+  resetPortalUserDeviceIdById,
   upsertOpenAIAccount,
 } from "./database/index.ts";
 import { resetDatabasePool } from "./database/core/db.ts";
@@ -545,6 +546,7 @@ registerUserRoutes(app, {
   createPortalInvitation,
   updatePortalUsernameById,
   updatePortalUserPasswordById,
+  resetPortalUserDeviceIdById,
   setPortalUserEnabledById,
 });
 

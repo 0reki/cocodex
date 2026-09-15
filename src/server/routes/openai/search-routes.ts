@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { getPortalUserById } from "../../../database/index.ts";
 import type { Express, Request, Response } from "express";
 import * as openaiApiModule from "../../../openai-api/index.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
@@ -95,7 +96,7 @@ export function registerSearchRoutes(
       const upstream = await deps.postCodexSearchWithTokenRefresh({
         module: openaiApiModule,
         account: assignedAccount.sourceAccount,
-        payload: requestBody,
+        payload: { ...requestBody, installation_id: (await getPortalUserById(ownerUserId!))?.deviceId },
         requestHeaders: getForwardRequestHeaders(req.headers),
         runtimeConfig,
         signal: requestAbort.signal,
