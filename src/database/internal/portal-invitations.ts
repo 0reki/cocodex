@@ -155,7 +155,6 @@ export async function registerPortalUserWithInvitation(input: {
       password_hash: string;
       role: string;
       enabled: boolean;
-      device_id: string;
       created_at: Date;
       updated_at: Date;
     }>(
@@ -165,7 +164,7 @@ export async function registerPortalUserWithInvitation(input: {
         )
         VALUES ($1, $2, 'user', true)
         RETURNING
-          id, username, password_hash, role, enabled, device_id,
+          id, username, password_hash, role, enabled,
           created_at, updated_at
       `,
       [input.username.trim().toLowerCase(), input.passwordHash.trim()],
@@ -188,7 +187,6 @@ export async function registerPortalUserWithInvitation(input: {
       passwordHash: user.password_hash,
       role: user.role === "admin" ? "admin" : "user",
       enabled: user.enabled,
-      deviceId: user.device_id,
       createdAt: user.created_at.toISOString(),
       updatedAt: user.updated_at.toISOString(),
     };

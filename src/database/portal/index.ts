@@ -8,7 +8,6 @@ export {
   setPortalUserEnabledById,
   updatePortalUsernameById,
   updatePortalUserPasswordById,
-  resetPortalUserDeviceIdById,
 } from "../internal/portal-users.ts"
 export {
   createPortalInvitation,

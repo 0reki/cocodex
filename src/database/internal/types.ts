@@ -36,7 +36,6 @@ export type PortalUserRecord = {
   passwordHash: string
   role: PortalUserRole
   enabled: boolean
-  deviceId: string
   createdAt: string
   updatedAt: string
 }

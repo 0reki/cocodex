@@ -21,7 +21,6 @@ import {
   hashPortalInvitationToken,
 } from "../../auth/portal-auth.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
-import type { PortalUserRecord } from "../../../database/index.ts";
 
 type UserRouteDependencies = Pick<
   ServerServices,
@@ -41,7 +40,6 @@ type UserRouteDependencies = Pick<
   setPortalUserUpstreamAssignment: typeof setPortalUserUpstreamAssignment;
   updatePortalUsernameById: typeof updatePortalUsernameById;
   updatePortalUserPasswordById: typeof updatePortalUserPasswordById;
-  resetPortalUserDeviceIdById: (id: string) => Promise<PortalUserRecord | null>;
   setPortalUserEnabledById: typeof setPortalUserEnabledById;
 };
 
@@ -53,7 +51,6 @@ function publicUser(
     enabled: boolean;
     createdAt: string;
     updatedAt: string;
-    deviceId: string;
   },
   sourceAccountId?: string | null,
 ) {
@@ -62,7 +59,6 @@ function publicUser(
     username: user.username,
     role: user.role,
     enabled: user.enabled,
-    deviceId: user.deviceId,
     ...(sourceAccountId !== undefined ? { sourceAccountId } : {}),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -307,20 +303,6 @@ export function registerUserRoutes(
     } catch (error) {
       sendUserWriteError(res, error);
     }
-  });
-
-  app.post("/api/users/:id/device-id/reset", async (req: Request, res: Response) => {
-    try {
-      const principal = deps.getPortalPrincipalFromLocals(res);
-      const id = getIdParam(req);
-      if (!principal || principal.id.toLowerCase() !== id.toLowerCase()) {
-        res.status(403).json({ ok: false, error: "只能重置自己的设备 ID" });
-        return;
-      }
-      const user = await deps.resetPortalUserDeviceIdById(id);
-      if (!user) { res.status(404).json({ ok: false, error: "User not found" }); return; }
-      res.json({ ok: true, deviceId: user.deviceId });
-    } catch (error) { sendUserWriteError(res, error); }
   });
 
   app.put("/api/users/:id/password", async (req: Request, res: Response) => {

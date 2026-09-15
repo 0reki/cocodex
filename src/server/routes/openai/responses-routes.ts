@@ -1,5 +1,4 @@
 import crypto from "node:crypto";
-import { getPortalUserById } from "../../../database/index.ts";
 import type { Express, Request, Response } from "express";
 import * as openaiApiModule from "../../../openai-api/index.ts";
 import {
@@ -136,7 +135,7 @@ export function registerResponsesRoutes(
       const upstream = await deps.postCodexResponsesWithTokenRefresh({
         module: openaiApiModule,
         account: assignedAccount.sourceAccount,
-        payload: { ...payload, installation_id: (await getPortalUserById(ownerUserId!))?.deviceId },
+        payload,
         requestHeaders: getForwardRequestHeaders(req.headers),
         runtimeConfig,
         signal: requestAbort.signal,
