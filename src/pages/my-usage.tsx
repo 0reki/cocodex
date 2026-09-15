@@ -8,7 +8,6 @@ import {
   Tooltip,
   CopyButton,
   InlineNotice,
-  Modal,
 } from "@/components/ui";
 import { useResource } from "@/hooks/use-resource";
 import { useAuth } from "@/lib/auth";
@@ -131,6 +130,7 @@ function QuotaRow({
               <span>100%</span>
             </div>
           </div>
+
         </>
       ) : (
         <div className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
@@ -143,50 +143,22 @@ function QuotaRow({
 
 export function MyUsagePage() {
   const { api, user: currentUser } = useAuth();
-  const [deviceResetOpen, setDeviceResetOpen] = useState(false);
   const [deviceBusy, setDeviceBusy] = useState(false);
   const [deviceError, setDeviceError] = useState<string | null>(null);
   const load = useCallback(
-    (signal: AbortSignal) => api<MyUsageResponse>("/api/my-usage", { signal }),
+    (signal: AbortSignal) =>
+      api<MyUsageResponse>("/api/my-usage", { signal }),
     [api],
   );
-  const { data, setData, error, loading, reload } = useResource(load);
-  const user = data?.users.find((item) => item.id === currentUser?.id);
-
-  function closeDeviceReset() {
-    if (deviceBusy) return;
-    setDeviceResetOpen(false);
-    setDeviceError(null);
-  }
+  const { data, error, loading, reload } = useResource(load);
 
   async function resetDeviceId() {
-    if (!deviceResetOpen || deviceBusy || !user?.deviceId) return;
-    setDeviceBusy(true);
-    setDeviceError(null);
-    try {
-      const { deviceId } = await api<{ ok: true; deviceId: string }>(
-        `/api/users/${user.id}/device-id/reset`,
-        { method: "POST" },
-      );
-      setData((current) =>
-        current
-          ? {
-              ...current,
-              users: current.users.map((item) =>
-                item.id === user.id ? { ...item, deviceId } : item,
-              ),
-            }
-          : current,
-      );
-      setDeviceResetOpen(false);
-      void reload();
-    } catch (cause) {
-      setDeviceError(
-        cause instanceof Error ? cause.message : "重置设备 ID 失败",
-      );
-    } finally {
-      setDeviceBusy(false);
-    }
+    const user = data?.users.find((item) => item.id === currentUser?.id);
+    if (!user?.deviceId || !window.confirm("确定重置当前用户的设备 ID 吗？")) return;
+    setDeviceBusy(true); setDeviceError(null);
+    try { await api(`/api/users/${user.id}/device-id/reset`, { method: "POST" }); await reload(); }
+    catch (cause) { setDeviceError(cause instanceof Error ? cause.message : "重置设备 ID 失败"); }
+    finally { setDeviceBusy(false); }
   }
 
   return (
@@ -200,38 +172,8 @@ export function MyUsagePage() {
 
       {data ? (
         <>
-          {error ? (
-            <ErrorState message={error} retry={() => void reload()} />
-          ) : null}
-          {user?.deviceId ? (
-            <section className="rounded-xl border p-5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="font-semibold">设备 ID</h2>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    用于当前用户的上游请求设备标识
-                  </p>
-                </div>
-                <Button
-                  variant="outline"
-                  type="button"
-                  disabled={deviceBusy}
-                  onClick={() => {
-                    setDeviceError(null);
-                    setDeviceResetOpen(true);
-                  }}
-                >
-                  重置设备 ID
-                </Button>
-              </div>
-              <div className="mt-4 flex items-center gap-2">
-                <code className="break-all rounded bg-muted px-2 py-1 text-sm">
-                  {user.deviceId}
-                </code>
-                <CopyButton value={user.deviceId} />
-              </div>
-            </section>
-          ) : null}
+          {error ? <ErrorState message={error} retry={() => void reload()} /> : null}
+          {data.users.find((item) => item.id === currentUser?.id)?.deviceId ? <section className="rounded-xl border p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold">设备 ID</h2><p className="mt-1 text-sm text-muted-foreground">用于当前用户的上游请求设备标识</p></div><Button variant="outline" disabled={deviceBusy} onClick={() => void resetDeviceId()}>重置设备 ID</Button></div><div className="mt-4 flex items-center gap-2"><code className="rounded bg-muted px-2 py-1 text-sm">{data.users.find((item) => item.id === currentUser?.id)!.deviceId}</code><CopyButton value={data.users.find((item) => item.id === currentUser?.id)?.deviceId ?? ""} /></div>{deviceError ? <InlineNotice tone="error">{deviceError}</InlineNotice> : null}</section> : null}
           <div className="divide-y rounded-xl border bg-background p-5">
             <QuotaRow
               title="标准"
@@ -247,34 +189,6 @@ export function MyUsagePage() {
             />
           </div>
         </>
-      ) : null}
-      {deviceResetOpen ? (
-        <Modal
-          title="重置设备 ID"
-          description="重置后会生成新的设备 ID，后续请求将使用新的 ID。确定继续吗？"
-          onClose={closeDeviceReset}
-        >
-          {deviceError ? (
-            <InlineNotice tone="error">{deviceError}</InlineNotice>
-          ) : null}
-          <footer className="flex justify-end gap-2 pt-4">
-            <Button
-              variant="outline"
-              type="button"
-              disabled={deviceBusy}
-              onClick={closeDeviceReset}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              disabled={deviceBusy}
-              onClick={() => void resetDeviceId()}
-            >
-              {deviceBusy ? "正在重置…" : "确认重置"}
-            </Button>
-          </footer>
-        </Modal>
       ) : null}
     </main>
   );
