@@ -289,9 +289,6 @@ export function UsersPage() {
                       {item.username}
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-2"><code className="max-w-36 truncate text-xs">{item.deviceId ?? "-"}</code><CopyButton value={item.deviceId ?? ""} /></div>
-                    </TableCell>
-                    <TableCell>
                       {item.role === "admin" ? "管理员" : "用户"}
                     </TableCell>
                     <TableCell>
@@ -329,6 +326,9 @@ export function UsersPage() {
                           ))}
                         </SelectContent>
                       </Select>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2"><code className="max-w-36 truncate text-xs">{item.deviceId ?? "-"}</code><CopyButton value={item.deviceId ?? ""} /></div>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDate(item.createdAt)}
