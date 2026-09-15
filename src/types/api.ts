@@ -5,7 +5,6 @@ export type PortalUser = {
   username: string;
   role: PortalRole;
   enabled: boolean;
-  deviceId?: string;
   balance?: number;
   sourceAccountId?: string | null;
   createdAt?: string;
