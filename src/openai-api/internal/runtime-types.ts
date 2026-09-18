@@ -93,3 +93,17 @@ export type CodexResponsesWebSocketConnection = {
   socket: WsSocket;
   responseHeaders: Record<string, string>;
 };
+
+export type ForwardCodexBackendRequestOptions = {
+  accessToken: string;
+  accountId?: string;
+  version: string;
+  sessionId: string;
+  method: string;
+  path: string;
+  query?: string;
+  requestHeaders?: HeadersInit;
+  body?: Buffer | Uint8Array | string | null;
+  userAgent?: string;
+  signal?: AbortSignal;
+};

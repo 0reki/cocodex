@@ -76,6 +76,7 @@ type ResponsesWebSocketProxyDependencies = Pick<
 type ResponsesWebSocketProxyContext = {
   apiKeyId: string;
   ownerUserId: string | null;
+  requestPath: string;
   serviceTier: FastServiceTier;
   startedAtMs: number;
   upstreamSocket: WsSocket;
@@ -106,7 +107,8 @@ export async function prepareResponsesWebSocketProxyContext(
   request: IncomingMessage,
 ): Promise<ResponsesWebSocketProxyContext> {
   const startedAtMs = Date.now();
-  const requestUrl = new URL(request.url ?? "/v1/responses", "http://localhost");
+  const requestUrl = new URL(request.url ?? "/backend-api/codex/responses", "http://localhost");
+  const requestPath = requestUrl.pathname.replace(/\/+$/, "") || "/";
   const requestedServiceTier = deps.resolveFastServiceTierForBilling(
     requestUrl.searchParams.get("service_tier"),
   );
@@ -228,6 +230,7 @@ export async function prepareResponsesWebSocketProxyContext(
     return {
       apiKeyId: apiKey.id,
       ownerUserId,
+      requestPath,
       serviceTier: requestedServiceTier,
       startedAtMs,
       upstreamSocket: upstreamConnection.upstreamSocket,
@@ -290,7 +293,7 @@ export function setupResponsesWebSocketProxy(
     failureMessage: string,
     reservationId = getCurrentTurnIntentId(),
   ) => {
-    if (!deps.shouldPersistModelResponseLog("/v1/responses")) {
+    if (!deps.shouldPersistModelResponseLog(context.requestPath)) {
       deps.cancelResponseRequestReservation(reservationId);
       return;
     }
@@ -305,7 +308,7 @@ export function setupResponsesWebSocketProxy(
         isFinal: false,
         streamEndReason:
           closeSource ?? "responses_websocket_closed_without_completed",
-        path: "/v1/responses",
+        path: context.requestPath,
         modelId: lastRequestedModel,
         serviceTier: context.serviceTier,
         statusCode: closeCode ?? 502,
@@ -357,7 +360,7 @@ export function setupResponsesWebSocketProxy(
       billedModelId,
     );
     const settlementId = responseId || reservationId;
-    if (!deps.shouldPersistModelResponseLog("/v1/responses")) {
+    if (!deps.shouldPersistModelResponseLog(context.requestPath)) {
       deps.cancelResponseRequestReservation(reservationId);
       return { settlementId, cost, totalTokens };
     }
@@ -370,7 +373,7 @@ export function setupResponsesWebSocketProxy(
       charge: typeof cost === "bigint" && cost > 0n ? cost : 0n,
       isFinal: terminalStatus === "completed",
       streamEndReason: terminalStatus,
-      path: "/v1/responses",
+      path: context.requestPath,
       modelId,
       serviceTier: resolvedServiceTier.serviceTier,
       statusCode: 200,

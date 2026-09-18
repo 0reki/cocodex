@@ -67,14 +67,21 @@ import {
 import {
   applyServiceTierBillingMultiplier,
   generateApiKeyValue,
+  isCodexBackendApiPath,
+  isCodexResponsesPath,
+  isPublicCodexClientPath,
   loadBackendEnv,
   resolveFastServiceTierForBilling,
   resolveOpenAIUpstreamAccountId,
 } from "./server/utils/index.ts";
+import { createCodexClientSessionStore } from "./server/services/auth/codex-client-session.ts";
 import {
   registerAccountMaintenanceRoutes,
   registerAdminRoutes,
   registerPortalAuthRoutes,
+  registerCodexClientPortalRoutes,
+  registerCodexClientProtocolRoutes,
+  registerCodexBackendForwardRoutes,
   registerPublicOpenAIRoutes,
   registerImageRoutes,
   registerRequestLogRoutes,
@@ -161,6 +168,7 @@ const {
   postCodexResponsesWithTokenRefresh,
   postCodexImageWithTokenRefresh,
   postCodexSearchWithTokenRefresh,
+  forwardCodexBackendWithTokenRefresh,
   connectResponsesWebSocketProxyUpstream,
   getCodexDailyWorkspaceUsageWithTokenRefresh,
   getCodexModelsWithTokenRefresh,
@@ -197,6 +205,10 @@ const {
 });
 
 const app = express();
+const CODEX_CLIENT_API_KEY_NAME = "Codex client";
+const codexClientSessions = createCodexClientSessionStore({
+  cacheApiKey,
+});
 const port = Number(process.env.PORT ?? 53141);
 const host = process.env.HOST?.trim() || "localhost";
 const JSON_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -224,6 +236,17 @@ const isImageApiPath = (path: string) =>
 
 app.use(cors());
 app.use((req, res, next) => {
+  if (isCodexBackendApiPath(req.path)) {
+    next();
+    return;
+  }
+  express.urlencoded({ extended: false })(req, res, next);
+});
+app.use((req, res, next) => {
+  if (isCodexBackendApiPath(req.path)) {
+    next();
+    return;
+  }
   const encodings = parseContentEncodingHeader(req.headers["content-encoding"]);
   const isZstdOnly = encodings.length === 1 && encodings[0] === "zstd";
   if (!isZstdOnly) {
@@ -360,12 +383,17 @@ app.use((req, res, next) => {
 
 registerSetupRoutes(app);
 registerPortalAuthRoutes(app);
+registerCodexClientProtocolRoutes(app, {
+  sessions: codexClientSessions,
+});
 
 app.use(async (req, res, next) => {
   try {
     if (
       req.path.startsWith("/v1/") ||
-      req.path === "/health"
+      req.path.startsWith("/backend-api/") ||
+      req.path === "/health" ||
+      isPublicCodexClientPath(req.path)
     ) {
       next();
       return;
@@ -392,7 +420,8 @@ app.use(async (req, res, next) => {
       req.path.startsWith("/api/api-keys/") ||
       req.path === "/api/my-usage" ||
       req.path === "/api/request-logs" ||
-      req.path.startsWith("/api/request-logs/");
+      req.path.startsWith("/api/request-logs/") ||
+      req.path.startsWith("/api/codex-client/");
     if (isApiPath && !nonAdminAllowed && principal.role !== "admin") {
       res.status(403).json({
         error: {
@@ -506,6 +535,34 @@ registerSearchRoutes(app, {
   cancelResponseRequestReservation,
 });
 
+registerCodexBackendForwardRoutes(app, {
+  createRequestAbortContext,
+  resolveFastServiceTierForBilling,
+  authenticateApiKeyWithReason,
+  getApiKeyAuthErrorDetail,
+  persistShortCircuitErrorLog,
+  isApiKeyQuotaExceeded,
+  persistQuotaExceededLog,
+  isApiKeyBoundToUser,
+  tryReserveResponseRequest,
+  getAssignedSourceAccount,
+  getOpenAIApiRuntimeConfig,
+  resolveOpenAIUpstreamAccountId,
+  forwardCodexBackendWithTokenRefresh,
+  extractErrorInfo,
+  isAbortError,
+  buildPassthroughUpstreamError,
+  shouldPersistModelResponseLog,
+  extractResponseUsage,
+  applyServiceTierBillingMultiplier,
+  estimateUsageCost,
+  resolveUsagePricingModelId,
+  enqueueResponseSettlement,
+  cancelResponseRequestReservation,
+  ensureUserUpstreamQuota,
+  settleUserUpstreamQuota,
+});
+
 registerAdminRoutes(app, {
   listOpenAIAccountsPage,
   getPortalPrincipalFromLocals,
@@ -527,6 +584,28 @@ registerAdminRoutes(app, {
   upsertOpenAIAccount,
   requestCodexDeviceCode,
   pollCodexDeviceAuth,
+});
+
+registerCodexClientPortalRoutes(app, {
+  sessions: codexClientSessions,
+  getPortalPrincipalFromLocals,
+  getPortalUserById,
+  resolveOwnedApiKey: async (user) => {
+    const keys = await listApiKeys({ ownerUserId: user.id });
+    const existing =
+      keys.find((item) => item.name === CODEX_CLIENT_API_KEY_NAME) ?? keys[0];
+    if (existing) {
+      cacheApiKey(existing);
+      return existing;
+    }
+    const created = await createApiKey({
+      ownerUserId: user.id,
+      name: CODEX_CLIENT_API_KEY_NAME,
+      apiKey: generateApiKeyValue(),
+    });
+    cacheApiKey(created);
+    return created;
+  },
 });
 
 registerUserRoutes(app, {
@@ -629,8 +708,8 @@ app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
 const httpServer = createServer(app);
 
 httpServer.on("upgrade", (request, socket, head) => {
-  const pathname = parseUpgradePathname(request);
-  if (pathname !== "/v1/responses") {
+  const pathname = parseUpgradePathname(request) ?? "";
+  if (!isCodexResponsesPath(pathname)) {
     sendWebSocketUpgradeErrorResponse(socket, 404, {
       error: {
         message: "Not found",

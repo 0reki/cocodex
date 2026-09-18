@@ -10,6 +10,7 @@ export {
   getCodexDailyWorkspaceUsage,
   getCodexUsage,
 } from "./internal/usage.ts"
+export { forwardCodexBackendRequest } from "./internal/backend-proxy.ts"
 export { postCodexResponses } from "./internal/responses-stream.ts"
 export { connectCodexResponsesWebSocket } from "./internal/responses-websocket.ts"
 export type {
@@ -22,6 +23,7 @@ export type {
   CodexResponsesWebSocketConnection,
   CodexTokenRefreshResponse,
   ConnectCodexResponsesWebSocketOptions,
+  ForwardCodexBackendRequestOptions,
   GetCodexDailyWorkspaceUsageOptions,
   GetCodexModelsOptions,
   GetCodexUsageOptions,

@@ -1,3 +1,4 @@
+export const CHATGPT_BACKEND_ORIGIN = "https://chatgpt.com";
 export const OPENAI_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
 export const CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CHATGPT_CODEX_MODELS_URL =

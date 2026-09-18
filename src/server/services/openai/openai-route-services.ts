@@ -75,15 +75,25 @@ export async function prepareOpenAIRouteRequest(args: {
   model: string | null;
   startedAtMs: number;
   billable?: boolean;
+  requestPath?: string;
 }) {
-  const { req, res, deps, intentId, model, startedAtMs, billable = true } = args;
+  const {
+    req,
+    res,
+    deps,
+    intentId,
+    model,
+    startedAtMs,
+    billable = true,
+    requestPath = req.path,
+  } = args;
 
   const { apiKey, reason: apiKeyAuthFailureReason } =
     await deps.authenticateApiKeyWithReason(req);
   if (!apiKey) {
     const authError = deps.getApiKeyAuthErrorDetail(apiKeyAuthFailureReason);
     await deps.persistShortCircuitErrorLog({
-      requestPath: req.path,
+      requestPath,
       intentId,
       model,
       keyId: null,
@@ -104,7 +114,7 @@ export async function prepareOpenAIRouteRequest(args: {
 
   if (billable && deps.isApiKeyQuotaExceeded(apiKey)) {
     await deps.persistQuotaExceededLog({
-      requestPath: req.path,
+      requestPath,
       intentId,
       model,
       keyId: apiKey.id,
@@ -127,7 +137,7 @@ export async function prepareOpenAIRouteRequest(args: {
 
   if (!deps.isApiKeyBoundToUser(apiKey)) {
     await deps.persistShortCircuitErrorLog({
-      requestPath: req.path,
+      requestPath,
       intentId,
       model,
       keyId: apiKey.id,

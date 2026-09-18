@@ -77,6 +77,19 @@ type OpenAIApiModule = {
     userAgent?: string;
     signal?: AbortSignal;
   }) => Promise<Response>;
+  forwardCodexBackendRequest?: (args: {
+    accessToken: string;
+    accountId?: string;
+    version: string;
+    sessionId: string;
+    method: string;
+    path: string;
+    query?: string;
+    requestHeaders?: HeadersInit;
+    body?: Buffer | Uint8Array | string | null;
+    userAgent?: string;
+    signal?: AbortSignal;
+  }) => Promise<Response>;
   connectCodexResponsesWebSocket?: (args: {
     accessToken: string;
     accountId?: string;
@@ -355,6 +368,50 @@ export function createUpstreamRequestServices(deps: {
     return callUpstream(refreshedToken);
   }
 
+  async function forwardCodexBackendWithTokenRefresh(params: {
+    module: OpenAIApiModule;
+    account: UpstreamSourceAccountRecord;
+    runtimeConfig: RuntimeConfig;
+    method: string;
+    path: string;
+    query?: string;
+    requestHeaders?: HeadersInit;
+    body?: Buffer | Uint8Array | string | null;
+    signal?: AbortSignal;
+  }): Promise<Response> {
+    const { module, account, runtimeConfig } = params;
+    if (typeof module.forwardCodexBackendRequest !== "function") {
+      throw new Error(
+        "forwardCodexBackendRequest is not exported from the internal OpenAI module",
+      );
+    }
+    const { accessToken, accountId } = requireActiveAccount(account);
+    const sessionId = deps.randomUUID();
+    const callUpstream = (token: string) =>
+      module.forwardCodexBackendRequest!({
+        accessToken: token,
+        accountId,
+        version: runtimeConfig.clientVersion,
+        sessionId,
+        method: params.method,
+        path: params.path,
+        query: params.query,
+        requestHeaders: params.requestHeaders,
+        body: params.body,
+        userAgent: runtimeConfig.userAgent,
+        signal: params.signal,
+      });
+    const response = await callUpstream(accessToken);
+    if (!(await shouldRefreshResponse(response))) return response;
+    const refreshedToken = await refreshAccessToken({
+      module,
+      account,
+      runtimeConfig,
+      failedAccessToken: accessToken,
+    });
+    return callUpstream(refreshedToken);
+  }
+
   async function getCodexModelsWithTokenRefresh(params: {
     module: OpenAIApiModule;
     account: UpstreamSourceAccountRecord;
@@ -617,6 +674,7 @@ export function createUpstreamRequestServices(deps: {
     postCodexImageWithTokenRefresh,
     postCodexSearchWithTokenRefresh,
     postCodexResponsesWithTokenRefresh,
+    forwardCodexBackendWithTokenRefresh,
     connectResponsesWebSocketProxyUpstream,
   };
 }

@@ -26,3 +26,6 @@ pnpm-debug.log*
 # Misc
 .DS_Store
 *.pem
+
+codex/
+sub2api/

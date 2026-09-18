@@ -1,6 +1,6 @@
 # CoCodex Backend
 
-CoCodex Backend 是一个独立的 Express 服务，用于管理 OpenAI 账号并提供 OpenAI 兼容接口。可以保存多个账号，每个用户必须由管理员分配一个上游账号；未分配时不能使用代理接口。
+CoCodex Backend 是一个独立的 Express 服务，用于管理 OpenAI 账号，并以伪订阅方式接入 Codex 客户端。客户端把 ChatGPT / Codex 的 base URL 指到本网关后，按订阅协议访问 `/backend-api/*`；网关校验用户身份、换成已分配上游账号的 Token，再原样转发到 `https://chatgpt.com`。每个用户必须由管理员分配一个上游账号；未分配时不能使用代理接口。
 
 仓库不包含前端、Cloud Mail、Team 账号、第三方 OAuth、Addon、Inbox、翻译、上游代理池或音频转写功能。
 
@@ -71,23 +71,24 @@ pnpm e2e
 `E2E_SOURCE_FIXTURE_EMAIL`，脚本会只读获取该账号的 Account ID、ID Token、Access
 Token 和 Refresh Token，避免重复填充测试凭据。
 
-## OpenAI 兼容接口
+## 伪订阅接入
 
-- `GET /v1/models`
-- `POST /v1/responses`
-- `WS /v1/responses`
-- `POST /v1/images/generations`
-- `POST /v1/images/edits`
+Codex 客户端将 ChatGPT base URL 换成网关地址后，会按官方订阅路径发请求：
 
-服务保留 Responses 协议适配，包括 Codex 请求体规范化。
-`POST /v1/responses` 仅接受 `stream: true`，并以 SSE 形式透传上游事件；不提供
-非流式结果组装。客户端端到端请求头和 WebSocket 查询参数会继续转发，服务只
-替换上游 `Authorization`、统一生成 Codex `User-Agent`，并设置当前用户获分配账号对应的 `chatgpt-account-id`。计费和
-请求日志旁路观察上游响应。
+- `GET|POST /backend-api/*`：原样转发到 `https://chatgpt.com` 同名路径
+- `WS /backend-api/codex/responses`：原样转发到上游 WebSocket
 
-图像接口适配 Codex 客户端的 JSON 请求格式，并转发到订阅账号的 Codex Images
-接口。图像生成与编辑使用非流式 JSON 响应；图片数据只向客户端透传，不写入日志。
-图像请求体上限为 128 MiB，其他 JSON 请求体上限仍为 10 MiB。
+登录走网关自己的设备码 / OAuth，不把上游 ChatGPT 账号交给客户端：
+
+- `POST /api/accounts/deviceauth/usercode`
+- `POST /api/accounts/deviceauth/token`
+- `GET /oauth/authorize`
+- `POST /oauth/token`
+- `POST /oauth/revoke`
+
+成功后下发的 `access_token` 是该用户的 API Key。后续 `/backend-api` 请求用这个 Bearer 鉴权，网关再换成已分配上游账号的 `Authorization` 和 `chatgpt-account-id`。请求体、查询参数和客户端业务头按原样转发，不改写 Responses / Images / Search 协议，也不再把 `/backend-api/codex/*` 映射到 `/v1/*`。
+
+`/backend-api` 请求体上限为 128 MiB，并保留原始 `content-encoding`（包括 zstd）。服务只替换上游认证相关头，并统一生成 Codex `User-Agent`。`/backend-api/codex/responses` 的 HTTP 与 WebSocket 都旁路观察上游事件做计费和额度结算；Images / Search 记日志但不扣费。
 
 ## 管理接口
 
@@ -162,7 +163,7 @@ ChatGPT 安全设置或工作区权限中启用。原 `POST /api/openai-accounts
 服务不对限流、网络错误或其他上游失败重试。仅当同一分配账号收到上游 `401` 时，
 使用保存的 OAuth Refresh Token 刷新认证并重放一次原请求；不会切换账号。
 API Key、用户余额、上游分配和额度窗口会在进程开始监听前载入内存；通过管理接口
-修改后会同步刷新相应状态。`/v1/responses` 的 HTTP 与 WebSocket 准入只读取内存，
+修改后会同步刷新相应状态。`/backend-api` 与 WebSocket 准入只读取内存，
 不会查询 PostgreSQL。绕过管理接口直接修改数据库后，需要重启服务以重新载入状态。
 单机部署中的并发 Token 刷新共享同一个刷新任务。
 
@@ -230,8 +231,7 @@ GPT-5.6 系列和 GPT-5.5 的额度消耗按
 
 `OPENAI_MODEL_PRICING_JSON` 可按 `slug` 覆盖或补充内置美元价格。Daybreak 价格按
 请求中的 `access_programs.cyber` 选择；GPT-Image-2 按 usage 中的 text/image
-Token 分类结算。`GET /v1/models` 实时读取 Codex 上游的
-`/backend-api/codex/models`，不依赖本地模型配置，也不维护模型刷新任务。
+Token 分类结算。模型列表由 Codex 客户端直接请求网关的 `/backend-api/codex/models`，原样转发上游结果，不依赖本地模型配置，也不维护模型刷新任务。
 服务不限制用户 RPM 或并发数。
 
 Responses terminal event 会先写入并同步本地 WAL，再下发客户端和异步批量提交
