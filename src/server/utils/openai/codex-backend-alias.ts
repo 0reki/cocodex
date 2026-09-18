@@ -1,6 +1,5 @@
 const CODEX_RESPONSES_PATHS = new Set([
   "/backend-api/codex/responses",
-  "/v1/responses",
 ]);
 
 function normalizePathname(pathname: string | null | undefined) {

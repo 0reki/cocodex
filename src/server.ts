@@ -76,6 +76,10 @@ import {
 } from "./server/utils/index.ts";
 import { createCodexClientSessionStore } from "./server/services/auth/codex-client-session.ts";
 import {
+  startNodeIpcServer,
+  type IpcServerInstance,
+} from "./server/ipc/uds-server.ts";
+import {
   registerAccountMaintenanceRoutes,
   registerAdminRoutes,
   registerPortalAuthRoutes,
@@ -83,10 +87,7 @@ import {
   registerCodexClientProtocolRoutes,
   registerCodexBackendForwardRoutes,
   registerPublicOpenAIRoutes,
-  registerImageRoutes,
   registerRequestLogRoutes,
-  registerResponsesRoutes,
-  registerSearchRoutes,
   registerSetupRoutes,
   registerUserRoutes,
   ResponsesWebSocketUpgradeError,
@@ -231,9 +232,6 @@ responsesWebSocketServer.on("headers", (headers, request) => {
   }
 });
 
-const isImageApiPath = (path: string) =>
-  path === "/v1/images/generations" || path === "/v1/images/edits";
-
 app.use(cors());
 app.use((req, res, next) => {
   if (isCodexBackendApiPath(req.path)) {
@@ -250,11 +248,7 @@ app.use((req, res, next) => {
   const encodings = parseContentEncodingHeader(req.headers["content-encoding"]);
   const isZstdOnly = encodings.length === 1 && encodings[0] === "zstd";
   if (!isZstdOnly) {
-    (isImageApiPath(req.path) ? imageJsonParser : defaultJsonParser)(
-      req,
-      res,
-      next,
-    );
+    defaultJsonParser(req, res, next);
     return;
   }
 
@@ -274,9 +268,7 @@ app.use((req, res, next) => {
   }
 
   void (async () => {
-    const bodyLimitBytes = isImageApiPath(req.path)
-      ? IMAGE_JSON_BODY_LIMIT_BYTES
-      : JSON_BODY_LIMIT_BYTES;
+    const bodyLimitBytes = JSON_BODY_LIMIT_BYTES;
     const compressed = await readRequestBodyBuffer(req, bodyLimitBytes);
     const decompressed = await zstdDecompressBuffer(compressed, bodyLimitBytes);
     if (decompressed.byteLength > bodyLimitBytes) {
@@ -344,7 +336,7 @@ app.use((req, res, next) => {
   const originalJson = res.json.bind(res);
   res.json = ((body: unknown) => {
     if (
-      req.path.startsWith("/v1/") &&
+      req.path.startsWith("/backend-api/") &&
       res.statusCode >= 400 &&
       isRecord(body)
     ) {
@@ -390,7 +382,6 @@ registerCodexClientProtocolRoutes(app, {
 app.use(async (req, res, next) => {
   try {
     if (
-      req.path.startsWith("/v1/") ||
       req.path.startsWith("/backend-api/") ||
       req.path === "/health" ||
       isPublicCodexClientPath(req.path)
@@ -446,93 +437,7 @@ app.use(async (req, res, next) => {
 
 registerPublicOpenAIRoutes(app, {
   ensureDatabaseSchema,
-  authenticateApiKeyWithReason,
-  getApiKeyAuthErrorDetail,
-  isApiKeyBoundToUser,
-  getAssignedSourceAccount,
-  resolveOpenAIUpstreamAccountId,
-  getOpenAIApiRuntimeConfig,
-  getCodexModelsWithTokenRefresh,
-  buildOpenAIModelsList,
-  extractErrorInfo,
-  buildPassthroughUpstreamError,
   getResponseSettlementQueueHealth,
-});
-
-registerResponsesRoutes(app, {
-  createRequestAbortContext,
-  resolveFastServiceTierForBilling,
-  authenticateApiKeyWithReason,
-  getApiKeyAuthErrorDetail,
-  persistShortCircuitErrorLog,
-  isApiKeyQuotaExceeded,
-  persistQuotaExceededLog,
-  isApiKeyBoundToUser,
-  tryReserveResponseRequest,
-  getAssignedSourceAccount,
-  getOpenAIApiRuntimeConfig,
-  resolveOpenAIUpstreamAccountId,
-  postCodexResponsesWithTokenRefresh,
-  extractErrorInfo,
-  isAbortError,
-  buildPassthroughUpstreamError,
-  shouldPersistModelResponseLog,
-  extractResponseUsage,
-  applyServiceTierBillingMultiplier,
-  estimateUsageCost,
-  resolveUsagePricingModelId,
-  enqueueResponseSettlement,
-  cancelResponseRequestReservation,
-  ensureUserUpstreamQuota,
-  settleUserUpstreamQuota,
-});
-
-registerImageRoutes(app, {
-  createRequestAbortContext,
-  authenticateApiKeyWithReason,
-  getApiKeyAuthErrorDetail,
-  persistShortCircuitErrorLog,
-  isApiKeyQuotaExceeded,
-  persistQuotaExceededLog,
-  isApiKeyBoundToUser,
-  tryReserveResponseRequest,
-  getAssignedSourceAccount,
-  getOpenAIApiRuntimeConfig,
-  resolveOpenAIUpstreamAccountId,
-  postCodexImageWithTokenRefresh,
-  extractErrorInfo,
-  isAbortError,
-  buildPassthroughUpstreamError,
-  shouldPersistModelResponseLog,
-  extractResponseUsage,
-  applyServiceTierBillingMultiplier,
-  estimateUsageCost,
-  enqueueResponseSettlement,
-  cancelResponseRequestReservation,
-});
-
-registerSearchRoutes(app, {
-  createRequestAbortContext,
-  authenticateApiKeyWithReason,
-  getApiKeyAuthErrorDetail,
-  persistShortCircuitErrorLog,
-  isApiKeyQuotaExceeded,
-  persistQuotaExceededLog,
-  isApiKeyBoundToUser,
-  tryReserveResponseRequest,
-  getAssignedSourceAccount,
-  getOpenAIApiRuntimeConfig,
-  resolveOpenAIUpstreamAccountId,
-  postCodexSearchWithTokenRefresh,
-  extractErrorInfo,
-  isAbortError,
-  buildPassthroughUpstreamError,
-  shouldPersistModelResponseLog,
-  extractResponseUsage,
-  applyServiceTierBillingMultiplier,
-  estimateUsageCost,
-  enqueueResponseSettlement,
-  cancelResponseRequestReservation,
 });
 
 registerCodexBackendForwardRoutes(app, {
@@ -843,6 +748,8 @@ httpServer.on("upgrade", (request, socket, head) => {
   });
 });
 
+let ipcServerInstance: IpcServerInstance | null = null;
+
 async function startServer() {
   if (!process.env.DATABASE_URL?.trim()) {
     await initializeResponseSettlementServices();
@@ -873,6 +780,12 @@ async function startServer() {
     });
     hydrateResponseAuthState({ apiKeys, users });
     await initializeResponseSettlementServices();
+
+    try {
+      ipcServerInstance = await startNodeIpcServer({ cacheApiKey });
+    } catch (ipcErr) {
+      console.warn("[backend] failed to start UDS IPC server:", ipcErr);
+    }
   }
   httpServer.listen(port, host, () => {
     console.log(`[backend] listening at http://${host}:${port}`);
@@ -896,6 +809,13 @@ async function shutdown(signal: NodeJS.Signals) {
     );
   }
   await closePromise;
+  if (ipcServerInstance) {
+    try {
+      await ipcServerInstance.close();
+    } catch {
+      // ignore
+    }
+  }
   try {
     await Promise.all([
       flushAllResponseSettlements(),

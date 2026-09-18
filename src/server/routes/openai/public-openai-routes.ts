@@ -1,27 +1,13 @@
 import type { Express, Request, Response } from "express";
 import type { ensureDatabaseSchema } from "../../../database/index.ts";
-import * as openaiApiModule from "../../../openai-api/index.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
-import {
-  getReadyAssignedSourceAccount,
-  type ActiveSourceAccountDependencies,
-} from "../../services/openai/openai-route-services.ts";
 
-type PublicOpenAIRouteDependencies = ActiveSourceAccountDependencies &
-  Pick<
-    ServerServices,
-    | "authenticateApiKeyWithReason"
-    | "getApiKeyAuthErrorDetail"
-    | "isApiKeyBoundToUser"
-    | "getOpenAIApiRuntimeConfig"
-    | "getCodexModelsWithTokenRefresh"
-    | "buildOpenAIModelsList"
-    | "extractErrorInfo"
-    | "buildPassthroughUpstreamError"
-    | "getResponseSettlementQueueHealth"
-  > & {
-    ensureDatabaseSchema: typeof ensureDatabaseSchema;
-  };
+type PublicOpenAIRouteDependencies = Pick<
+  ServerServices,
+  "getResponseSettlementQueueHealth"
+> & {
+  ensureDatabaseSchema: typeof ensureDatabaseSchema;
+};
 
 export function registerPublicOpenAIRoutes(
   app: Express,
@@ -43,79 +29,6 @@ export function registerPublicOpenAIRoutes(
       res.status(500).json({
         ok: false,
         error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
-
-  app.get("/v1/models", async (req: Request, res: Response) => {
-    try {
-      const { apiKey, reason } = await deps.authenticateApiKeyWithReason(req);
-      if (!apiKey) {
-        const authError = deps.getApiKeyAuthErrorDetail(reason);
-        res.status(401).json({
-          error: {
-            message: authError.message,
-            type: "invalid_request_error",
-            code: authError.code,
-          },
-        });
-        return;
-      }
-
-      if (!deps.isApiKeyBoundToUser(apiKey)) {
-        res.status(403).json({
-          error: {
-            message: "API key must be bound to a user",
-            type: "invalid_request_error",
-            code: "api_key_owner_missing",
-          },
-        });
-        return;
-      }
-      const assignedAccount = await getReadyAssignedSourceAccount({
-        deps,
-        ownerUserId: apiKey.ownerUserId,
-      });
-      if (!assignedAccount.ok) {
-        res.status(403).json({
-          error: {
-            message: "No upstream account assigned",
-            type: "invalid_request_error",
-            code: "upstream_account_unassigned",
-          },
-        });
-        return;
-      }
-
-      const runtimeConfig = await deps.getOpenAIApiRuntimeConfig();
-      const upstream = await deps.getCodexModelsWithTokenRefresh({
-        module: openaiApiModule,
-        account: assignedAccount.sourceAccount,
-        runtimeConfig,
-      });
-      const models = (Array.isArray(upstream.models) ? upstream.models : []).map(
-        (model) =>
-          // Spark is available through our subscription proxy despite its public API flag.
-          model.slug === "gpt-5.3-codex-spark"
-            ? { ...model, supported_in_api: true }
-            : model,
-      );
-      res.json({
-        ...upstream,
-        models,
-        object: "list",
-        data: deps.buildOpenAIModelsList(models),
-      });
-    } catch (error) {
-      const errorInfo = deps.extractErrorInfo(error);
-      const passthrough = deps.buildPassthroughUpstreamError({
-        status: errorInfo.status,
-        errorPayload: errorInfo.errorPayload,
-        fallbackCode: "models_list_failed",
-        fallbackMessage: errorInfo.message ?? "Failed to list models",
-      });
-      res.status(passthrough.status).json({
-        error: passthrough.error,
       });
     }
   });

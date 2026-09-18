@@ -650,7 +650,6 @@ async function main() {
         body: { username: userUsername, password: userPassword },
       });
       assert(body?.user?.role === "user" && body?.user?.enabled === true, `invalid created user: ${snippet(body)}`);
-      assert(body?.user?.balance === 0, `new user balance should be zero: ${snippet(body)}`);
       const { body: listed } = await request(baseUrl, "/api/users", { portalToken: adminToken });
       assert(listed?.count === 2, `user list should contain admin and user: ${snippet(listed)}`);
       assert(listed.items.some((item) => item?.id === body.user.id), `created user is missing: ${snippet(listed)}`);

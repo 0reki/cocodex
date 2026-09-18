@@ -10,9 +10,6 @@ export { registerRequestLogRoutes } from "./request-log-routes.ts";
 export { registerSetupRoutes } from "./setup-routes.ts";
 export { registerPublicOpenAIRoutes } from "./openai/public-openai-routes.ts";
 export { registerCodexBackendForwardRoutes } from "./openai/codex-backend-forward-routes.ts";
-export { registerImageRoutes } from "./openai/image-routes.ts";
-export { registerSearchRoutes } from "./openai/search-routes.ts";
-export { registerResponsesRoutes } from "./openai/responses-routes.ts";
 export {
   ResponsesWebSocketUpgradeError,
   prepareResponsesWebSocketProxyContext,

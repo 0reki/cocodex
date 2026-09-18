@@ -29,3 +29,5 @@ pnpm-debug.log*
 
 codex/
 sub2api/
+crates/proxy/target
+target/

@@ -21,7 +21,8 @@ function queryField(req: Request, key: string) {
 }
 
 function frontendLoginRedirect(nextPath: string) {
-  const base = (process.env.PUBLIC_APP_URL ?? "").trim().replace(/\/+$/, "");
+  const configured = (process.env.PUBLIC_APP_URL ?? "").trim().replace(/\/+$/, "");
+  const base = configured || (process.env.NODE_ENV === "production" ? "" : "http://localhost:53332");
   const loginPath = `/login?next=${encodeURIComponent(nextPath)}`;
   return base ? `${base}${loginPath}` : loginPath;
 }
