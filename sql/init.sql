@@ -50,7 +50,9 @@ CREATE INDEX IF NOT EXISTS idx_portal_user_invitations_available
 
 CREATE TABLE IF NOT EXISTS openai_accounts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email TEXT NOT NULL UNIQUE,
+  -- One ChatGPT account logs in once per platform: same email and account_id
+  -- across those rows, so email is not unique; (account_id, platform) is.
+  email TEXT NOT NULL,
   account_id TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'inactive',
   platform VARCHAR(32) NOT NULL DEFAULT 'all',
@@ -63,6 +65,14 @@ CREATE TABLE IF NOT EXISTS openai_accounts (
 
 ALTER TABLE openai_accounts
   ADD COLUMN IF NOT EXISTS platform VARCHAR(32) NOT NULL DEFAULT 'all';
+
+-- The same account may hold one login per platform, so email is no longer
+-- unique; uniqueness is (account_id, platform).
+ALTER TABLE openai_accounts
+  DROP CONSTRAINT IF EXISTS openai_accounts_email_key;
+DROP INDEX IF EXISTS openai_accounts_email_key;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_openai_accounts_account_platform
+  ON openai_accounts (account_id, (LOWER(TRIM(COALESCE(platform, 'all')))));
 
 CREATE INDEX IF NOT EXISTS idx_openai_accounts_account_id
   ON openai_accounts (account_id);

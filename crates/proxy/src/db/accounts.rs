@@ -246,28 +246,35 @@ pub async fn disable_many(pool: &PgPool, emails: &[String]) -> Result<u64, sqlx:
 /// Makes `email` the active login of its platform, demoting the previous one.
 pub async fn activate(pool: &PgPool, email: &str) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let platform: Option<Option<String>> =
-        sqlx::query_scalar("SELECT platform FROM openai_accounts WHERE email = $1 FOR UPDATE")
-            .bind(email)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some(platform) = platform else {
+    // An account spans one row per platform; activate them all and enforce the
+    // single-active-per-platform rule against other accounts on those platforms.
+    let platforms: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT LOWER(TRIM(COALESCE(platform, 'all')))
+        FROM openai_accounts WHERE LOWER(email) = LOWER($1)
+        FOR UPDATE
+        "#,
+    )
+    .bind(email)
+    .fetch_all(&mut *tx)
+    .await?;
+    if platforms.is_empty() {
         return Ok(false);
-    };
+    }
     sqlx::query(
         r#"
         UPDATE openai_accounts
         SET status = 'inactive'
         WHERE LOWER(TRIM(status)) = 'active'
-          AND email <> $1
-          AND LOWER(TRIM(COALESCE(platform, 'all'))) = LOWER(TRIM(COALESCE($2, 'all')))
+          AND LOWER(email) <> LOWER($1)
+          AND LOWER(TRIM(COALESCE(platform, 'all'))) = ANY($2)
         "#,
     )
     .bind(email)
-    .bind(platform)
+    .bind(&platforms)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE openai_accounts SET status = 'active' WHERE email = $1")
+    sqlx::query("UPDATE openai_accounts SET status = 'active' WHERE LOWER(email) = LOWER($1)")
         .bind(email)
         .execute(&mut *tx)
         .await?;
@@ -285,26 +292,31 @@ pub struct UpsertInput {
     pub refresh_token: String,
 }
 
-/// Inserts or updates a login by email. Without an explicit status, a new
+/// Inserts or updates a login keyed by (account_id, platform). Without an
+/// explicit status, a new
 /// login becomes active only if its platform has no active login yet.
 pub async fn upsert(pool: &PgPool, input: UpsertInput) -> Result<Account, sqlx::Error> {
     let email = input.email.trim().to_lowercase();
+    let account_id = input.account_id.trim().to_string();
+    // One login per (account_id, platform): the same account may be logged in
+    // separately on each platform, so the row is keyed by both, not by email.
+    let platform = input.platform.unwrap_or("all");
     let mut tx = pool.begin().await?;
-    let existing: Option<(Option<String>, Option<String>)> =
-        sqlx::query_as("SELECT status, platform FROM openai_accounts WHERE email = $1 FOR UPDATE")
-            .bind(&email)
-            .fetch_optional(&mut *tx)
-            .await?;
+    let existing: Option<Option<String>> = sqlx::query_scalar(
+        r#"
+        SELECT status FROM openai_accounts
+        WHERE account_id = $1 AND LOWER(TRIM(COALESCE(platform, 'all'))) = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(&account_id)
+    .bind(platform)
+    .fetch_optional(&mut *tx)
+    .await?;
 
-    let platform = input.platform.unwrap_or_else(|| {
-        existing
-            .as_ref()
-            .and_then(|(_, platform)| platform.as_deref().and_then(normalize_platform))
-            .unwrap_or("all")
-    });
     let status = match (input.status, &existing) {
         (Some(status), _) => status,
-        (None, Some((status, _))) => status
+        (None, Some(status)) => status
             .as_deref()
             .and_then(normalize_status)
             .unwrap_or("inactive"),
@@ -326,16 +338,17 @@ pub async fn upsert(pool: &PgPool, input: UpsertInput) -> Result<Account, sqlx::
     };
 
     if status == "active" {
+        // At most one active login per platform, across accounts.
         sqlx::query(
             r#"
             UPDATE openai_accounts
             SET status = 'inactive'
             WHERE LOWER(TRIM(status)) = 'active'
-              AND email <> $1
+              AND account_id <> $1
               AND LOWER(TRIM(COALESCE(platform, 'all'))) = $2
             "#,
         )
-        .bind(&email)
+        .bind(&account_id)
         .bind(platform)
         .execute(&mut *tx)
         .await?;
@@ -347,10 +360,9 @@ pub async fn upsert(pool: &PgPool, input: UpsertInput) -> Result<Account, sqlx::
           email, account_id, status, platform, id_token, access_token, refresh_token
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT (email) DO UPDATE SET
-          account_id = EXCLUDED.account_id,
+        ON CONFLICT (account_id, (LOWER(TRIM(COALESCE(platform, 'all'))))) DO UPDATE SET
+          email = EXCLUDED.email,
           status = EXCLUDED.status,
-          platform = EXCLUDED.platform,
           id_token = EXCLUDED.id_token,
           access_token = EXCLUDED.access_token,
           refresh_token = EXCLUDED.refresh_token
@@ -358,7 +370,7 @@ pub async fn upsert(pool: &PgPool, input: UpsertInput) -> Result<Account, sqlx::
         "#
     )))
     .bind(&email)
-    .bind(input.account_id.trim())
+    .bind(&account_id)
     .bind(status)
     .bind(platform)
     .bind(input.id_token.trim())
