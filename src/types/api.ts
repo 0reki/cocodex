@@ -145,6 +145,7 @@ export type MyUsageResponse = {
   users: PortalUser[];
   pools: {
     standard: UserQuotaPool;
-    spark: UserQuotaPool;
+    // The backend only returns pools it has; Spark may be absent.
+    spark?: UserQuotaPool;
   };
 };

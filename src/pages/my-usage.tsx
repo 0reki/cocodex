@@ -46,7 +46,7 @@ function QuotaRow({
   icon: LucideIcon;
 }) {
   const allocationByUser = new Map(
-    pool.members.map((member) => [member.ownerUserId, member]),
+    (pool.members ?? []).map((member) => [member.ownerUserId, member]),
   );
   const segments = users
     .map((user, index) => ({
@@ -166,12 +166,14 @@ export function MyUsagePage() {
               users={data.users}
               icon={Gauge}
             />
-            <QuotaRow
-              title="Spark"
-              pool={data.pools.spark}
-              users={data.users}
-              icon={PackagePlus}
-            />
+            {data.pools.spark ? (
+              <QuotaRow
+                title="Spark"
+                pool={data.pools.spark}
+                users={data.users}
+                icon={PackagePlus}
+              />
+            ) : null}
           </div>
         </>
       ) : null}
