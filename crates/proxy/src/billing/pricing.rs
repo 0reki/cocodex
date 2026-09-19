@@ -222,14 +222,9 @@ impl Pricing {
         } else {
             self.text_cost(model, info)
         };
-        let tool = info
-            .get("image_generation")
-            .and_then(Value::as_object)
-            .and_then(|usage| self.image_cost(usage));
-        match (primary, tool) {
-            (None, None) => None,
-            (a, b) => Some(Usd(a.unwrap_or_default().0 + b.unwrap_or_default().0)),
-        }
+        // Image tool usage (`image_generation`) is recorded but not billed:
+        // it is not part of the standard cost.
+        primary
     }
 }
 
@@ -287,15 +282,25 @@ mod tests {
     }
 
     #[test]
-    fn image_tool_usage_is_added() {
+    fn image_tool_usage_is_not_billed() {
         let pricing = Pricing::from_env().unwrap();
         let cost = pricing
             .estimate(
                 Some("gpt-5.4"),
-                &info(json!({ "output_tokens": 0, "image_generation": { "output_tokens": 1000 } })),
+                &info(
+                    json!({ "output_tokens": 1000, "image_generation": { "output_tokens": 1000 } }),
+                ),
             )
             .unwrap();
-        assert_eq!(cost.to_string(), "0.03000000");
+        assert_eq!(cost.to_string(), "0.01500000");
+        assert!(
+            pricing
+                .estimate(
+                    Some("gpt-5.4"),
+                    &info(json!({ "image_generation": { "output_tokens": 1000 } }))
+                )
+                .is_none()
+        );
     }
 
     #[test]
