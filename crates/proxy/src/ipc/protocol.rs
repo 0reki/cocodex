@@ -26,55 +26,6 @@ pub struct JsonRpcError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiKeyRecord {
-    pub id: String,
-    pub owner_user_id: Option<String>,
-    pub name: String,
-    pub api_key: String,
-    pub quota: Option<String>,
-    pub used: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifyApiKeyResult {
-    pub valid: bool,
-    #[serde(default)]
-    pub api_key: Option<ApiKeyRecord>,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortalUserRecord {
-    pub id: String,
-    pub username: String,
-    pub role: String,
-    pub enabled: bool,
-    #[serde(default)]
-    pub quota: Option<String>,
-    #[serde(default)]
-    pub used: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifyPortalTokenResult {
-    pub valid: bool,
-    #[serde(default)]
-    pub user: Option<PortalUserRecord>,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifyOwnerResult {
-    pub valid: bool,
-    #[serde(default)]
-    pub user: Option<PortalUserRecord>,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveUpstreamAccountResult {
     pub account_id: String,
     pub access_token: String,
@@ -82,25 +33,8 @@ pub struct ResolveUpstreamAccountResult {
     pub user_agent: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredRefreshToken {
-    pub email: String,
-    pub owner_user_id: String,
-    pub session_id: String,
-    #[serde(default)]
-    pub found: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VerifySessionResult {
-    pub valid: bool,
-    #[serde(default)]
-    pub expires_at_secs: Option<u64>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ReportUsageParams {
-    pub api_key_id: Option<String>,
     pub owner_user_id: Option<String>,
     pub model: String,
     pub total_tokens: u64,

@@ -1,3 +1,5 @@
+mod common;
+
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
@@ -79,7 +81,7 @@ async fn test_interceptor_short_circuit_on_backend_api() {
         upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
         ipc_socket_path: "./data/test-ipc.sock".to_string(),
         public_app_url: "http://localhost:53332".to_string(),
-        client_jwt_secret: "test-client-jwt-secret".to_string(),
+        settings: common::offline_settings(),
     };
 
     let app = create_router(config, Some(interceptor.clone()));
@@ -115,7 +117,7 @@ async fn test_openai_v1_base_url_is_handled_as_backend_api() {
         upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
         ipc_socket_path: "./data/test-ipc.sock".to_string(),
         public_app_url: "http://localhost:53332".to_string(),
-        client_jwt_secret: "test-client-jwt-secret".to_string(),
+        settings: common::offline_settings(),
     };
 
     let app = create_router(config, Some(interceptor.clone()));
@@ -144,7 +146,7 @@ async fn test_backend_api_requires_access_token() {
         upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
         ipc_socket_path: "./data/test-ipc.sock".to_string(),
         public_app_url: "http://localhost:53332".to_string(),
-        client_jwt_secret: "test-client-jwt-secret".to_string(),
+        settings: common::offline_settings(),
     };
 
     let app = create_router(config, None);
@@ -184,7 +186,7 @@ async fn test_fallback_reverse_proxies_to_node_backend() {
         upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
         ipc_socket_path: "./data/test-ipc.sock".to_string(),
         public_app_url: "http://localhost:53332".to_string(),
-        client_jwt_secret: "test-client-jwt-secret".to_string(),
+        settings: common::offline_settings(),
     };
 
     let app = create_router(config, None);
@@ -290,7 +292,7 @@ async fn test_codex_client_device_routes_fallback_to_node() {
         upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
         ipc_socket_path: "./data/test-ipc.sock".to_string(),
         public_app_url: "http://localhost:53332".to_string(),
-        client_jwt_secret: "test-client-jwt-secret".to_string(),
+        settings: common::offline_settings(),
     };
 
     let app = create_router(config, None);

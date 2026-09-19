@@ -137,20 +137,6 @@ fn display_name_from_email(email: &str) -> String {
         .to_string()
 }
 
-/// Signing secret for gateway-issued client JWTs. There is deliberately no
-/// built-in fallback: a guessable secret would let anyone mint tokens.
-pub fn client_jwt_secret_from_env() -> Result<String, String> {
-    ["CODEX_CLIENT_JWT_SECRET", "ADMIN_JWT_SECRET"]
-        .iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .map(|value| value.trim().to_string())
-        .find(|value| !value.is_empty())
-        .ok_or_else(|| {
-            "CODEX_CLIENT_JWT_SECRET (or ADMIN_JWT_SECRET) must be set to sign client tokens"
-                .to_string()
-        })
-}
-
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     const BLOCK_LEN: usize = 64;
     let mut key_block = [0u8; BLOCK_LEN];
@@ -186,7 +172,7 @@ fn sign(secret: &[u8], input: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(hmac_sha256(secret, input))
 }
 
-fn verify_hmac(secret: &[u8], input: &[u8], signature_b64: &str) -> bool {
+pub(crate) fn verify_hmac(secret: &[u8], input: &[u8], signature_b64: &str) -> bool {
     let Ok(signature) = URL_SAFE_NO_PAD.decode(signature_b64) else {
         return false;
     };
@@ -201,7 +187,7 @@ fn verify_hmac(secret: &[u8], input: &[u8], signature_b64: &str) -> bool {
         == 0
 }
 
-fn encode_jwt<T: Serialize>(secret: &[u8], claims: &T) -> String {
+pub(crate) fn encode_jwt<T: Serialize>(secret: &[u8], claims: &T) -> String {
     let header = serde_json::json!({ "alg": "HS256", "typ": "JWT" });
     let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap_or_default());
     let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap_or_default());
@@ -238,10 +224,6 @@ impl ClientJwt {
         Self {
             secret: secret.as_ref().to_vec(),
         }
-    }
-
-    pub fn from_env() -> Result<Self, String> {
-        client_jwt_secret_from_env().map(Self::from_secret)
     }
 
     pub fn sign_session_tokens(&self, account_id: &str, email: &str) -> SignedCodexTokens {

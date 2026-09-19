@@ -7,8 +7,7 @@ use crate::auth::jwt::now_secs;
 
 /// Client sessions known to still hold an unexpired refresh token, keyed by
 /// the access token's `session_id`, valued by that refresh token's expiry.
-/// Only live sessions are cached; Node broadcasts `auth.session_invalidate`
-/// when a session's refresh token is revoked.
+/// Only live sessions are cached; revocation evicts them.
 #[derive(Clone, Default)]
 pub struct SessionCache {
     inner: Arc<RwLock<HashMap<String, u64>>>,
@@ -35,13 +34,8 @@ impl SessionCache {
         self.inner.write().await.insert(session_id, expires_at_secs);
     }
 
-    /// Drops the given sessions, or every session when `session_ids` is empty.
-    pub async fn invalidate(&self, session_ids: &[String]) {
+    pub async fn invalidate_many(&self, session_ids: &[String]) {
         let mut inner = self.inner.write().await;
-        if session_ids.is_empty() {
-            inner.clear();
-            return;
-        }
         for session_id in session_ids {
             inner.remove(session_id.trim());
         }

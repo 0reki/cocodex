@@ -497,7 +497,6 @@ async function startServer() {
 
     try {
       ipcServerInstance = await startNodeIpcServer({
-        invalidateCachedOwner: invalidateApiKeyAuthCacheByOwnerUserId,
         enqueueSettlement: enqueueResponseSettlement,
       });
       authInvalidateListeners.push((ownerUserId) => {

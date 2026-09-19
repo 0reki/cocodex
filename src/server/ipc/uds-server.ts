@@ -4,23 +4,8 @@ import path from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 
-import {
-  createApiKey,
-  getActiveOpenAIAccountByPlatform,
-  getApiKeyByToken,
-  getApiKeyById,
-  getPortalUserById,
-  listApiKeys,
-  storeCodexClientRefreshToken,
-  rotateCodexClientRefreshToken,
-  getCodexClientSessionExpiry,
-  revokeCodexClientRefreshTokens,
-  type ApiKeyRecord,
-  type PortalUserRecord,
-} from "../../database/index.ts";
+import { getActiveOpenAIAccountByPlatform } from "../../database/index.ts";
 import { getCodexUserAgentForPlatform } from "../../openai-api/internal/client-identity.ts";
-import { verifyPortalAccessToken } from "../auth/portal-auth.ts";
-import { generateApiKeyValue } from "../utils/runtime/env-utils.ts";
 import type { EnqueueResponseSettlementInput } from "../services/openai/response-settlement-services.ts";
 import {
   flushResponseSettlements,
@@ -31,14 +16,12 @@ import { createModelServices } from "../services/openai/model-services.ts";
 import { loadModelPricingFromEnv } from "../utils/openai/model-pricing.ts";
 import { classifyCodexBackendForward } from "../utils/openai/codex-backend-alias.ts";
 
-const CODEX_CLIENT_API_KEY_NAME = "Codex client";
 const modelServices = createModelServices({
   modelPricing: loadModelPricingFromEnv(),
 });
 
 export type IpcServerOptions = {
   socketPath?: string;
-  invalidateCachedOwner?: (ownerUserId: string) => void;
   enqueueSettlement?: (
     input: EnqueueResponseSettlementInput,
   ) => Promise<void>;
@@ -105,16 +88,6 @@ export function startNodeIpcServer(
         client.write(line);
       }
     };
-    const broadcastSessionInvalidate = (sessionIds: string[]) => {
-      const line = `${JSON.stringify({
-        method: "auth.session_invalidate",
-        params: { session_ids: sessionIds },
-      })}\n`;
-      for (const client of clients) {
-        if (client.destroyed) continue;
-        client.write(line);
-      }
-    };
     const broadcastUpstreamInvalidate = (platform = "") => {
       const line = `${JSON.stringify({
         method: "upstream.invalidate",
@@ -158,7 +131,6 @@ export function startNodeIpcServer(
             request.method,
             request.params ?? {},
             options,
-            { invalidateSessions: broadcastSessionInvalidate },
           );
           // If request had an id, send response
           if (reqId !== null && reqId !== undefined) {
@@ -218,242 +190,14 @@ export function startNodeIpcServer(
   });
 }
 
-type RpcHooks = {
-  invalidateSessions: (sessionIds: string[]) => void;
-};
-
 async function handleRpcMethod(
   method: string,
   params: Record<string, unknown>,
   options: IpcServerOptions,
-  hooks: RpcHooks,
 ): Promise<unknown> {
   switch (method) {
     case "health.ping": {
       return { ok: true, timestamp: Date.now() };
-    }
-
-    case "auth.verify_api_key": {
-      const apiKeyId =
-        typeof params.api_key_id === "string" ? params.api_key_id.trim() : "";
-      const apiKeyRaw =
-        typeof params.api_key === "string" ? params.api_key.trim() : "";
-      const ownerUserId =
-        typeof params.owner_user_id === "string"
-          ? params.owner_user_id.trim()
-          : "";
-      if (ownerUserId) {
-        const owner = await getPortalUserById(ownerUserId);
-        if (!owner) {
-          return { valid: false, error: "invalid_user" };
-        }
-        if (!owner.enabled) {
-          return {
-            valid: false,
-            error: "user_inactive",
-            user: toIpcUser(owner),
-          };
-        }
-        if (
-          owner.quota !== null &&
-          Number(owner.used) >= Number(owner.quota)
-        ) {
-          return {
-            valid: false,
-            error: "quota_exceeded",
-            user: toIpcUser(owner),
-          };
-        }
-        return { valid: true, user: toIpcUser(owner) };
-      }
-      if (!apiKeyId && !apiKeyRaw) {
-        return { valid: false, error: "missing_api_key" };
-      }
-      let apiKey: ApiKeyRecord | null = null;
-      try {
-        apiKey = apiKeyId
-          ? await getApiKeyById(apiKeyId)
-          : await getApiKeyByToken(apiKeyRaw);
-      } catch {
-        return { valid: false, error: "invalid_key" };
-      }
-      if (!apiKey) {
-        return { valid: false, error: "invalid_key" };
-      }
-      if (apiKey.revokedAt) {
-        return {
-          valid: false,
-          error: "revoked_key",
-          api_key: toIpcApiKey(apiKey),
-        };
-      }
-      if (
-        apiKey.expiresAt &&
-        new Date(apiKey.expiresAt).getTime() < Date.now()
-      ) {
-        return {
-          valid: false,
-          error: "expired_key",
-          api_key: toIpcApiKey(apiKey),
-        };
-      }
-      if (apiKey.ownerUserId) {
-        const owner = await getPortalUserById(apiKey.ownerUserId);
-        if (!owner || !owner.enabled) {
-          return {
-            valid: false,
-            error: "user_inactive",
-            api_key: toIpcApiKey(apiKey),
-          };
-        }
-      }
-      if (
-        apiKey.quota !== null &&
-        Number(apiKey.used) >= Number(apiKey.quota)
-      ) {
-        return {
-          valid: false,
-          error: "quota_exceeded",
-          api_key: toIpcApiKey(apiKey),
-        };
-      }
-      return {
-        valid: true,
-        api_key: toIpcApiKey(apiKey),
-      };
-    }
-
-    case "auth.resolve_user_api_key": {
-      const userId =
-        typeof params.user_id === "string" ? params.user_id.trim() : "";
-      if (!userId) {
-        throw new Error("user_id is required");
-      }
-      const user = await getPortalUserById(userId);
-      if (!user || !user.enabled) {
-        throw new Error("User not found or disabled");
-      }
-
-      const keys = await listApiKeys({ ownerUserId: user.id });
-      const existing =
-        keys.find((item) => item.name === CODEX_CLIENT_API_KEY_NAME) ?? keys[0];
-      if (existing) {
-        return {
-          id: existing.id,
-          owner_user_id: existing.ownerUserId,
-          name: existing.name,
-          api_key: existing.apiKey,
-          quota: existing.quota,
-          used: existing.used,
-        };
-      }
-
-      const created = await createApiKey({
-        ownerUserId: user.id,
-        name: CODEX_CLIENT_API_KEY_NAME,
-        apiKey: generateApiKeyValue(),
-      });
-      return {
-        id: created.id,
-        owner_user_id: created.ownerUserId,
-        name: created.name,
-        api_key: created.apiKey,
-        quota: created.quota,
-        used: created.used,
-      };
-    }
-
-    case "auth.verify_portal_token": {
-      const token = typeof params.token === "string" ? params.token.trim() : "";
-      if (!token) {
-        return { valid: false, error: "missing_token" };
-      }
-      try {
-        const claims = verifyPortalAccessToken(token);
-        if (!claims?.sub) {
-          return { valid: false, error: "invalid_claims" };
-        }
-        const user = await getPortalUserById(claims.sub);
-        if (!user || !user.enabled) {
-          return { valid: false, error: "user_inactive" };
-        }
-        return {
-          valid: true,
-          user: toIpcUser(user),
-        };
-      } catch (err) {
-        return {
-          valid: false,
-          error:
-            err instanceof Error ? err.message : "token_verification_failed",
-        };
-      }
-    }
-
-    case "auth.store_refresh_token": {
-      const tokenHash = stringParam(params, "token_hash");
-      const ownerUserId = stringParam(params, "owner_user_id");
-      const email = stringParam(params, "email");
-      const sessionId = stringParam(params, "session_id");
-      const expiresAtSecs = Number(params.expires_at_secs);
-      if (!tokenHash || !ownerUserId || !email || !sessionId || !expiresAtSecs) {
-        throw new Error("refresh token fields are required");
-      }
-      await storeCodexClientRefreshToken({
-        tokenHash,
-        ownerUserId,
-        email,
-        sessionId,
-        expiresAt: new Date(expiresAtSecs * 1000),
-      });
-      return { ok: true };
-    }
-
-    case "auth.rotate_refresh_token": {
-      const tokenHash = stringParam(params, "token_hash");
-      const newTokenHash = stringParam(params, "new_token_hash");
-      const fallbackSessionId = stringParam(params, "fallback_session_id");
-      const expiresAtSecs = Number(params.expires_at_secs);
-      if (!tokenHash) return { found: false };
-      if (!newTokenHash || !fallbackSessionId || !expiresAtSecs) {
-        throw new Error("refresh token rotation fields are required");
-      }
-      const record = await rotateCodexClientRefreshToken({
-        tokenHash,
-        newTokenHash,
-        fallbackSessionId,
-        expiresAt: new Date(expiresAtSecs * 1000),
-      });
-      if (!record) return { found: false };
-      return {
-        found: true,
-        email: record.email,
-        owner_user_id: record.ownerUserId,
-        session_id: record.sessionId,
-      };
-    }
-
-    case "auth.verify_session": {
-      const sessionId = stringParam(params, "session_id");
-      const expiresAt = sessionId
-        ? await getCodexClientSessionExpiry(sessionId)
-        : null;
-      if (!expiresAt) return { valid: false };
-      return {
-        valid: true,
-        expires_at_secs: Math.floor(new Date(expiresAt).getTime() / 1000),
-      };
-    }
-
-    case "auth.revoke_refresh_token": {
-      const revokedSessionIds = await revokeCodexClientRefreshTokens({
-        tokenHash: stringParam(params, "token_hash") || null,
-        sessionId: stringParam(params, "session_id") || null,
-      });
-      if (revokedSessionIds.length > 0) {
-        hooks.invalidateSessions(revokedSessionIds);
-      }
-      return { ok: true };
     }
 
     case "usage.report_consumption": {
@@ -594,29 +338,5 @@ async function handleRpcMethod(
   }
 }
 
-function stringParam(params: Record<string, unknown>, key: string): string {
-  const value = params[key];
-  return typeof value === "string" ? value.trim() : "";
-}
 
-function toIpcApiKey(apiKey: ApiKeyRecord) {
-  return {
-    id: apiKey.id,
-    owner_user_id: apiKey.ownerUserId,
-    name: apiKey.name,
-    api_key: apiKey.apiKey,
-    quota: apiKey.quota,
-    used: apiKey.used,
-  };
-}
 
-function toIpcUser(user: PortalUserRecord) {
-  return {
-    id: user.id,
-    username: user.username,
-    role: user.role,
-    enabled: user.enabled,
-    quota: user.quota,
-    used: user.used,
-  };
-}

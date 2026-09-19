@@ -1,9 +1,11 @@
 pub mod auth;
 pub mod config;
+pub mod db;
 pub mod forwarder;
 pub mod interceptor;
 pub mod ipc;
 pub mod reverse_proxy;
+pub mod runtime;
 pub mod websocket;
 
 use axum::Router;
@@ -21,40 +23,46 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::auth::jwt::ClientJwt;
-use crate::auth::session::CodexClientSessionStore;
 use crate::ipc::IpcClient;
+use crate::runtime::Runtime;
 
 /// Shared application state for router handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub forwarder: Arc<BackendForwarder>,
     pub reverse_proxy: Arc<NodeReverseProxy>,
-    pub sessions: Arc<CodexClientSessionStore>,
-    pub ipc_client: IpcClient,
+    pub runtime: Arc<Runtime>,
     pub public_app_url: String,
 }
 
 pub fn create_router(config: ProxyConfig, interceptor: Option<SharedInterceptor>) -> Router {
     let ipc_client = IpcClient::new(&config.ipc_socket_path);
-    let jwt = ClientJwt::from_secret(&config.client_jwt_secret);
+    let runtime = Arc::new(Runtime::new(
+        config.settings.clone(),
+        ipc_client.owner_auth_cache(),
+    ));
     let interceptor = interceptor
-        .unwrap_or_else(|| Arc::new(CustomInterceptor::new(ipc_client.clone(), jwt.clone())));
+        .unwrap_or_else(|| Arc::new(CustomInterceptor::new(ipc_client.clone(), runtime.clone())));
     let forwarder = Arc::new(BackendForwarder::new(
         config.upstream_chatgpt_origin.clone(),
         interceptor,
     ));
     let reverse_proxy = Arc::new(NodeReverseProxy::new(config.node_backend_url.clone()));
-    let sessions = Arc::new(CodexClientSessionStore::with_jwt_and_ipc(
-        jwt,
-        ipc_client.clone(),
-    ));
+
+    // Connect eagerly so problems surface at startup; requests retry lazily.
+    tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            if let Err(error) = runtime.ready().await {
+                tracing::warn!(%error, "database not ready yet");
+            }
+        }
+    });
 
     let state = AppState {
         forwarder,
         reverse_proxy,
-        sessions,
-        ipc_client,
+        runtime,
         public_app_url: config.public_app_url,
     };
 

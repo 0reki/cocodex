@@ -12,11 +12,8 @@ use tracing::{debug, info, warn};
 use super::account_cache::UpstreamAccountCache;
 use super::owner_cache::OwnerAuthCache;
 use super::protocol::{
-    ApiKeyRecord, JsonRpcRequest, JsonRpcResponse, ReportUsageParams, ResolveUpstreamAccountResult,
-    StoredRefreshToken, VerifyApiKeyResult, VerifyOwnerResult, VerifyPortalTokenResult,
-    VerifySessionResult,
+    JsonRpcRequest, JsonRpcResponse, ReportUsageParams, ResolveUpstreamAccountResult,
 };
-use super::session_cache::SessionCache;
 
 #[derive(Debug)]
 pub enum IpcClientError {
@@ -78,14 +75,12 @@ enum IpcCommand {
 pub(crate) struct IpcCaches {
     auth: OwnerAuthCache,
     account: UpstreamAccountCache,
-    session: SessionCache,
 }
 
 impl IpcCaches {
     async fn clear_all(&self) {
         self.auth.invalidate("").await;
         self.account.invalidate("").await;
-        self.session.invalidate(&[]).await;
     }
 }
 
@@ -118,10 +113,6 @@ impl IpcClient {
 
     pub fn upstream_account_cache(&self) -> UpstreamAccountCache {
         self.caches.account.clone()
-    }
-
-    pub fn session_cache(&self) -> SessionCache {
-        self.caches.session.clone()
     }
 
     async fn call(
@@ -182,158 +173,6 @@ impl IpcClient {
     pub async fn ping(&self) -> Result<bool, IpcClientError> {
         let res = self.call("health.ping", serde_json::json!({})).await?;
         Ok(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
-    }
-
-    pub async fn verify_api_key(
-        &self,
-        api_key: &str,
-    ) -> Result<VerifyApiKeyResult, IpcClientError> {
-        let res = self
-            .call(
-                "auth.verify_api_key",
-                serde_json::json!({ "api_key": api_key }),
-            )
-            .await?;
-        let parsed: VerifyApiKeyResult = serde_json::from_value(res)?;
-        Ok(parsed)
-    }
-
-    pub async fn verify_api_key_id(
-        &self,
-        api_key_id: &str,
-    ) -> Result<VerifyApiKeyResult, IpcClientError> {
-        let res = self
-            .call(
-                "auth.verify_api_key",
-                serde_json::json!({ "api_key_id": api_key_id }),
-            )
-            .await?;
-        let parsed: VerifyApiKeyResult = serde_json::from_value(res)?;
-        Ok(parsed)
-    }
-
-    pub async fn resolve_user_api_key(
-        &self,
-        user_id: &str,
-    ) -> Result<ApiKeyRecord, IpcClientError> {
-        let res = self
-            .call(
-                "auth.resolve_user_api_key",
-                serde_json::json!({ "user_id": user_id }),
-            )
-            .await?;
-        let parsed: ApiKeyRecord = serde_json::from_value(res)?;
-        Ok(parsed)
-    }
-
-    pub async fn verify_portal_token(
-        &self,
-        token: &str,
-    ) -> Result<VerifyPortalTokenResult, IpcClientError> {
-        let res = self
-            .call(
-                "auth.verify_portal_token",
-                serde_json::json!({ "token": token }),
-            )
-            .await?;
-        let parsed: VerifyPortalTokenResult = serde_json::from_value(res)?;
-        Ok(parsed)
-    }
-
-    pub async fn verify_owner_user_id(
-        &self,
-        owner_user_id: &str,
-    ) -> Result<VerifyOwnerResult, IpcClientError> {
-        let res = self
-            .call(
-                "auth.verify_api_key",
-                serde_json::json!({ "owner_user_id": owner_user_id }),
-            )
-            .await?;
-        let parsed: VerifyOwnerResult = serde_json::from_value(res)?;
-        Ok(parsed)
-    }
-
-    pub async fn store_refresh_token(
-        &self,
-        token_hash: &str,
-        owner_user_id: &str,
-        email: &str,
-        session_id: &str,
-        expires_at_secs: u64,
-    ) -> Result<(), IpcClientError> {
-        self.call(
-            "auth.store_refresh_token",
-            serde_json::json!({
-                "token_hash": token_hash,
-                "owner_user_id": owner_user_id,
-                "email": email,
-                "session_id": session_id,
-                "expires_at_secs": expires_at_secs,
-            }),
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Atomically consumes `token_hash` and stores `new_token_hash` in the
-    /// same session. `fallback_session_id` is used only for legacy rows that
-    /// predate session binding.
-    pub async fn rotate_refresh_token(
-        &self,
-        token_hash: &str,
-        new_token_hash: &str,
-        fallback_session_id: &str,
-        expires_at_secs: u64,
-    ) -> Result<Option<StoredRefreshToken>, IpcClientError> {
-        let res = self
-            .call(
-                "auth.rotate_refresh_token",
-                serde_json::json!({
-                    "token_hash": token_hash,
-                    "new_token_hash": new_token_hash,
-                    "fallback_session_id": fallback_session_id,
-                    "expires_at_secs": expires_at_secs,
-                }),
-            )
-            .await?;
-        if res.get("found").and_then(|value| value.as_bool()) != Some(true) {
-            return Ok(None);
-        }
-        let parsed: StoredRefreshToken = serde_json::from_value(res)?;
-        Ok(Some(parsed))
-    }
-
-    pub async fn verify_session(
-        &self,
-        session_id: &str,
-    ) -> Result<VerifySessionResult, IpcClientError> {
-        let res = self
-            .call(
-                "auth.verify_session",
-                serde_json::json!({ "session_id": session_id }),
-            )
-            .await?;
-        let parsed: VerifySessionResult = serde_json::from_value(res)?;
-        Ok(parsed)
-    }
-
-    /// Deletes the refresh token matching `token_hash` and/or every refresh
-    /// token of `session_id`. Node broadcasts the resulting invalidation.
-    pub async fn revoke_refresh_token(
-        &self,
-        token_hash: Option<&str>,
-        session_id: Option<&str>,
-    ) -> Result<(), IpcClientError> {
-        self.call(
-            "auth.revoke_refresh_token",
-            serde_json::json!({
-                "token_hash": token_hash,
-                "session_id": session_id,
-            }),
-        )
-        .await?;
-        Ok(())
     }
 
     /// Resolves the active upstream account bound to a client platform
@@ -463,18 +302,6 @@ async fn handle_connection(
                                 .and_then(|id| id.as_str())
                                 .unwrap_or("");
                             caches.account.invalidate(platform).await;
-                        } else if method == Some("auth.session_invalidate") {
-                            let session_ids: Vec<String> = value
-                                .get("params")
-                                .and_then(|params| params.get("session_ids"))
-                                .and_then(|ids| ids.as_array())
-                                .map(|ids| {
-                                    ids.iter()
-                                        .filter_map(|id| id.as_str().map(str::to_string))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            caches.session.invalidate(&session_ids).await;
                         } else if let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value)
                             && let Some(id) = &resp.id
                                 && let Some(responder) = pending.remove(id) {

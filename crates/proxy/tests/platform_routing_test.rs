@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -22,6 +24,7 @@ struct CapturedUpstreamRequests {
 
 #[tokio::test]
 async fn test_platform_account_routing_end_to_end() {
+    let db = common::test_db().await;
     let socket_path = std::env::temp_dir().join(format!(
         "cocodex-platform-routing-{}.sock",
         std::process::id()
@@ -76,20 +79,6 @@ async fn test_platform_account_routing_end_to_end() {
                             "platform": platform,
                             "user_agent": user_agent,
                         })
-                    } else if method == "auth.verify_session" {
-                        serde_json::json!({ "valid": true, "expires_at_secs": u64::MAX / 2 })
-                    } else if method == "auth.verify_api_key" {
-                        serde_json::json!({
-                            "valid": true,
-                            "user": {
-                                "id": "user-1",
-                                "username": "user-1",
-                                "role": "user",
-                                "enabled": true,
-                                "quota": null,
-                                "used": "0"
-                            }
-                        })
                     } else {
                         serde_json::json!({})
                     };
@@ -117,12 +106,28 @@ async fn test_platform_account_routing_end_to_end() {
         upstream_chatgpt_origin: format!("http://127.0.0.1:{upstream_port}"),
         ipc_socket_path: socket_path.to_string_lossy().to_string(),
         public_app_url: "http://localhost:53332".to_string(),
-        client_jwt_secret: "test-client-jwt-secret".to_string(),
+        settings: db.settings(),
     };
     let app = create_router(config, None);
 
-    let jwt = ClientJwt::from_secret("test-client-jwt-secret");
-    let client_tokens = jwt.sign_session_tokens("user-1", "user-1@openai.com");
+    // A portal user with a live client session.
+    let user_id = db.create_user("user-1").await;
+    let jwt = ClientJwt::from_secret(common::TEST_SECRET);
+    let client_tokens = jwt.sign_session_tokens(&user_id, "user-1@openai.com");
+    let session_id = jwt
+        .verify_access_token(&client_tokens.access_token)
+        .unwrap()
+        .session_id;
+    cocodex_proxy::db::client_sessions::store(
+        &db.pool,
+        "refresh-hash",
+        &user_id,
+        "user-1@openai.com",
+        &session_id,
+        cocodex_proxy::auth::jwt::now_secs() + 86_400,
+    )
+    .await
+    .unwrap();
     let bearer = format!("Bearer {}", client_tokens.access_token);
 
     // 4. A Windows-UA request must be routed to the Windows account with an

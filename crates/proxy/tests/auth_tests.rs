@@ -228,7 +228,7 @@ async fn test_session_lifecycle_follows_refresh_token() {
         .verify_access_token(&tokens.access_token)
         .unwrap()
         .session_id;
-    assert!(store.is_session_live(&session_id));
+    assert!(store.is_session_live(&session_id).await.unwrap());
 
     // Rotation keeps the session and invalidates the old refresh token.
     let refreshed = store.refresh(&tokens.refresh_token).await.unwrap();
@@ -238,10 +238,10 @@ async fn test_session_lifecycle_follows_refresh_token() {
         .session_id;
     assert_eq!(refreshed_session, session_id);
     assert!(store.refresh(&tokens.refresh_token).await.is_none());
-    assert!(store.is_session_live(&session_id));
+    assert!(store.is_session_live(&session_id).await.unwrap());
 
     // Revoking with an access token ends the whole session.
     store.revoke(&tokens.access_token).await;
-    assert!(!store.is_session_live(&session_id));
+    assert!(!store.is_session_live(&session_id).await.unwrap());
     assert!(store.refresh(&refreshed.refresh_token).await.is_none());
 }

@@ -1,74 +1,37 @@
 use super::observe::{BackendKind, classify_backend_kind};
 use super::platform::{PLATFORM_HEADER, detect_platform};
 use super::{Interceptor, RequestAction, RequestContext, WsAction};
-use crate::auth::jwt::{ClientJwt, JwtError};
-use crate::ipc::protocol::{ReportUsageParams, ResolveUpstreamAccountResult, VerifyOwnerResult};
-use crate::ipc::{IpcClient, OwnerAuthCache, SessionCache, UpstreamAccountCache};
+use crate::auth::jwt::JwtError;
+use crate::ipc::protocol::{ReportUsageParams, ResolveUpstreamAccountResult};
+use crate::ipc::{IpcClient, UpstreamAccountCache};
+use crate::runtime::{NotReady, OwnerStatus, Runtime};
 use async_trait::async_trait;
 use axum::body::Body;
+use axum::http::StatusCode;
 use axum::http::header::{CONTENT_TYPE, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use http::Request;
+use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, info, warn};
 
-/// Default interceptor: verify the Codex-shaped client JWT, route to a
-/// platform-isolated upstream account, then settle usage/logs over IPC.
+/// Default interceptor: verify the Codex-shaped client JWT and its session,
+/// check the portal user, route to a platform-isolated upstream account,
+/// then settle usage/logs over IPC.
 pub struct CustomInterceptor {
     ipc: IpcClient,
-    jwt: ClientJwt,
-    auth_cache: OwnerAuthCache,
+    runtime: Arc<Runtime>,
     account_cache: UpstreamAccountCache,
-    session_cache: SessionCache,
 }
 
 impl CustomInterceptor {
-    pub fn new(ipc: IpcClient, jwt: ClientJwt) -> Self {
-        let auth_cache = ipc.owner_auth_cache();
+    pub fn new(ipc: IpcClient, runtime: Arc<Runtime>) -> Self {
         let account_cache = ipc.upstream_account_cache();
-        let session_cache = ipc.session_cache();
         Self {
             ipc,
-            jwt,
-            auth_cache,
+            runtime,
             account_cache,
-            session_cache,
         }
-    }
-
-    /// An access token is only honoured while its session still holds an
-    /// unexpired refresh token. Live sessions are cached until Node
-    /// broadcasts a revocation, so this hits the database once per session.
-    async fn is_session_live(&self, session_id: &str) -> Result<bool, crate::ipc::IpcClientError> {
-        if self.session_cache.is_live(session_id).await {
-            return Ok(true);
-        }
-
-        let result = self.ipc.verify_session(session_id).await?;
-        match (result.valid, result.expires_at_secs) {
-            (true, Some(expires_at_secs)) => {
-                self.session_cache
-                    .remember(session_id.to_string(), expires_at_secs)
-                    .await;
-                Ok(true)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    async fn verify_owner(
-        &self,
-        owner_user_id: &str,
-    ) -> Result<VerifyOwnerResult, crate::ipc::IpcClientError> {
-        if let Some(cached) = self.auth_cache.get(owner_user_id).await {
-            return Ok(cached);
-        }
-
-        let result = self.ipc.verify_owner_user_id(owner_user_id).await?;
-        self.auth_cache
-            .remember(owner_user_id.to_string(), result.clone())
-            .await;
-        Ok(result)
     }
 
     async fn resolve_platform_account(
@@ -114,50 +77,50 @@ impl Interceptor for CustomInterceptor {
 
         let Some(client_token) = ctx.client_token.clone() else {
             return Ok(RequestAction::ShortCircuit(auth_error(
-                axum::http::StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
                 "invalid_token",
                 "Missing Authorization bearer token",
             )));
         };
 
-        let claims = match self.jwt.verify_access_token(&client_token) {
+        let ready = match self.runtime.ready().await {
+            Ok(ready) => ready,
+            Err(error) => {
+                warn!(request_id = %ctx.request_id, %error, "gateway not ready");
+                return Ok(RequestAction::ShortCircuit(not_ready_error(&error)));
+            }
+        };
+
+        let claims = match ready.sessions.jwt().verify_access_token(&client_token) {
             Ok(claims) => claims,
             Err(JwtError::Expired) => {
                 return Ok(RequestAction::ShortCircuit(auth_error(
-                    axum::http::StatusCode::UNAUTHORIZED,
+                    StatusCode::UNAUTHORIZED,
                     "invalid_token",
                     "Access token has expired",
                 )));
             }
             Err(JwtError::Invalid) => {
                 return Ok(RequestAction::ShortCircuit(auth_error(
-                    axum::http::StatusCode::UNAUTHORIZED,
+                    StatusCode::UNAUTHORIZED,
                     "invalid_token",
                     "Invalid access token",
                 )));
             }
         };
 
-        match self.is_session_live(&claims.session_id).await {
+        match ready.sessions.is_session_live(&claims.session_id).await {
             Ok(true) => {}
             Ok(false) => {
                 return Ok(RequestAction::ShortCircuit(auth_error(
-                    axum::http::StatusCode::UNAUTHORIZED,
+                    StatusCode::UNAUTHORIZED,
                     "invalid_token",
                     "Access token has been revoked",
                 )));
             }
             Err(error) => {
-                warn!(
-                    request_id = %ctx.request_id,
-                    error = %error,
-                    "Session verification IPC failed"
-                );
-                return Ok(RequestAction::ShortCircuit(auth_error(
-                    axum::http::StatusCode::BAD_GATEWAY,
-                    "upstream_error",
-                    "Failed to verify access token",
-                )));
+                warn!(request_id = %ctx.request_id, %error, "session lookup failed");
+                return Ok(RequestAction::ShortCircuit(database_error()));
             }
         }
 
@@ -168,29 +131,27 @@ impl Interceptor for CustomInterceptor {
         ctx.metadata
             .insert("owner_user_id".into(), owner_user_id.clone());
 
-        let verified = match self.verify_owner(&owner_user_id).await {
-            Ok(result) => result,
+        let rejection = match ready.verify_owner(&owner_user_id).await {
+            Ok(OwnerStatus::Active(_)) => None,
+            Ok(OwnerStatus::Unknown) => Some((
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Invalid access token",
+            )),
+            Ok(OwnerStatus::Disabled(_)) => {
+                Some((StatusCode::FORBIDDEN, "user_inactive", "User is disabled"))
+            }
+            Ok(OwnerStatus::QuotaExceeded(_)) => Some((
+                StatusCode::TOO_MANY_REQUESTS,
+                "insufficient_quota",
+                "User quota exceeded",
+            )),
             Err(error) => {
-                warn!(
-                    request_id = %ctx.request_id,
-                    error = %error,
-                    "API key quota verification IPC failed"
-                );
-                return Ok(RequestAction::ShortCircuit(auth_error(
-                    axum::http::StatusCode::BAD_GATEWAY,
-                    "upstream_error",
-                    "Failed to verify access token",
-                )));
+                warn!(request_id = %ctx.request_id, %error, "portal user lookup failed");
+                return Ok(RequestAction::ShortCircuit(database_error()));
             }
         };
-        if let Some(user) = &verified.user {
-            if let Ok(mut obs) = ctx.observation.lock() {
-                obs.owner_user_id = Some(user.id.clone());
-            }
-            ctx.metadata.insert("owner_user_id".into(), user.id.clone());
-        }
-        if !verified.valid || verified.user.is_none() {
-            let (status, code, message) = map_verify_error(verified.error.as_deref());
+        if let Some((status, code, message)) = rejection {
             return Ok(RequestAction::ShortCircuit(auth_error(
                 status, code, message,
             )));
@@ -384,7 +345,6 @@ impl Interceptor for CustomInterceptor {
             .or_else(|| default_model_for_kind(kind))
             .unwrap_or_else(|| "codex-chatgpt".to_string());
         let params = ReportUsageParams {
-            api_key_id: None,
             owner_user_id: Some(owner_user_id),
             model,
             total_tokens: usage.total_tokens,
@@ -434,37 +394,26 @@ fn default_model_for_kind(kind: BackendKind) -> Option<String> {
     }
 }
 
-fn map_verify_error(error: Option<&str>) -> (axum::http::StatusCode, &'static str, &'static str) {
+fn not_ready_error(error: &NotReady) -> Response {
     match error {
-        Some("quota_exceeded") => (
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            "insufficient_quota",
-            "User quota exceeded",
+        NotReady::SetupRequired => auth_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "setup_required",
+            "Gateway setup has not been completed",
         ),
-        Some("user_inactive") => (
-            axum::http::StatusCode::FORBIDDEN,
-            "user_inactive",
-            "User is disabled",
-        ),
-        Some("revoked_key") => (
-            axum::http::StatusCode::UNAUTHORIZED,
-            "invalid_token",
-            "Access token has been revoked",
-        ),
-        Some("expired_key") => (
-            axum::http::StatusCode::UNAUTHORIZED,
-            "invalid_token",
-            "Access token has expired",
-        ),
-        _ => (
-            axum::http::StatusCode::UNAUTHORIZED,
-            "invalid_token",
-            "Invalid access token",
-        ),
+        NotReady::Database(_) => database_error(),
     }
 }
 
-fn auth_error(status: axum::http::StatusCode, code: &str, message: &str) -> Response {
+fn database_error() -> Response {
+    auth_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "database_unavailable",
+        "Failed to verify access token",
+    )
+}
+
+fn auth_error(status: StatusCode, code: &str, message: &str) -> Response {
     let body = serde_json::json!({
         "error": {
             "message": message,

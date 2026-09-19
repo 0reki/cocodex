@@ -9,7 +9,9 @@ use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use super::jwt::{ACCESS_TTL_SECS, ClientJwt, gateway_account_id, new_session_id, now_secs};
-use crate::ipc::IpcClient;
+use super::session_cache::SessionCache;
+use crate::db;
+use sqlx::PgPool;
 
 const DEVICE_TTL_SECS: u64 = 15 * 60;
 const AUTH_CODE_TTL_SECS: u64 = 5 * 60;
@@ -172,7 +174,10 @@ fn redirect_uri_matches(stored: &str, presented: &str) -> bool {
 
 pub struct CodexClientSessionStore {
     jwt: ClientJwt,
-    ipc: Option<IpcClient>,
+    /// Refresh tokens live in Postgres; without a pool (tests) they are kept
+    /// in `inner.refresh_sessions`.
+    db: Option<PgPool>,
+    live_sessions: SessionCache,
     inner: RwLock<SessionState>,
 }
 
@@ -185,9 +190,18 @@ struct SessionState {
 
 impl CodexClientSessionStore {
     pub fn with_jwt(jwt: ClientJwt) -> Self {
+        Self::build(jwt, None)
+    }
+
+    pub fn with_jwt_and_db(jwt: ClientJwt, db: PgPool) -> Self {
+        Self::build(jwt, Some(db))
+    }
+
+    fn build(jwt: ClientJwt, db: Option<PgPool>) -> Self {
         Self {
             jwt,
-            ipc: None,
+            db,
+            live_sessions: SessionCache::default(),
             inner: RwLock::new(SessionState {
                 devices_by_id: HashMap::new(),
                 devices_by_user_code: HashMap::new(),
@@ -197,17 +211,8 @@ impl CodexClientSessionStore {
         }
     }
 
-    pub fn with_jwt_and_ipc(jwt: ClientJwt, ipc: IpcClient) -> Self {
-        Self {
-            jwt,
-            ipc: Some(ipc),
-            inner: RwLock::new(SessionState {
-                devices_by_id: HashMap::new(),
-                devices_by_user_code: HashMap::new(),
-                auth_codes: HashMap::new(),
-                refresh_sessions: HashMap::new(),
-            }),
-        }
+    pub fn jwt(&self) -> &ClientJwt {
+        &self.jwt
     }
 
     fn sweep_expired(state: &mut SessionState, ts: u64) {
@@ -381,20 +386,20 @@ impl CodexClientSessionStore {
         let new_refresh_token = issue_refresh_token();
         let expires_at_secs = ts + REFRESH_TTL_SECS;
 
-        let (owner_user_id, email, session_id) = if let Some(ipc) = &self.ipc {
-            match ipc
-                .rotate_refresh_token(
-                    &hash_refresh_token(token),
-                    &hash_refresh_token(&new_refresh_token),
-                    &new_session_id(),
-                    expires_at_secs,
-                )
-                .await
+        let (owner_user_id, email, session_id) = if let Some(pool) = &self.db {
+            match db::client_sessions::rotate(
+                pool,
+                &hash_refresh_token(token),
+                &hash_refresh_token(&new_refresh_token),
+                &new_session_id(),
+                expires_at_secs,
+            )
+            .await
             {
                 Ok(Some(record)) => (record.owner_user_id, record.email, record.session_id),
                 Ok(None) => return None,
                 Err(error) => {
-                    warn!(error = %error, "failed to rotate refresh token via IPC");
+                    warn!(error = %error, "failed to rotate refresh token");
                     return None;
                 }
             }
@@ -431,13 +436,15 @@ impl CodexClientSessionStore {
             .ok()
             .map(|claims| claims.session_id);
 
-        if let Some(ipc) = &self.ipc {
+        if let Some(pool) = &self.db {
             let token_hash = hash_refresh_token(normalized);
-            if let Err(error) = ipc
-                .revoke_refresh_token(Some(&token_hash), session_id.as_deref())
-                .await
+            match db::client_sessions::revoke(pool, Some(&token_hash), session_id.as_deref()).await
             {
-                warn!(error = %error, "failed to revoke refresh token via IPC");
+                Ok(mut revoked) => {
+                    revoked.extend(session_id);
+                    self.live_sessions.invalidate_many(&revoked).await;
+                }
+                Err(error) => warn!(error = %error, "failed to revoke refresh token"),
             }
             return;
         }
@@ -455,15 +462,34 @@ impl CodexClientSessionStore {
         }
     }
 
-    /// Whether `session_id` still holds an unexpired refresh token. Only used
-    /// without IPC (tests); the interceptor checks sessions through Node.
-    pub fn is_session_live(&self, session_id: &str) -> bool {
-        let state = self.inner.read().unwrap();
-        let ts = now_secs();
-        state
-            .refresh_sessions
-            .values()
-            .any(|session| session.session_id == session_id && session.expires_at_secs > ts)
+    /// Whether `session_id` still holds an unexpired refresh token. Live
+    /// sessions are cached until revoked or expired, so the database is hit
+    /// once per session rather than once per request.
+    pub async fn is_session_live(&self, session_id: &str) -> Result<bool, sqlx::Error> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Ok(false);
+        }
+        let Some(pool) = &self.db else {
+            let state = self.inner.read().unwrap();
+            let ts = now_secs();
+            return Ok(state
+                .refresh_sessions
+                .values()
+                .any(|session| session.session_id == session_id && session.expires_at_secs > ts));
+        };
+        if self.live_sessions.is_live(session_id).await {
+            return Ok(true);
+        }
+        match db::client_sessions::session_expiry(pool, session_id).await? {
+            Some(expires_at_secs) => {
+                self.live_sessions
+                    .remember(session_id.to_string(), expires_at_secs)
+                    .await;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     async fn start_session(
@@ -477,18 +503,18 @@ impl CodexClientSessionStore {
         let expires_at_secs = ts + REFRESH_TTL_SECS;
         let owner_user_id = gateway_account_id(owner_user_id);
 
-        if let Some(ipc) = &self.ipc {
-            if let Err(error) = ipc
-                .store_refresh_token(
-                    &hash_refresh_token(&refresh_token),
-                    &owner_user_id,
-                    email,
-                    &session_id,
-                    expires_at_secs,
-                )
-                .await
+        if let Some(pool) = &self.db {
+            if let Err(error) = db::client_sessions::store(
+                pool,
+                &hash_refresh_token(&refresh_token),
+                &owner_user_id,
+                email,
+                &session_id,
+                expires_at_secs,
+            )
+            .await
             {
-                warn!(error = %error, "failed to persist refresh token via IPC");
+                warn!(error = %error, "failed to persist refresh token");
                 return None;
             }
         } else {

@@ -5,8 +5,19 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Same precedence as the Node backend: real environment, then
+    // `.env.local`, then `.env`. Loaded before any thread is spawned.
+    for file in [".env.local", ".env"] {
+        let _ = dotenvy::from_filename(file);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing subscriber with RUST_LOG support (default info)
     tracing_subscriber::registry()
         .with(
