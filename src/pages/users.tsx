@@ -25,6 +25,7 @@ import type {
   OpenAIAccountsResponse,
   PortalInvitationResponse,
   PortalUser,
+  UpstreamPlatform,
   UsersResponse,
 } from "@/types/api";
 import { Button } from "@/ui/components/button";
@@ -47,6 +48,41 @@ import {
 
 type UserMutationResponse = { ok: true; user: PortalUser };
 type UsersPageData = UsersResponse & { accounts: OpenAIAccount[] };
+
+const PLATFORM_LABELS: Record<UpstreamPlatform, string> = {
+  windows: "Windows",
+  linux: "Linux",
+  darwin: "macOS",
+  all: "通用",
+};
+
+type UpstreamOption = {
+  accountId: string;
+  email: string;
+  platforms: UpstreamPlatform[];
+  disabled: boolean;
+};
+
+// Assignment is by account_id; the same account has one login row per
+// platform, so collapse those rows into a single option.
+function upstreamOptions(accounts: OpenAIAccount[]): UpstreamOption[] {
+  const byAccount = new Map<string, UpstreamOption>();
+  for (const account of accounts) {
+    const option = byAccount.get(account.accountId) ?? {
+      accountId: account.accountId,
+      email: account.email,
+      platforms: [],
+      disabled: true,
+    };
+    if (!option.platforms.includes(account.platform)) {
+      option.platforms.push(account.platform);
+    }
+    // The account is usable if any of its platform logins is not disabled.
+    if (account.status !== "disabled") option.disabled = false;
+    byAccount.set(account.accountId, option);
+  }
+  return [...byAccount.values()];
+}
 
 function UserForm({
   item,
@@ -205,16 +241,13 @@ export function UsersPage() {
     }
   }
 
-  async function assignUpstream(
-    item: PortalUser,
-    sourceAccountId: string | null,
-  ) {
+  async function assignUpstream(item: PortalUser, accountId: string | null) {
     setBusy(`upstream:${item.id}`);
     setActionError(null);
     try {
       await api(`/api/users/${item.id}/upstream`, {
         method: "PUT",
-        ...jsonBody({ sourceAccountId }),
+        ...jsonBody({ accountId }),
       });
       await reload();
     } catch (cause) {
@@ -289,7 +322,7 @@ export function UsersPage() {
                     </TableCell>
                     <TableCell>
                       <Select
-                        value={item.sourceAccountId ?? "unassigned"}
+                        value={item.accountId ?? "unassigned"}
                         disabled={busy === `upstream:${item.id}`}
                         onValueChange={(value) =>
                           void assignUpstream(
@@ -303,16 +336,19 @@ export function UsersPage() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="unassigned">未分配</SelectItem>
-                          {data.accounts.map((account) => (
+                          {upstreamOptions(data.accounts).map((account) => (
                             <SelectItem
-                              key={account.id}
-                              value={account.id}
-                              disabled={account.status === "disabled"}
+                              key={account.accountId}
+                              value={account.accountId}
+                              disabled={account.disabled}
                             >
                               {account.email}
-                              {account.status === "disabled"
-                                ? "（已停用）"
+                              {account.platforms.length
+                                ? `（${account.platforms
+                                    .map((platform) => PLATFORM_LABELS[platform])
+                                    .join(" / ")}）`
                                 : ""}
+                              {account.disabled ? " 已停用" : ""}
                             </SelectItem>
                           ))}
                         </SelectContent>

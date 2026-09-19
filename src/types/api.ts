@@ -6,6 +6,7 @@ export type PortalUser = {
   role: PortalRole;
   enabled: boolean;
   balance?: number;
+  accountId?: string | null;
   sourceAccountId?: string | null;
   createdAt?: string;
   updatedAt?: string;
