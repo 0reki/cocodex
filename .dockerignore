@@ -1,11 +1,9 @@
 .git
 .github
-node_modules
-**/node_modules
-.pnpm-store
-dist
-build
-coverage
+**/target
+codex
+sub2api
+data
 .env
 .env.*
 *.log

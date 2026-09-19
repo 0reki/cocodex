@@ -1,27 +1,16 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# Dependencies
-node_modules
-.pnpm-store
-
 # Local env files
 .env
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
-.env.e2e
 
-# Testing
-coverage
-
-# Build Outputs
-build
-dist
+# Runtime state (Setup config, settlement WAL)
 data
 
-# Debug
-pnpm-debug.log*
+# Build outputs
+target/
+crates/proxy/target
 
 # Misc
 .DS_Store
@@ -29,5 +18,3 @@ pnpm-debug.log*
 
 codex/
 sub2api/
-crates/proxy/target
-target/

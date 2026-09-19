@@ -1,30 +1,26 @@
-FROM node:24-alpine AS builder
+FROM rust:1-bookworm AS builder
 
 WORKDIR /app
-RUN corepack enable
-
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
-RUN pnpm install --frozen-lockfile
-
-COPY src ./src
 COPY sql ./sql
-RUN pnpm build
+COPY crates/proxy/Cargo.toml crates/proxy/Cargo.lock ./crates/proxy/
+COPY crates/proxy/src ./crates/proxy/src
+RUN cargo build --release --locked --manifest-path crates/proxy/Cargo.toml
 
-FROM node:24-alpine
+FROM debian:bookworm-slim
 
-WORKDIR /app
-RUN corepack enable
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --prod --frozen-lockfile
+COPY --from=builder /app/crates/proxy/target/release/cocodex /usr/local/bin/cocodex
 
-COPY --from=builder /app/dist ./dist
-COPY sql ./sql
+# Runs as root like the previous image, so existing /data volumes stay writable.
+ENV HOST=0.0.0.0 \
+    PORT=53141 \
+    COCODEX_CONFIG_PATH=/data/config.json \
+    NODE_ENV=production
 
-ENV NODE_ENV=production
-ENV HOST=0.0.0.0
-ENV PORT=53141
-
+WORKDIR /data
 EXPOSE 53141
 
-CMD ["node", "dist/src/server.js"]
+CMD ["cocodex"]

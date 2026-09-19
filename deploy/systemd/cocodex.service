@@ -1,5 +1,5 @@
 [Unit]
-Description=CoCodex Express Backend
+Description=CoCodex gateway and console backend
 After=network-online.target
 Wants=network-online.target
 PartOf=cocodex.target
@@ -8,20 +8,15 @@ PartOf=cocodex.target
 Type=simple
 User=ubuntu
 Group=ubuntu
-Environment=HOME=%h
-Environment=PNPM_HOME=%h/.local/share/pnpm
-Environment=PATH=%h/.local/share/pnpm:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=%h/cocodex
 Environment=NODE_ENV=production
 EnvironmentFile=-%h/cocodex/.env
-ExecStart=/usr/bin/env pnpm start
-ExecStop=/bin/kill -s SIGINT $MAINPID
+ExecStart=%h/cocodex/crates/proxy/target/release/cocodex
+# SIGTERM makes the server stop accepting connections and flush settlements.
+KillSignal=SIGTERM
+TimeoutStopSec=30
 Restart=always
 RestartSec=2
-TimeoutStopSec=30
-KillSignal=SIGINT
-KillMode=control-group
-SendSIGKILL=yes
 LimitNOFILE=65535
 
 [Install]
