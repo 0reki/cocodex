@@ -10,6 +10,7 @@ import type {
   getOpenAIAccountByEmail,
   listApiKeys,
   listOpenAIAccountsPage,
+  normalizeOpenAIAccountPlatform,
   normalizeOpenAIAccountStatus,
   OpenAIAccountRecord,
   updateApiKeyById,
@@ -43,6 +44,7 @@ type AdminRouteDependencies = Pick<
   activateOpenAIAccountByEmail: typeof activateOpenAIAccountByEmail;
   disableOpenAIAccountsByEmails: typeof disableOpenAIAccountsByEmails;
   normalizeOpenAIAccountStatus: typeof normalizeOpenAIAccountStatus;
+  normalizeOpenAIAccountPlatform: typeof normalizeOpenAIAccountPlatform;
   upsertOpenAIAccount: typeof upsertOpenAIAccount;
   requestCodexDeviceCode: typeof requestCodexDeviceCode;
   pollCodexDeviceAuth: typeof pollCodexDeviceAuth;
@@ -54,6 +56,7 @@ function publicOpenAIAccount(account: OpenAIAccountRecord) {
     email: account.email,
     accountId: account.accountId,
     status: account.status,
+    platform: account.platform,
     createdAt: account.createdAt,
     updatedAt: account.updatedAt,
   };
@@ -89,10 +92,21 @@ export function registerAdminRoutes(
     activateOpenAIAccountByEmail,
     disableOpenAIAccountsByEmails,
     normalizeOpenAIAccountStatus,
+    normalizeOpenAIAccountPlatform,
     upsertOpenAIAccount,
     requestCodexDeviceCode,
     pollCodexDeviceAuth,
   } = deps;
+
+  // Parses an optional account platform ("windows" | "linux" | "darwin" |
+  // "macos" | "all") from a JSON body. Returns null when absent.
+  function parseOptionalPlatform(body: Record<string, unknown>) {
+    const raw = typeof body.platform === "string" ? body.platform.trim() : "";
+    if (!raw) return { ok: true as const, platform: null };
+    const platform = normalizeOpenAIAccountPlatform(raw);
+    if (!platform) return { ok: false as const, platform: null };
+    return { ok: true as const, platform };
+  }
 
   app.get("/api/openai-accounts", async (req: Request, res: Response) => {
     try {
@@ -159,7 +173,9 @@ export function registerAdminRoutes(
       }
       const quotaInput = body.quota;
       let quota: string | null = null;
-      if (!(quotaInput === null || quotaInput === undefined || quotaInput === "")) {
+      if (
+        !(quotaInput === null || quotaInput === undefined || quotaInput === "")
+      ) {
         const quotaAmount = parseUsdAmount(quotaInput);
         if (quotaAmount === null || quotaAmount < 0n) {
           res.status(400).json({ ok: false, error: "quota is invalid" });
@@ -250,7 +266,9 @@ export function registerAdminRoutes(
 
       const quotaInput = body.quota;
       let quota: string | null = null;
-      if (!(quotaInput === null || quotaInput === undefined || quotaInput === "")) {
+      if (
+        !(quotaInput === null || quotaInput === undefined || quotaInput === "")
+      ) {
         const quotaAmount = parseUsdAmount(quotaInput);
         if (quotaAmount === null || quotaAmount < 0n) {
           res.status(400).json({ ok: false, error: "quota is invalid" });
@@ -293,144 +311,166 @@ export function registerAdminRoutes(
     }
   });
 
-  app.get("/api/openai-accounts/:email", async (req: Request, res: Response) => {
-    try {
-      const emailParam = req.params.email;
-      if (typeof emailParam !== "string" || !emailParam.trim()) {
-        res.status(400).json({ error: "email param is required" });
-        return;
-      }
-      const email = decodeURIComponent(emailParam);
-      const row = await getOpenAIAccountByEmail(email);
-      if (!row) {
-        res.status(404).json({ error: "Account not found" });
-        return;
-      }
+  app.get(
+    "/api/openai-accounts/:email",
+    async (req: Request, res: Response) => {
+      try {
+        const emailParam = req.params.email;
+        if (typeof emailParam !== "string" || !emailParam.trim()) {
+          res.status(400).json({ error: "email param is required" });
+          return;
+        }
+        const email = decodeURIComponent(emailParam);
+        const row = await getOpenAIAccountByEmail(email);
+        if (!row) {
+          res.status(404).json({ error: "Account not found" });
+          return;
+        }
 
-      res.json(publicOpenAIAccount(row));
-    } catch (error) {
-      res.status(500).json({
-        error: "Failed to fetch account",
-        detail: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
+        res.json(publicOpenAIAccount(row));
+      } catch (error) {
+        res.status(500).json({
+          error: "Failed to fetch account",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+  );
 
-  app.delete("/api/openai-accounts/:email", async (req: Request, res: Response) => {
-    try {
-      const emailParam = req.params.email;
-      if (typeof emailParam !== "string" || !emailParam.trim()) {
-        res.status(400).json({ ok: false, error: "email param is required" });
-        return;
+  app.delete(
+    "/api/openai-accounts/:email",
+    async (req: Request, res: Response) => {
+      try {
+        const emailParam = req.params.email;
+        if (typeof emailParam !== "string" || !emailParam.trim()) {
+          res.status(400).json({ ok: false, error: "email param is required" });
+          return;
+        }
+        const email = decodeURIComponent(emailParam);
+        const deleted = await deleteOpenAIAccountByEmail(email);
+        if (!deleted) {
+          res.status(404).json({ ok: false, error: "Account not found" });
+          return;
+        }
+        await invalidateActiveSourceAccount();
+        res.json({ ok: true, deleted: 1 });
+      } catch (error) {
+        res.status(500).json({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-      const email = decodeURIComponent(emailParam);
-      const deleted = await deleteOpenAIAccountByEmail(email);
-      if (!deleted) {
-        res.status(404).json({ ok: false, error: "Account not found" });
-        return;
-      }
-      await invalidateActiveSourceAccount();
-      res.json({ ok: true, deleted: 1 });
-    } catch (error) {
-      res.status(500).json({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
+    },
+  );
 
-  app.post("/api/openai-accounts/bulk-remove", async (req: Request, res: Response) => {
-    try {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const emails = Array.isArray(body.emails)
-        ? body.emails.filter((item): item is string => typeof item === "string")
-        : [];
-      if (emails.length === 0) {
-        res.status(400).json({ ok: false, error: "emails is required" });
-        return;
+  app.post(
+    "/api/openai-accounts/bulk-remove",
+    async (req: Request, res: Response) => {
+      try {
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const emails = Array.isArray(body.emails)
+          ? body.emails.filter(
+              (item): item is string => typeof item === "string",
+            )
+          : [];
+        if (emails.length === 0) {
+          res.status(400).json({ ok: false, error: "emails is required" });
+          return;
+        }
+        const deleted = await deleteOpenAIAccountsByEmails(emails);
+        if (deleted > 0) await invalidateActiveSourceAccount();
+        res.json({ ok: true, deleted, requested: emails.length });
+      } catch (error) {
+        res.status(500).json({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-      const deleted = await deleteOpenAIAccountsByEmails(emails);
-      if (deleted > 0) await invalidateActiveSourceAccount();
-      res.json({ ok: true, deleted, requested: emails.length });
-    } catch (error) {
-      res.status(500).json({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
+    },
+  );
 
-  app.post("/api/openai-accounts/:email/disable", async (req: Request, res: Response) => {
-    try {
-      const emailParam = req.params.email;
-      if (typeof emailParam !== "string" || !emailParam.trim()) {
-        res.status(400).json({ ok: false, error: "email param is required" });
-        return;
+  app.post(
+    "/api/openai-accounts/:email/disable",
+    async (req: Request, res: Response) => {
+      try {
+        const emailParam = req.params.email;
+        if (typeof emailParam !== "string" || !emailParam.trim()) {
+          res.status(400).json({ ok: false, error: "email param is required" });
+          return;
+        }
+        const email = decodeURIComponent(emailParam);
+        const updated = await disableOpenAIAccountByEmail(email);
+        if (!updated) {
+          res.status(404).json({ ok: false, error: "Account not found" });
+          return;
+        }
+        await invalidateActiveSourceAccount();
+        res.json({ ok: true, updated: 1, status: "disabled" });
+      } catch (error) {
+        res.status(500).json({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-      const email = decodeURIComponent(emailParam);
-      const updated = await disableOpenAIAccountByEmail(email);
-      if (!updated) {
-        res.status(404).json({ ok: false, error: "Account not found" });
-        return;
-      }
-      await invalidateActiveSourceAccount();
-      res.json({ ok: true, updated: 1, status: "disabled" });
-    } catch (error) {
-      res.status(500).json({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
+    },
+  );
 
-  app.post("/api/openai-accounts/:email/activate", async (req: Request, res: Response) => {
-    try {
-      const emailParam = req.params.email;
-      if (typeof emailParam !== "string" || !emailParam.trim()) {
-        res.status(400).json({ ok: false, error: "email param is required" });
-        return;
+  app.post(
+    "/api/openai-accounts/:email/activate",
+    async (req: Request, res: Response) => {
+      try {
+        const emailParam = req.params.email;
+        if (typeof emailParam !== "string" || !emailParam.trim()) {
+          res.status(400).json({ ok: false, error: "email param is required" });
+          return;
+        }
+        const email = decodeURIComponent(emailParam);
+        const updated = await activateOpenAIAccountByEmail(email);
+        if (!updated) {
+          res.status(404).json({ ok: false, error: "Account not found" });
+          return;
+        }
+        await invalidateActiveSourceAccount();
+        res.json({ ok: true, updated: 1, status: "active" });
+      } catch (error) {
+        res.status(500).json({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-      const email = decodeURIComponent(emailParam);
-      const updated = await activateOpenAIAccountByEmail(email);
-      if (!updated) {
-        res.status(404).json({ ok: false, error: "Account not found" });
-        return;
-      }
-      await invalidateActiveSourceAccount();
-      res.json({ ok: true, updated: 1, status: "active" });
-    } catch (error) {
-      res.status(500).json({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
+    },
+  );
 
-  app.post("/api/openai-accounts/bulk-disable", async (req: Request, res: Response) => {
-    try {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const emails = Array.isArray(body.emails)
-        ? body.emails.filter((item): item is string => typeof item === "string")
-        : [];
-      if (emails.length === 0) {
-        res.status(400).json({ ok: false, error: "emails is required" });
-        return;
+  app.post(
+    "/api/openai-accounts/bulk-disable",
+    async (req: Request, res: Response) => {
+      try {
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const emails = Array.isArray(body.emails)
+          ? body.emails.filter(
+              (item): item is string => typeof item === "string",
+            )
+          : [];
+        if (emails.length === 0) {
+          res.status(400).json({ ok: false, error: "emails is required" });
+          return;
+        }
+        const updated = await disableOpenAIAccountsByEmails(emails);
+        if (updated > 0) await invalidateActiveSourceAccount();
+        res.json({
+          ok: true,
+          updated,
+          requested: emails.length,
+          status: "disabled",
+        });
+      } catch (error) {
+        res.status(500).json({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-      const updated = await disableOpenAIAccountsByEmails(emails);
-      if (updated > 0) await invalidateActiveSourceAccount();
-      res.json({
-        ok: true,
-        updated,
-        requested: emails.length,
-        status: "disabled",
-      });
-    } catch (error) {
-      res.status(500).json({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
+    },
+  );
 
   app.post("/api/openai-accounts", async (req: Request, res: Response) => {
     try {
@@ -443,9 +483,7 @@ export function registerAdminRoutes(
       const accessToken =
         typeof body.accessToken === "string" ? body.accessToken.trim() : "";
       const refreshToken =
-        typeof body.refreshToken === "string"
-          ? body.refreshToken.trim()
-          : "";
+        typeof body.refreshToken === "string" ? body.refreshToken.trim() : "";
       const missingFields = [
         ["email", email],
         ["accountId", accountId],
@@ -470,10 +508,16 @@ export function registerAdminRoutes(
         res.status(400).json({ error: "status is invalid" });
         return;
       }
+      const platformInput = parseOptionalPlatform(body);
+      if (!platformInput.ok) {
+        res.status(400).json({ error: "platform is invalid" });
+        return;
+      }
       const row = await upsertOpenAIAccount({
         email,
         accountId,
         status,
+        platform: platformInput.platform,
         idToken,
         accessToken,
         refreshToken,
@@ -491,11 +535,18 @@ export function registerAdminRoutes(
 
   app.post(
     "/api/openai-accounts/device-auth/start",
-    async (_req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       try {
-        const deviceCode = await requestCodexDeviceCode();
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const platformInput = parseOptionalPlatform(body);
+        if (!platformInput.ok) {
+          res.status(400).json({ error: "platform is invalid" });
+          return;
+        }
+        const deviceCode = await requestCodexDeviceCode(platformInput.platform);
         res.status(201).json({
           ...deviceCode,
+          platform: platformInput.platform,
           expiresAt: new Date(
             Date.now() + deviceCode.expiresInSeconds * 1000,
           ).toISOString(),
@@ -524,8 +575,17 @@ export function registerAdminRoutes(
           });
           return;
         }
+        const platformInput = parseOptionalPlatform(body);
+        if (!platformInput.ok) {
+          res.status(400).json({ error: "platform is invalid" });
+          return;
+        }
 
-        const result = await pollCodexDeviceAuth({ deviceAuthId, userCode });
+        const result = await pollCodexDeviceAuth({
+          deviceAuthId,
+          userCode,
+          platform: platformInput.platform,
+        });
         if (result.status === "pending") {
           res.json(result);
           return;
@@ -534,6 +594,7 @@ export function registerAdminRoutes(
         const account = await upsertOpenAIAccount({
           email: result.email,
           accountId: result.accountId,
+          platform: platformInput.platform,
           idToken: result.idToken,
           accessToken: result.accessToken,
           refreshToken: result.refreshToken,
@@ -551,5 +612,4 @@ export function registerAdminRoutes(
       }
     },
   );
-
 }

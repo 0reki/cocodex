@@ -73,6 +73,20 @@ Token 和 Refresh Token，避免重复填充测试凭据。
 
 ## 伪订阅接入
 
+给 Codex CLI 用户跑接入脚本，写入 `~/.codex/config.toml` 并持久化刷新地址（Codex 不支持把刷新 URL 写进 toml）：
+
+```bash
+./scripts/install-codex-gateway.sh http://<网关>:53141 --login
+```
+
+Windows：
+
+```powershell
+./scripts/install-codex-gateway.ps1 http://<网关>:53141 -Login
+```
+
+脚本会设置 `openai_base_url`、`chatgpt_base_url`，以及环境变量 `CODEX_REFRESH_TOKEN_URL_OVERRIDE` / `CODEX_REVOKE_TOKEN_URL_OVERRIDE`，并执行 `codex login --device-auth --experimental_issuer <网关>`。
+
 Codex 客户端将 ChatGPT base URL 换成网关地址后，会按官方订阅路径发请求：
 
 - `GET|POST /backend-api/*`：原样转发到 `https://chatgpt.com` 同名路径

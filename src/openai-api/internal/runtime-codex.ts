@@ -3,7 +3,7 @@ import {
   DEFAULT_CODEX_ORIGINATOR,
   DEFAULT_CODEX_SANDBOX,
 } from "./runtime-constants.ts";
-import { buildCodexUserAgent } from "./client-identity.ts";
+import { buildCodexUserAgent, buildCodexUserAgentForPlatform } from "./client-identity.ts";
 
 const CLIENT_ACCOUNT_HEADERS = [
   "chatgpt-account-id",
@@ -30,6 +30,7 @@ export function buildCodexTransportHeaders(args: {
   sessionId: string;
   version: string;
   userAgent?: string;
+  platform?: string;
   originator?: string;
   requestHeaders?: HeadersInit;
 }): Record<string, string> {
@@ -54,7 +55,15 @@ export function buildCodexTransportHeaders(args: {
   if (!isProxyRequest && !forwarded.has("x-codex-turn-metadata")) {
     forwarded.set("x-codex-turn-metadata", buildCodexTurnMetadataHeader());
   }
-  forwarded.set("user-agent", buildCodexUserAgent(forwarded.get("version")!));
+  // Align the User-Agent with the platform the upstream account is registered
+  // on so the client identity never mutates between requests.
+  const forwardedVersion = forwarded.get("version")!;
+  forwarded.set(
+    "user-agent",
+    args.platform
+      ? buildCodexUserAgentForPlatform(args.platform, forwardedVersion)
+      : buildCodexUserAgent(forwardedVersion),
+  );
   const accountId = args.accountId?.trim();
   if (accountId) {
     forwarded.set("chatgpt-account-id", accountId);

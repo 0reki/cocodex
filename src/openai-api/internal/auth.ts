@@ -2,7 +2,11 @@ import {
   CODEX_OAUTH_CLIENT_ID,
   OPENAI_OAUTH_TOKEN_URL,
 } from "./runtime-constants.ts";
-import { getCodexUserAgent } from "./client-identity.ts";
+import {
+  getCodexUserAgent,
+  getCodexUserAgentForPlatform,
+  normalizeCodexClientPlatform,
+} from "./client-identity.ts";
 import type {
   CodexTokenRefreshResponse,
   RefreshCodexTokensOptions,
@@ -20,12 +24,21 @@ export async function refreshCodexTokens(
   const refreshToken = options.refreshToken.trim();
   if (!refreshToken) throw new Error("Missing refreshToken");
 
+  // Keep the User-Agent aligned with the platform the account was registered
+  // on, so token refreshes never mutate the client identity seen by OpenAI.
+  const platform = options.platform
+    ? normalizeCodexClientPlatform(options.platform)
+    : null;
+  const userAgent = platform
+    ? getCodexUserAgentForPlatform(platform)
+    : getCodexUserAgent();
+
   const response = await fetch(OPENAI_OAUTH_TOKEN_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
-      "User-Agent": getCodexUserAgent(),
+      "User-Agent": userAgent,
     },
     body: JSON.stringify({
       client_id: options.clientId?.trim() || CODEX_OAUTH_CLIENT_ID,

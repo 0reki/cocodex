@@ -4,6 +4,7 @@ export type RefreshCodexTokensOptions = {
   refreshToken: string;
   clientId?: string;
   userAgent?: string;
+  platform?: string;
   signal?: AbortSignal;
 };
 
@@ -18,6 +19,7 @@ export type GetCodexModelsOptions = {
   accountId?: string;
   clientVersion: string;
   userAgent?: string;
+  platform?: string;
   signal?: AbortSignal;
 };
 
@@ -30,6 +32,7 @@ export type GetCodexUsageOptions = {
   accountId?: string;
   clientVersion: string;
   userAgent?: string;
+  platform?: string;
   signal?: AbortSignal;
 };
 
@@ -46,6 +49,7 @@ export type PostCodexResponsesOptions = {
   requestHeaders?: HeadersInit;
   payload?: Record<string, unknown> | null;
   userAgent?: string;
+  platform?: string;
   originator?: string;
   signal?: AbortSignal;
 };
@@ -58,6 +62,7 @@ export type PostCodexSearchOptions = {
   requestHeaders?: HeadersInit;
   payload: Record<string, unknown>;
   userAgent?: string;
+  platform?: string;
   originator?: string;
   signal?: AbortSignal;
 };
@@ -73,6 +78,7 @@ export type PostCodexImageOptions = {
   requestHeaders?: HeadersInit;
   payload: Record<string, unknown>;
   userAgent?: string;
+  platform?: string;
   originator?: string;
   signal?: AbortSignal;
 };
@@ -85,6 +91,7 @@ export type ConnectCodexResponsesWebSocketOptions = {
   requestHeaders?: HeadersInit;
   query?: string;
   userAgent?: string;
+  platform?: string;
   originator?: string;
   signal?: AbortSignal;
 };
@@ -105,5 +112,6 @@ export type ForwardCodexBackendRequestOptions = {
   requestHeaders?: HeadersInit;
   body?: Buffer | Uint8Array | string | null;
   userAgent?: string;
+  platform?: string;
   signal?: AbortSignal;
 };

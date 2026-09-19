@@ -6,13 +6,56 @@ const RETRY_INTERVAL_MS = 60 * 60 * 1_000;
 const STABLE_VERSION = /^\d+\.\d+\.\d+$/;
 
 export function buildCodexUserAgent(version: string): string {
-  const architectures: Record<string, string> = { x64: "x86_64", arm64: "aarch64" };
+  const architectures: Record<string, string> = {
+    x64: "x86_64",
+    arm64: "aarch64",
+  };
   const architecture = architectures[os.arch()] ?? os.arch();
   // A headless backend has no interactive terminal to report.
   return `codex_cli_rs/${version} (${os.type()} ${os.release()}; ${architecture}) unknown`.replace(
     /[^\x20-\x7e]/g,
     "_",
   );
+}
+
+export type CodexClientPlatform = "windows" | "linux" | "darwin";
+
+// Mirrors Codex `get_codex_user_agent()`: os_info Type Display + a representative
+// version/arch/terminal. Not Node `os.type()` (`Windows_NT` / `Darwin`).
+const PLATFORM_USER_AGENT_TEMPLATES: Record<
+  CodexClientPlatform,
+  (version: string) => string
+> = {
+  windows: (version) =>
+    `codex_cli_rs/${version} (Windows 10.0.22631; x86_64) WindowsTerminal`,
+  linux: (version) => `codex_cli_rs/${version} (Debian 12; x86_64) unknown`,
+  darwin: (version) =>
+    `codex_cli_rs/${version} (Mac OS 14.5.0; arm64) Apple_Terminal`,
+};
+
+export function normalizeCodexClientPlatform(
+  platform: string,
+): CodexClientPlatform | null {
+  const normalized = platform.trim().toLowerCase();
+  if (normalized === "macos") return "darwin";
+  return (
+    (["windows", "linux", "darwin"] as const).find(
+      (item) => item === normalized,
+    ) ?? null
+  );
+}
+
+/** Builds the genuine native User-Agent for the given client platform. */
+export function buildCodexUserAgentForPlatform(
+  platform: string,
+  version: string,
+): string {
+  const normalized = normalizeCodexClientPlatform(platform);
+  const template = normalized
+    ? PLATFORM_USER_AGENT_TEMPLATES[normalized]
+    : null;
+  const userAgent = template ? template(version) : buildCodexUserAgent(version);
+  return userAgent.replace(/[^\x20-\x7e]/g, "_");
 }
 
 export function createCodexVersionResolver(deps: {
@@ -48,11 +91,12 @@ export function createCodexVersionResolver(deps: {
       if (!response.ok) {
         const reset = Number(response.headers.get("x-ratelimit-reset")) * 1_000;
         const retry = response.headers.get("retry-after");
-        const retryAt = retry === null
-          ? 0
-          : /^\d+$/.test(retry)
-            ? deps.now() + Number(retry) * 1_000
-            : Date.parse(retry);
+        const retryAt =
+          retry === null
+            ? 0
+            : /^\d+$/.test(retry)
+              ? deps.now() + Number(retry) * 1_000
+              : Date.parse(retry);
         if (response.status === 403 || response.status === 429) {
           nextCheckAt = Math.max(
             nextCheckAt,
@@ -68,9 +112,10 @@ export function createCodexVersionResolver(deps: {
         draft?: unknown;
         prerelease?: unknown;
       } | null;
-      const candidate = typeof release?.tag_name === "string"
-        ? release.tag_name.replace(/^rust-v/, "")
-        : "";
+      const candidate =
+        typeof release?.tag_name === "string"
+          ? release.tag_name.replace(/^rust-v/, "")
+          : "";
       if (
         !STABLE_VERSION.test(candidate) ||
         release?.draft !== false ||
@@ -83,9 +128,10 @@ export function createCodexVersionResolver(deps: {
       nextCheckAt = deps.now() + REFRESH_INTERVAL_MS;
     } catch (error) {
       // Do not log response bodies, request headers, or potentially credential-bearing errors.
-      const reason = error instanceof Error && /^HTTP \d+$/.test(error.message)
-        ? error.message
-        : "network error or invalid release metadata";
+      const reason =
+        error instanceof Error && /^HTTP \d+$/.test(error.message)
+          ? error.message
+          : "network error or invalid release metadata";
       deps.warn(`[codex-version] ${reason}; keeping ${version}`);
     }
   }
@@ -123,4 +169,8 @@ export const getCodexClientVersion = resolver.getVersion;
 
 export function getCodexUserAgent() {
   return buildCodexUserAgent(getCodexClientVersion());
+}
+
+export function getCodexUserAgentForPlatform(platform: string) {
+  return buildCodexUserAgentForPlatform(platform, getCodexClientVersion());
 }

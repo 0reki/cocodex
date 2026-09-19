@@ -2,12 +2,16 @@ import {
   CODEX_OAUTH_CLIENT_ID,
   OPENAI_OAUTH_TOKEN_URL,
 } from "./runtime-constants.ts";
-import { getCodexUserAgent } from "./client-identity.ts";
+import {
+  buildCodexUserAgentForPlatform,
+  getCodexClientVersion,
+  getCodexUserAgent,
+  normalizeCodexClientPlatform,
+} from "./client-identity.ts";
 
 const OPENAI_ACCOUNTS_API_URL = "https://auth.openai.com/api/accounts";
 const CODEX_DEVICE_VERIFICATION_URL = "https://auth.openai.com/codex/device";
-const CODEX_DEVICE_CALLBACK_URL =
-  "https://auth.openai.com/deviceauth/callback";
+const CODEX_DEVICE_CALLBACK_URL = "https://auth.openai.com/deviceauth/callback";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -39,6 +43,13 @@ function stringValue(record: JsonRecord | null, key: string) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function deviceAuthUserAgent(platform?: string | null) {
+  const normalized = platform ? normalizeCodexClientPlatform(platform) : null;
+  return normalized
+    ? buildCodexUserAgentForPlatform(normalized, getCodexClientVersion())
+    : getCodexUserAgent();
+}
+
 async function readJson(response: Response, endpoint: string) {
   const text = await response.text();
   if (!response.ok) {
@@ -63,7 +74,9 @@ function parseIdTokenClaims(idToken: string) {
   }
 }
 
-export async function requestCodexDeviceCode(): Promise<CodexDeviceCode> {
+export async function requestCodexDeviceCode(
+  platform?: string | null,
+): Promise<CodexDeviceCode> {
   const response = await fetch(
     `${OPENAI_ACCOUNTS_API_URL}/deviceauth/usercode`,
     {
@@ -71,7 +84,7 @@ export async function requestCodexDeviceCode(): Promise<CodexDeviceCode> {
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
-        "User-Agent": getCodexUserAgent(),
+        "User-Agent": deviceAuthUserAgent(platform),
       },
       body: JSON.stringify({ client_id: CODEX_OAUTH_CLIENT_ID }),
     },
@@ -103,7 +116,9 @@ export async function requestCodexDeviceCode(): Promise<CodexDeviceCode> {
 export async function pollCodexDeviceAuth(input: {
   deviceAuthId: string;
   userCode: string;
+  platform?: string | null;
 }): Promise<CodexDeviceAuthPollResult> {
+  const userAgent = deviceAuthUserAgent(input.platform);
   const pollResponse = await fetch(
     `${OPENAI_ACCOUNTS_API_URL}/deviceauth/token`,
     {
@@ -111,7 +126,7 @@ export async function pollCodexDeviceAuth(input: {
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
-        "User-Agent": getCodexUserAgent(),
+        "User-Agent": userAgent,
       },
       body: JSON.stringify({
         device_auth_id: input.deviceAuthId,
@@ -135,7 +150,7 @@ export async function pollCodexDeviceAuth(input: {
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       Accept: "application/json",
-      "User-Agent": getCodexUserAgent(),
+      "User-Agent": userAgent,
     },
     body: new URLSearchParams({
       grant_type: "authorization_code",

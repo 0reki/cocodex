@@ -1,20 +1,22 @@
-import { query, withTransaction } from "../../core/db.ts"
+import { query, withTransaction } from "../../core/db.ts";
 
 function normalizeEmails(emails: string[]) {
-  return Array.from(new Set(emails.map((email) => email.trim()).filter(Boolean)))
+  return Array.from(
+    new Set(emails.map((email) => email.trim()).filter(Boolean)),
+  );
 }
 
 export async function deleteOpenAIAccountByEmail(email: string) {
   const result = await query<{ id: string }>(
     `DELETE FROM openai_accounts WHERE email = $1 RETURNING id`,
     [email],
-  )
-  return Boolean(result.rows[0])
+  );
+  return Boolean(result.rows[0]);
 }
 
 export async function deleteOpenAIAccountsByEmails(emails: string[]) {
-  const normalized = normalizeEmails(emails)
-  if (!normalized.length) return 0
+  const normalized = normalizeEmails(emails);
+  if (!normalized.length) return 0;
 
   const result = await query<{ count: string }>(
     `
@@ -26,8 +28,8 @@ export async function deleteOpenAIAccountsByEmails(emails: string[]) {
       SELECT COUNT(*)::text AS count FROM deleted
     `,
     [normalized],
-  )
-  return Number(result.rows[0]?.count ?? "0")
+  );
+  return Number(result.rows[0]?.count ?? "0");
 }
 
 export async function disableOpenAIAccountByEmail(email: string) {
@@ -39,13 +41,13 @@ export async function disableOpenAIAccountByEmail(email: string) {
       RETURNING id
     `,
     [email],
-  )
-  return Boolean(result.rows[0])
+  );
+  return Boolean(result.rows[0]);
 }
 
 export async function disableOpenAIAccountsByEmails(emails: string[]) {
-  const normalized = normalizeEmails(emails)
-  if (!normalized.length) return 0
+  const normalized = normalizeEmails(emails);
+  if (!normalized.length) return 0;
 
   const result = await query<{ count: string }>(
     `
@@ -58,17 +60,17 @@ export async function disableOpenAIAccountsByEmails(emails: string[]) {
       SELECT COUNT(*)::text AS count FROM updated
     `,
     [normalized],
-  )
-  return Number(result.rows[0]?.count ?? "0")
+  );
+  return Number(result.rows[0]?.count ?? "0");
 }
 
 export async function activateOpenAIAccountByEmail(email: string) {
   return withTransaction(async (client) => {
-    const target = await client.query<{ id: string }>(
-      `SELECT id FROM openai_accounts WHERE email = $1 FOR UPDATE`,
+    const target = await client.query<{ id: string; platform: string | null }>(
+      `SELECT id, platform FROM openai_accounts WHERE email = $1 FOR UPDATE`,
       [email],
-    )
-    if (!target.rows[0]) return false
+    );
+    if (!target.rows[0]) return false;
 
     await client.query(
       `
@@ -76,9 +78,11 @@ export async function activateOpenAIAccountByEmail(email: string) {
         SET status = 'inactive'
         WHERE LOWER(TRIM(status)) = 'active'
           AND email <> $1
+          AND LOWER(TRIM(COALESCE(platform, 'all'))) =
+            LOWER(TRIM(COALESCE($2, 'all')))
       `,
-      [email],
-    )
+      [email, target.rows[0].platform],
+    );
     await client.query(
       `
         UPDATE openai_accounts
@@ -86,17 +90,17 @@ export async function activateOpenAIAccountByEmail(email: string) {
         WHERE email = $1
       `,
       [email],
-    )
-    return true
-  })
+    );
+    return true;
+  });
 }
 
 export async function updateOpenAIAccountTokensById(
   id: string,
   tokens: {
-    idToken?: string | null
-    accessToken: string
-    refreshToken?: string | null
+    idToken?: string | null;
+    accessToken: string;
+    refreshToken?: string | null;
   },
 ) {
   const result = await query<{ id: string }>(
@@ -114,6 +118,6 @@ export async function updateOpenAIAccountTokensById(
       tokens.accessToken.trim(),
       tokens.refreshToken?.trim() || null,
     ],
-  )
-  return (result.rowCount ?? 0) > 0
+  );
+  return (result.rowCount ?? 0) > 0;
 }

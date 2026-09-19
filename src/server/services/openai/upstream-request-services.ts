@@ -1,5 +1,3 @@
-import type { WsSocket } from "../../utils/network/ws.ts";
-
 type RuntimeConfig = {
   userAgent: string;
   clientVersion: string;
@@ -11,12 +9,14 @@ type UpstreamSourceAccountRecord = {
   accessToken: string;
   accountId: string;
   refreshToken: string;
+  platform?: string | null;
 };
 
 type OpenAIApiModule = {
   refreshCodexTokens?: (args: {
     refreshToken: string;
     userAgent?: string;
+    platform?: string;
     signal?: AbortSignal;
   }) => Promise<{
     idToken?: string | null;
@@ -28,6 +28,7 @@ type OpenAIApiModule = {
     accountId?: string;
     clientVersion: string;
     userAgent?: string;
+    platform?: string;
     signal?: AbortSignal;
   }) => Promise<{ models?: Array<Record<string, unknown>> }>;
   getCodexUsage?: (args: {
@@ -35,6 +36,7 @@ type OpenAIApiModule = {
     accountId?: string;
     clientVersion: string;
     userAgent?: string;
+    platform?: string;
     signal?: AbortSignal;
   }) => Promise<Record<string, unknown>>;
   getCodexDailyWorkspaceUsage?: (args: {
@@ -42,6 +44,7 @@ type OpenAIApiModule = {
     accountId?: string;
     clientVersion: string;
     userAgent?: string;
+    platform?: string;
     startDate: string;
     endDate: string;
     signal?: AbortSignal;
@@ -54,6 +57,7 @@ type OpenAIApiModule = {
     requestHeaders?: HeadersInit;
     payload?: Record<string, unknown> | null;
     userAgent?: string;
+    platform?: string;
     signal?: AbortSignal;
   }) => Promise<Response>;
   postCodexImage?: (args: {
@@ -65,6 +69,7 @@ type OpenAIApiModule = {
     requestHeaders?: HeadersInit;
     payload: Record<string, unknown>;
     userAgent?: string;
+    platform?: string;
     signal?: AbortSignal;
   }) => Promise<Response>;
   postCodexSearch?: (args: {
@@ -75,6 +80,7 @@ type OpenAIApiModule = {
     requestHeaders?: HeadersInit;
     payload: Record<string, unknown>;
     userAgent?: string;
+    platform?: string;
     signal?: AbortSignal;
   }) => Promise<Response>;
   forwardCodexBackendRequest?: (args: {
@@ -88,6 +94,7 @@ type OpenAIApiModule = {
     requestHeaders?: HeadersInit;
     body?: Buffer | Uint8Array | string | null;
     userAgent?: string;
+    platform?: string;
     signal?: AbortSignal;
   }) => Promise<Response>;
   connectCodexResponsesWebSocket?: (args: {
@@ -98,6 +105,7 @@ type OpenAIApiModule = {
     requestHeaders?: HeadersInit;
     query?: string;
     userAgent?: string;
+    platform?: string;
     signal?: AbortSignal;
   }) => Promise<unknown>;
 };
@@ -116,6 +124,7 @@ export function createUpstreamRequestServices(deps: {
     },
   ) => Promise<unknown>;
   isTokenInvalidatedError: (error: unknown) => boolean;
+  onUpstreamInvalidate?: () => void;
 }) {
   type RefreshedAccountTokens = {
     idToken: string | null;
@@ -139,6 +148,7 @@ export function createUpstreamRequestServices(deps: {
       .catch(() => undefined)
       .then(async () => {
         await deps.updateOpenAIAccountTokensById(accountId, tokens);
+        deps.onUpstreamInvalidate?.();
       })
       .catch((error) => {
         console.warn(
@@ -174,7 +184,9 @@ export function createUpstreamRequestServices(deps: {
       typeof socket.terminate !== "function" ||
       typeof socket.on !== "function"
     ) {
-      throw new Error("Responses WebSocket connector returned an invalid socket");
+      throw new Error(
+        "Responses WebSocket connector returned an invalid socket",
+      );
     }
     return value as WsSocket;
   }
@@ -242,6 +254,9 @@ export function createUpstreamRequestServices(deps: {
         const refreshed = await module.refreshCodexTokens!({
           refreshToken,
           userAgent: runtimeConfig.userAgent,
+          // Refresh with the User-Agent of the platform the account is
+          // registered on so the client identity never mutates upstream.
+          platform: account.platform ?? undefined,
           signal: AbortSignal.timeout(15_000),
         });
         const accessToken = refreshed.accessToken?.trim() ?? "";
@@ -303,6 +318,7 @@ export function createUpstreamRequestServices(deps: {
       accountId: string;
       clientVersion: string;
       userAgent: string;
+      platform: string | undefined;
     }) => Promise<T>;
   }) {
     const { module, account, runtimeConfig, call } = params;
@@ -313,6 +329,7 @@ export function createUpstreamRequestServices(deps: {
         accountId,
         clientVersion: runtimeConfig.clientVersion,
         userAgent: runtimeConfig.userAgent,
+        platform: account.platform ?? undefined,
       });
     try {
       return await callUpstream(accessToken);
@@ -354,6 +371,7 @@ export function createUpstreamRequestServices(deps: {
         requestHeaders,
         payload,
         userAgent: runtimeConfig.userAgent,
+        platform: account.platform ?? undefined,
         signal,
       });
 
@@ -399,6 +417,7 @@ export function createUpstreamRequestServices(deps: {
         requestHeaders: params.requestHeaders,
         body: params.body,
         userAgent: runtimeConfig.userAgent,
+        platform: account.platform ?? undefined,
         signal: params.signal,
       });
     const response = await callUpstream(accessToken);
@@ -431,6 +450,7 @@ export function createUpstreamRequestServices(deps: {
         accountId,
         clientVersion: runtimeConfig.clientVersion,
         userAgent: runtimeConfig.userAgent,
+        platform: account.platform ?? undefined,
         signal,
       });
 
@@ -476,14 +496,8 @@ export function createUpstreamRequestServices(deps: {
     endDate: string;
     signal?: AbortSignal;
   }) {
-    const {
-      module,
-      account,
-      runtimeConfig,
-      startDate,
-      endDate,
-      signal,
-    } = params;
+    const { module, account, runtimeConfig, startDate, endDate, signal } =
+      params;
     if (typeof module.getCodexDailyWorkspaceUsage !== "function") {
       throw new Error(
         "getCodexDailyWorkspaceUsage is not exported from the internal OpenAI module",
@@ -538,6 +552,7 @@ export function createUpstreamRequestServices(deps: {
         requestHeaders,
         payload,
         userAgent: runtimeConfig.userAgent,
+        platform: account.platform ?? undefined,
         signal,
       });
 
@@ -578,6 +593,7 @@ export function createUpstreamRequestServices(deps: {
         requestHeaders,
         payload,
         userAgent: runtimeConfig.userAgent,
+        platform: account.platform ?? undefined,
         signal,
       });
 
@@ -618,6 +634,7 @@ export function createUpstreamRequestServices(deps: {
         requestHeaders,
         query,
         userAgent: runtimeConfig.userAgent,
+        platform: account.platform ?? undefined,
         signal,
       });
       return requireWsConnection(connection);

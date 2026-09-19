@@ -3,7 +3,9 @@ import { setImmediate } from "node:timers/promises";
 import test from "node:test";
 import {
   buildCodexUserAgent,
+  buildCodexUserAgentForPlatform,
   createCodexVersionResolver,
+  normalizeCodexClientPlatform,
 } from "../src/openai-api/internal/client-identity.ts";
 import { buildCodexTransportHeaders } from "../src/openai-api/internal/runtime-codex.ts";
 import { getCodexModels } from "../src/openai-api/internal/accounts.ts";
@@ -172,4 +174,67 @@ test("models, usage and all OAuth calls send Codex UA without leaking GitHub tok
     assert.ok(!url.includes("github.com"));
     assert.ok(!JSON.stringify([...headers]).includes("github-only-test-secret"));
   }
+});
+
+test("platform user agents map to genuine native OS identities", () => {
+  assert.equal(
+    buildCodexUserAgentForPlatform("windows", "0.154.0"),
+    "codex_cli_rs/0.154.0 (Windows 10.0.22631; x86_64) WindowsTerminal",
+  );
+  assert.equal(
+    buildCodexUserAgentForPlatform("linux", "0.154.0"),
+    "codex_cli_rs/0.154.0 (Debian 12; x86_64) unknown",
+  );
+  assert.equal(
+    buildCodexUserAgentForPlatform("darwin", "0.154.0"),
+    "codex_cli_rs/0.154.0 (Mac OS 14.5.0; arm64) Apple_Terminal",
+  );
+  // "macos" is an alias for the darwin identity.
+  assert.equal(
+    buildCodexUserAgentForPlatform("macos", "0.154.0"),
+    buildCodexUserAgentForPlatform("darwin", "0.154.0"),
+  );
+  // Unknown platforms fall back to the host identity instead of inventing one.
+  assert.equal(
+    buildCodexUserAgentForPlatform("android", "0.154.0"),
+    buildCodexUserAgent("0.154.0"),
+  );
+  assert.equal(normalizeCodexClientPlatform(" Windows "), "windows");
+  assert.equal(normalizeCodexClientPlatform("macos"), "darwin");
+  assert.equal(normalizeCodexClientPlatform("android"), null);
+});
+
+test("device auth and token refresh align the User-Agent with the selected platform", async (t) => {
+  const previousVersion = process.env.CODEX_CLIENT_VERSION;
+  process.env.CODEX_CLIENT_VERSION = "0.154.0";
+  t.after(() => {
+    if (previousVersion === undefined) delete process.env.CODEX_CLIENT_VERSION;
+    else process.env.CODEX_CLIENT_VERSION = previousVersion;
+  });
+  const claims = Buffer.from(JSON.stringify({
+    email: "test@example.com",
+    "https://api.openai.com/auth": { chatgpt_account_id: "account" },
+  })).toString("base64url");
+  const seenUserAgents = [];
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    seenUserAgents.push(new Headers(options.headers).get("user-agent"));
+    return Response.json({
+      device_auth_id: "device", user_code: "code", interval: 5,
+      authorization_code: "code", code_verifier: "verifier",
+      id_token: `header.${claims}.signature`,
+      access_token: "access", refresh_token: "refresh",
+    });
+  });
+
+  await requestCodexDeviceCode("windows");
+  await pollCodexDeviceAuth({ deviceAuthId: "device", userCode: "code", platform: "darwin" });
+  await refreshCodexTokens({ refreshToken: "refresh", platform: "linux" });
+
+  assert.equal(seenUserAgents.length, 4);
+  assert.ok(seenUserAgents[0].includes("(Windows 10.0.22631;"));
+  assert.ok(seenUserAgents[0].endsWith("WindowsTerminal"));
+  assert.ok(seenUserAgents.slice(1, 3).every((ua) => ua.includes("(Mac OS 14.5.0;")));
+  assert.ok(seenUserAgents[3].includes("(Debian 12;"));
+  // No request ever uses a non-Codex or host-mismatched identity.
+  assert.ok(seenUserAgents.every((ua) => ua.startsWith("codex_cli_rs/0.154.0")));
 });

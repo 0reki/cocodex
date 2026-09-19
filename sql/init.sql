@@ -14,9 +14,16 @@ CREATE TABLE IF NOT EXISTS portal_users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
   enabled BOOLEAN NOT NULL DEFAULT true,
+  quota NUMERIC(20, 8),
+  used NUMERIC(20, 8) NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
 );
+
+ALTER TABLE portal_users
+  ADD COLUMN IF NOT EXISTS quota NUMERIC(20, 8);
+ALTER TABLE portal_users
+  ADD COLUMN IF NOT EXISTS used NUMERIC(20, 8) NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_portal_users_role ON portal_users (role);
 CREATE INDEX IF NOT EXISTS idx_portal_users_enabled ON portal_users (enabled);
@@ -46,6 +53,7 @@ CREATE TABLE IF NOT EXISTS openai_accounts (
   email TEXT NOT NULL UNIQUE,
   account_id TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'inactive',
+  platform VARCHAR(32) NOT NULL DEFAULT 'all',
   id_token TEXT NOT NULL,
   access_token TEXT NOT NULL,
   refresh_token TEXT NOT NULL,
@@ -53,12 +61,18 @@ CREATE TABLE IF NOT EXISTS openai_accounts (
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
 );
 
+ALTER TABLE openai_accounts
+  ADD COLUMN IF NOT EXISTS platform VARCHAR(32) NOT NULL DEFAULT 'all';
+
 CREATE INDEX IF NOT EXISTS idx_openai_accounts_account_id
   ON openai_accounts (account_id);
 CREATE INDEX IF NOT EXISTS idx_openai_accounts_status
   ON openai_accounts (status);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_openai_accounts_single_active
-  ON openai_accounts ((LOWER(TRIM(status))))
+CREATE INDEX IF NOT EXISTS idx_openai_accounts_platform
+  ON openai_accounts (platform);
+DROP INDEX IF EXISTS uq_openai_accounts_single_active;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_openai_accounts_single_active_per_platform
+  ON openai_accounts ((LOWER(TRIM(status))), (LOWER(TRIM(platform))))
   WHERE LOWER(TRIM(status)) = 'active';
 CREATE INDEX IF NOT EXISTS idx_openai_accounts_updated_at
   ON openai_accounts (updated_at DESC);
@@ -264,6 +278,33 @@ CREATE TRIGGER trg_set_updated_at_on_api_keys
   FOR EACH ROW
   EXECUTE FUNCTION set_updated_at();
 
+CREATE TABLE IF NOT EXISTS codex_client_refresh_tokens (
+  token_hash TEXT PRIMARY KEY,
+  api_key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL,
+  owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  expires_at TIMESTAMPTZ(6) NOT NULL,
+  created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
+);
+
+ALTER TABLE codex_client_refresh_tokens
+  ALTER COLUMN api_key_id DROP NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_codex_client_refresh_tokens_owner
+  ON codex_client_refresh_tokens (owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_codex_client_refresh_tokens_api_key
+  ON codex_client_refresh_tokens (api_key_id);
+CREATE INDEX IF NOT EXISTS idx_codex_client_refresh_tokens_expires
+  ON codex_client_refresh_tokens (expires_at);
+
+DROP TRIGGER IF EXISTS trg_set_updated_at_on_codex_client_refresh_tokens
+  ON codex_client_refresh_tokens;
+CREATE TRIGGER trg_set_updated_at_on_codex_client_refresh_tokens
+  BEFORE UPDATE ON codex_client_refresh_tokens
+  FOR EACH ROW
+  EXECUTE FUNCTION set_updated_at();
+
 CREATE TABLE IF NOT EXISTS model_response_logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   settlement_id TEXT NOT NULL DEFAULT gen_random_uuid()::text UNIQUE,
@@ -324,3 +365,23 @@ CREATE INDEX IF NOT EXISTS idx_model_response_log_rollups_model_hour
 DROP TRIGGER IF EXISTS trg_upsert_model_response_log_hourly_rollup
   ON model_response_logs;
 DROP FUNCTION IF EXISTS upsert_model_response_log_hourly_rollup();
+
+UPDATE portal_users users
+SET
+  quota = keys.quota,
+  used = COALESCE(keys.used, 0)
+FROM (
+  SELECT DISTINCT ON (owner_user_id)
+    owner_user_id,
+    quota,
+    used
+  FROM api_keys
+  WHERE revoked_at IS NULL
+  ORDER BY
+    owner_user_id,
+    CASE WHEN name = 'Codex client' THEN 0 ELSE 1 END,
+    updated_at DESC
+) keys
+WHERE keys.owner_user_id = users.id
+  AND users.quota IS NULL
+  AND COALESCE(users.used, 0) = 0;

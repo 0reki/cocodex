@@ -187,6 +187,8 @@ export async function registerPortalUserWithInvitation(input: {
       passwordHash: user.password_hash,
       role: user.role === "admin" ? "admin" : "user",
       enabled: user.enabled,
+      quota: null,
+      used: "0",
       createdAt: user.created_at.toISOString(),
       updatedAt: user.updated_at.toISOString(),
     };

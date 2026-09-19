@@ -215,6 +215,7 @@ export function createResponseSettlementServices(deps: {
   ) => Promise<{
     acceptedSettlementIds: string[];
     apiKeyUsedUsd: Record<string, string>;
+    ownerUsedUsd?: Record<string, string>;
   }>;
   applyApiKeyPendingCharge: (apiKeyId: string, amount: UsdAmount) => void;
   settleApiKeyPendingCharge: (
@@ -223,6 +224,7 @@ export function createResponseSettlementServices(deps: {
     accepted: boolean,
     committedUsedUsd?: string,
   ) => void;
+  onOwnerSettled?: (ownerUserId: string, usedUsd: string) => void;
   batchSize: number;
   flushIntervalMs: number;
   settledIdCacheSize: number;
@@ -614,6 +616,11 @@ export function createResponseSettlementServices(deps: {
           );
         }
         cacheSettledIds.add(item.settlementId);
+      }
+      for (const [ownerUserId, usedUsd] of Object.entries(
+        result.ownerUsedUsd ?? {},
+      )) {
+        deps.onOwnerSettled?.(ownerUserId, usedUsd);
       }
       await appendWalAcknowledgement(batch.map((item) => item.settlementId));
       for (const item of batch) {

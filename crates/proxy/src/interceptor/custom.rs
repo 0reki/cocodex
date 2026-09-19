@@ -1,150 +1,435 @@
+use super::observe::{classify_backend_kind, BackendKind};
+use super::platform::{detect_platform, PLATFORM_HEADER};
 use super::{Interceptor, RequestAction, RequestContext, WsAction};
+use crate::auth::jwt::{ClientJwt, JwtError};
+use crate::ipc::protocol::{
+    ReportUsageParams, ResolveUpstreamAccountResult, VerifyOwnerResult,
+};
+use crate::ipc::{IpcClient, OwnerAuthCache, UpstreamAccountCache};
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::response::Response;
+use axum::http::header::{HeaderValue, CONTENT_TYPE};
+use axum::response::{IntoResponse, Response};
 use http::Request;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-/// User-customizable interceptor.
-///
-/// You can implement your own custom logic in this struct:
-/// - Modify or inspect requests before they reach upstream ChatGPT
-/// - Replace or inject client/upstream credentials
-/// - Inspect or transform SSE streams and WebSocket messages
-/// - Settle usage metrics, quotas, or trigger alerts
-#[derive(Debug, Default, Clone)]
+/// Default interceptor: verify the Codex-shaped client JWT, route to a
+/// platform-isolated upstream account, then settle usage/logs over IPC.
 pub struct CustomInterceptor {
-    // Add any state needed for your custom operations here,
-    // such as a cache, database client, HTTP client, or config.
+    ipc: IpcClient,
+    jwt: ClientJwt,
+    auth_cache: OwnerAuthCache,
+    account_cache: UpstreamAccountCache,
 }
 
 impl CustomInterceptor {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(ipc: IpcClient, jwt: ClientJwt) -> Self {
+        let auth_cache = ipc.owner_auth_cache();
+        let account_cache = ipc.upstream_account_cache();
+        Self {
+            ipc,
+            jwt,
+            auth_cache,
+            account_cache,
+        }
+    }
+
+    async fn verify_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<VerifyOwnerResult, crate::ipc::IpcClientError> {
+        if let Some(cached) = self.auth_cache.get(owner_user_id).await {
+            return Ok(cached);
+        }
+
+        let result = self.ipc.verify_owner_user_id(owner_user_id).await?;
+        self.auth_cache
+            .remember(owner_user_id.to_string(), result.clone())
+            .await;
+        Ok(result)
+    }
+
+    async fn resolve_platform_account(
+        &self,
+        platform: &str,
+    ) -> Result<ResolveUpstreamAccountResult, crate::ipc::IpcClientError> {
+        if let Some(cached) = self.account_cache.get(platform).await {
+            return Ok(cached);
+        }
+
+        let account = self.ipc.resolve_upstream_account(platform).await?;
+        self.account_cache
+            .remember(platform.to_string(), account.clone())
+            .await;
+        Ok(account)
     }
 }
 
 #[async_trait]
 impl Interceptor for CustomInterceptor {
-    /// Called before an incoming `/backend-api/*` HTTP request is forwarded to upstream ChatGPT.
-    ///
-    /// Custom operations you can perform here:
-    /// 1. Inspect or modify request body (JSON or zstd).
-    /// 2. Change the target path or query params.
-    /// 3. Inject custom headers or modify existing ones.
-    /// 4. Swap tokens: read client token and set upstream token in `ctx.upstream_token`.
-    /// 5. Return `RequestAction::ShortCircuit(response)` to intercept and reply directly.
     async fn on_request(
         &self,
         ctx: &mut RequestContext,
         req: Request<Body>,
     ) -> Result<RequestAction, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(platform) = detect_platform(req.headers()) else {
+            return Ok(RequestAction::ShortCircuit(auth_error(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Invalid access token",
+            )));
+        };
+        ctx.metadata
+            .insert("platform".to_string(), platform.as_str().to_string());
+
         debug!(
             request_id = %ctx.request_id,
             method = %ctx.method,
             path = %ctx.path,
+            platform = platform.as_str(),
             "CustomInterceptor: on_request hook"
         );
 
-        // [USER HOOK POINT: REQUEST]
-        // Example: If client sent an internal token, swap it for an upstream token:
-        // if let Some(token) = &ctx.client_token {
-        //     ctx.upstream_token = Some(resolve_upstream_token(token).await);
-        // }
+        let Some(client_token) = ctx.client_token.clone() else {
+            return Ok(RequestAction::ShortCircuit(auth_error(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Missing Authorization bearer token",
+            )));
+        };
+
+        let claims = match self.jwt.verify_access_token(&client_token) {
+            Ok(claims) => claims,
+            Err(JwtError::Expired) => {
+                return Ok(RequestAction::ShortCircuit(auth_error(
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    "Access token has expired",
+                )));
+            }
+            Err(JwtError::Invalid) => {
+                return Ok(RequestAction::ShortCircuit(auth_error(
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    "Invalid access token",
+                )));
+            }
+        };
+
+        let owner_user_id = claims.openai_auth.chatgpt_account_id.clone();
+        if let Ok(mut obs) = ctx.observation.lock() {
+            obs.owner_user_id = Some(owner_user_id.clone());
+        }
+        ctx.metadata
+            .insert("owner_user_id".into(), owner_user_id.clone());
+
+        let verified = match self.verify_owner(&owner_user_id).await {
+            Ok(result) => result,
+            Err(error) => {
+                warn!(
+                    request_id = %ctx.request_id,
+                    error = %error,
+                    "API key quota verification IPC failed"
+                );
+                return Ok(RequestAction::ShortCircuit(auth_error(
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "upstream_error",
+                    "Failed to verify access token",
+                )));
+            }
+        };
+        if let Some(user) = &verified.user {
+            if let Ok(mut obs) = ctx.observation.lock() {
+                obs.owner_user_id = Some(user.id.clone());
+            }
+            ctx.metadata.insert("owner_user_id".into(), user.id.clone());
+        }
+        if !verified.valid || verified.user.is_none() {
+            let (status, code, message) = map_verify_error(verified.error.as_deref());
+            return Ok(RequestAction::ShortCircuit(auth_error(status, code, message)));
+        }
+
+        let account = match self.resolve_platform_account(platform.as_str()).await {
+            Ok(account) => account,
+            Err(crate::ipc::IpcClientError::Rpc { message, .. }) => {
+                warn!(
+                    request_id = %ctx.request_id,
+                    platform = platform.as_str(),
+                    error = %message,
+                    "No upstream account configured for platform"
+                );
+                return Ok(RequestAction::ShortCircuit(
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        format!(
+                            "No upstream account configured for platform '{}': {message}",
+                            platform.as_str()
+                        ),
+                    )
+                        .into_response(),
+                ));
+            }
+            Err(error) => {
+                warn!(
+                    request_id = %ctx.request_id,
+                    platform = platform.as_str(),
+                    error = %error,
+                    "Failed to resolve platform upstream account"
+                );
+                return Ok(RequestAction::ShortCircuit(auth_error(
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "upstream_error",
+                    "Failed to resolve upstream account",
+                )));
+            }
+        };
+
+        info!(
+            request_id = %ctx.request_id,
+            platform = platform.as_str(),
+            account_id = %account.account_id,
+            "Routing request to platform-isolated upstream account"
+        );
+
+        ctx.upstream_token = Some(account.access_token.clone());
+        ctx.upstream_account_id = Some(account.account_id.clone());
+        ctx.upstream_user_agent = Some(account.user_agent.clone());
+        ctx.upstream_client_version =
+            crate::forwarder::client_version_from_user_agent(&account.user_agent);
+        ctx.upstream_installation_id = Some(crate::forwarder::gateway_installation_id(
+            &account.account_id,
+            platform.as_str(),
+        ));
+
+        let (mut parts, body) = req.into_parts();
+        parts.headers.remove(PLATFORM_HEADER);
+        let req = Request::from_parts(parts, body);
 
         Ok(RequestAction::Forward(req))
     }
 
-    /// Called when upstream ChatGPT responds with headers and status, before streaming starts.
-    ///
-    /// Custom operations you can perform here:
-    /// 1. Check or log upstream status code (e.g. detect 401/429).
-    /// 2. Add, remove, or modify response headers returned to the client.
     async fn on_response(
         &self,
         ctx: &RequestContext,
         resp: Response,
     ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
-        debug!(
-            request_id = %ctx.request_id,
-            status = %resp.status(),
-            "CustomInterceptor: on_response hook"
-        );
-
-        // [USER HOOK POINT: RESPONSE HEADERS/STATUS]
+        if let Ok(mut obs) = ctx.observation.lock() {
+            if let Some(content_type) = resp.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok())
+            {
+                if content_type.contains("text/event-stream") {
+                    obs.is_sse = Some(true);
+                } else if content_type.contains("json") {
+                    obs.is_sse = Some(false);
+                }
+            }
+            if let Some(model) = resp
+                .headers()
+                .get("openai-model")
+                .and_then(|v| v.to_str().ok())
+            {
+                if !model.is_empty() {
+                    obs.model.get_or_insert_with(|| model.to_string());
+                }
+            }
+        }
         Ok(resp)
     }
 
-    /// Called for each stream chunk received from upstream (for SSE/chunked responses).
-    ///
-    /// Custom operations you can perform here:
-    /// 1. Inspect SSE event lines (`event: ...`, `data: ...`).
-    /// 2. Extract token usage info or terminal events.
-    /// 3. Filter or record stream output chunks.
-    async fn on_response_chunk(
-        &self,
-        _ctx: &RequestContext,
-        _chunk: &[u8],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // [USER HOOK POINT: STREAMING CHUNKS]
-        // Note: Keep operations fast to avoid slowing down SSE stream delivery.
-        Ok(())
+    fn on_response_chunk(&self, ctx: &RequestContext, chunk: &[u8]) {
+        if let Ok(mut obs) = ctx.observation.lock() {
+            obs.ingest_chunk(chunk, ctx.started_at.elapsed().as_millis() as u64);
+        }
     }
 
-    /// Called when the client sends a WebSocket frame to upstream (`/backend-api/codex/responses`).
     async fn on_ws_client_message(
         &self,
         ctx: &RequestContext,
         msg: WsMessage,
     ) -> Result<WsAction, Box<dyn std::error::Error + Send + Sync>> {
-        debug!(
-            request_id = %ctx.request_id,
-            "CustomInterceptor: on_ws_client_message"
-        );
-
-        // [USER HOOK POINT: WEBSOCKET CLIENT MESSAGE]
+        if let WsMessage::Text(text) = &msg {
+            if let Ok(mut obs) = ctx.observation.lock() {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+                    if obs.model.is_none() {
+                        if let Some(model) = value.get("model").and_then(|v| v.as_str()) {
+                            obs.model = Some(model.to_string());
+                        }
+                    }
+                }
+            }
+        }
         Ok(WsAction::Forward(msg))
     }
 
-    /// Called when upstream sends a WebSocket frame to the client (`/backend-api/codex/responses`).
     async fn on_ws_upstream_message(
         &self,
         ctx: &RequestContext,
         msg: WsMessage,
     ) -> Result<WsAction, Box<dyn std::error::Error + Send + Sync>> {
-        debug!(
-            request_id = %ctx.request_id,
-            "CustomInterceptor: on_ws_upstream_message"
-        );
-
-        // [USER HOOK POINT: WEBSOCKET UPSTREAM MESSAGE]
+        if let WsMessage::Text(text) = &msg {
+            if let Ok(mut obs) = ctx.observation.lock() {
+                obs.ingest_text(text);
+            }
+        }
         Ok(WsAction::Forward(msg))
     }
 
-    /// Called when the request/stream finishes or disconnects.
-    ///
-    /// Custom operations you can perform here:
-    /// 1. Record total latency: `ctx.started_at.elapsed()`.
-    /// 2. Send settlement/usage log to Node.js backend or database.
-    /// 3. Update local in-memory metrics.
     async fn on_request_finish(
         &self,
         ctx: &RequestContext,
         status_code: Option<u16>,
         error: Option<&str>,
     ) {
+        if status_code == Some(401) {
+            if let Some(platform) = ctx.metadata.get("platform") {
+                self.account_cache.invalidate(platform).await;
+            }
+        }
+
         let elapsed = ctx.started_at.elapsed();
         info!(
             request_id = %ctx.request_id,
             path = %ctx.path,
+            platform = ctx
+                .metadata
+                .get("platform")
+                .map(String::as_str)
+                .unwrap_or(""),
             status = ?status_code,
             duration_ms = elapsed.as_millis(),
             error = ?error,
             "Request finished"
         );
 
-        // [USER HOOK POINT: SETTLEMENT & LOGGING]
+        let snapshot = {
+            let Ok(mut obs) = ctx.observation.lock() else {
+                return;
+            };
+            if obs.settled {
+                return;
+            }
+            obs.settled = true;
+            obs.finish_json_body();
+            if obs.error_message.is_none() {
+                if let Some(error) = error {
+                    obs.error_message = Some(error.to_string());
+                }
+            }
+            FinishSnapshot {
+                api_key_id: obs.api_key_id.clone(),
+                owner_user_id: obs.owner_user_id.clone(),
+                model: obs.model.clone(),
+                usage: obs.usage.clone(),
+                ttfb_ms: obs.ttfb_ms,
+                error_code: obs.error_code.clone(),
+                error_message: obs.error_message.clone(),
+            }
+        };
+
+        let Some(owner_user_id) = snapshot.owner_user_id else {
+            return;
+        };
+
+        let kind = classify_backend_kind(&ctx.target_path);
+        let usage = snapshot.usage.unwrap_or_default();
+        let model = snapshot
+            .model
+            .or_else(|| default_model_for_kind(kind))
+            .unwrap_or_else(|| "codex-chatgpt".to_string());
+        let params = ReportUsageParams {
+            api_key_id: None,
+            owner_user_id: Some(owner_user_id),
+            model,
+            total_tokens: usage.total_tokens,
+            prompt_tokens: usage.input_tokens,
+            completion_tokens: usage.output_tokens,
+            latency_ms: Some(elapsed.as_millis() as u64),
+            ttfb_ms: snapshot.ttfb_ms,
+            settlement_id: Some(ctx.request_id.clone()),
+            path: Some(ctx.target_path.clone()),
+            status_code: status_code.map(u32::from),
+            tokens_info: Some(usage.to_tokens_info()),
+            error_code: snapshot.error_code,
+            error_message: snapshot.error_message,
+            billable: Some(kind.billable()),
+            is_final: Some(true),
+            stream_end_reason: Some(
+                error
+                    .map(|_| "error".to_string())
+                    .unwrap_or_else(|| "stop".to_string()),
+            ),
+        };
+
+        if let Err(err) = self.ipc.report_usage(params).await {
+            warn!(
+                request_id = %ctx.request_id,
+                error = %err,
+                "Failed to report usage over IPC"
+            );
+        }
     }
 }
 
+struct FinishSnapshot {
+    api_key_id: Option<String>,
+    owner_user_id: Option<String>,
+    model: Option<String>,
+    usage: Option<super::observe::UsageStats>,
+    ttfb_ms: Option<u64>,
+    error_code: Option<String>,
+    error_message: Option<String>,
+}
+
+fn default_model_for_kind(kind: BackendKind) -> Option<String> {
+    match kind {
+        BackendKind::Images => Some("gpt-image-2".to_string()),
+        BackendKind::Search => Some("codex-search".to_string()),
+        _ => None,
+    }
+}
+
+fn map_verify_error(error: Option<&str>) -> (axum::http::StatusCode, &'static str, &'static str) {
+    match error {
+        Some("quota_exceeded") => (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "insufficient_quota",
+            "User quota exceeded",
+        ),
+        Some("user_inactive") => (
+            axum::http::StatusCode::FORBIDDEN,
+            "user_inactive",
+            "User is disabled",
+        ),
+        Some("revoked_key") => (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Access token has been revoked",
+        ),
+        Some("expired_key") => (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Access token has expired",
+        ),
+        _ => (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Invalid access token",
+        ),
+    }
+}
+
+fn auth_error(status: axum::http::StatusCode, code: &str, message: &str) -> Response {
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+            "code": code,
+        }
+    });
+    (
+        status,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        body.to_string(),
+    )
+        .into_response()
+}

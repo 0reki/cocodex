@@ -20,6 +20,7 @@ export async function forwardCodexBackendRequest(
       sessionId: options.sessionId,
       version: options.version,
       userAgent: options.userAgent,
+      platform: options.platform,
       requestHeaders: options.requestHeaders,
     }),
   );

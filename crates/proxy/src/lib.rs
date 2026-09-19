@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use crate::auth::jwt::ClientJwt;
 use crate::auth::session::CodexClientSessionStore;
 use crate::ipc::IpcClient;
 
@@ -35,14 +36,20 @@ pub struct AppState {
 }
 
 pub fn create_router(config: ProxyConfig, interceptor: Option<SharedInterceptor>) -> Router {
-    let interceptor = interceptor.unwrap_or_else(|| Arc::new(CustomInterceptor::new()));
+    let ipc_client = IpcClient::new(&config.ipc_socket_path);
+    let jwt = ClientJwt::from_env();
+    let interceptor = interceptor.unwrap_or_else(|| {
+        Arc::new(CustomInterceptor::new(ipc_client.clone(), jwt.clone()))
+    });
     let forwarder = Arc::new(BackendForwarder::new(
         config.upstream_chatgpt_origin.clone(),
         interceptor,
     ));
     let reverse_proxy = Arc::new(NodeReverseProxy::new(config.node_backend_url.clone()));
-    let sessions = Arc::new(CodexClientSessionStore::new());
-    let ipc_client = IpcClient::new(&config.ipc_socket_path);
+    let sessions = Arc::new(CodexClientSessionStore::with_jwt_and_ipc(
+        jwt,
+        ipc_client.clone(),
+    ));
 
     let state = AppState {
         forwarder,
@@ -76,6 +83,14 @@ pub fn create_router(config: ProxyConfig, interceptor: Option<SharedInterceptor>
         )
         .route(
             "/api/codex",
+            any(handle_backend_api),
+        )
+        .route(
+            "/v1/{*path}",
+            any(handle_backend_api),
+        )
+        .route(
+            "/v1",
             any(handle_backend_api),
         )
         .fallback(handle_fallback)

@@ -1,9 +1,6 @@
 import type { Express, Request, Response } from "express";
 
-import type {
-  ApiKeyRecord,
-  PortalUserRecord,
-} from "../../../database/index.ts";
+import type { PortalUserRecord } from "../../../database/index.ts";
 import type { PortalPrincipal } from "../../services/auth/auth-services.ts";
 import type { createCodexClientSessionStore } from "../../services/auth/codex-client-session.ts";
 
@@ -68,10 +65,10 @@ export function registerCodexClientProtocolRoutes(
     res.redirect(frontendLoginRedirect(next));
   });
 
-  app.post("/oauth/token", (req: Request, res: Response) => {
+  app.post("/oauth/token", async (req: Request, res: Response) => {
     const grantType = stringField(req.body, "grant_type");
     if (grantType === "refresh_token") {
-      const tokens = deps.sessions.refresh(stringField(req.body, "refresh_token"));
+      const tokens = await deps.sessions.refresh(stringField(req.body, "refresh_token"));
       if (!tokens) {
         res.status(400).json({ error: "invalid_grant" });
         return;
@@ -80,7 +77,7 @@ export function registerCodexClientProtocolRoutes(
       return;
     }
 
-    const tokens = deps.sessions.exchangeAuthorizationCode({
+    const tokens = await deps.sessions.exchangeAuthorizationCode({
       code: stringField(req.body, "code"),
       redirectUri: stringField(req.body, "redirect_uri"),
       codeVerifier: stringField(req.body, "code_verifier"),
@@ -92,8 +89,8 @@ export function registerCodexClientProtocolRoutes(
     res.json(tokens);
   });
 
-  app.post("/oauth/revoke", (req: Request, res: Response) => {
-    deps.sessions.revoke(
+  app.post("/oauth/revoke", async (req: Request, res: Response) => {
+    await deps.sessions.revoke(
       stringField(req.body, "token") || stringField(req.body, "refresh_token"),
     );
     res.status(200).json({ revoked: true });
@@ -110,7 +107,6 @@ export function registerCodexClientPortalRoutes(
     sessions: CodexClientSessionStore;
     getPortalPrincipalFromLocals: (res: Response) => PortalPrincipal | null;
     getPortalUserById: (id: string) => Promise<PortalUserRecord | null>;
-    resolveOwnedApiKey: (user: PortalUserRecord) => Promise<ApiKeyRecord>;
   },
 ) {
   async function resolveSessionUser(res: Response) {
@@ -141,10 +137,9 @@ export function registerCodexClientPortalRoutes(
         return;
       }
       const user = await resolveSessionUser(res);
-      const apiKey = await deps.resolveOwnedApiKey(user);
       const code = deps.sessions.createBrowserAuthorization({
-        apiKey,
-        email: `${user.username}@cocodex.local`,
+        ownerUserId: user.id,
+        email: `${user.username}@openai.com`,
         codeChallenge,
         redirectUri,
       });
@@ -177,11 +172,10 @@ export function registerCodexClientPortalRoutes(
         return;
       }
       const user = await resolveSessionUser(res);
-      const apiKey = await deps.resolveOwnedApiKey(user);
       deps.sessions.approveDevice({
         userCode,
-        apiKey,
-        email: `${user.username}@cocodex.local`,
+        ownerUserId: user.id,
+        email: `${user.username}@openai.com`,
       });
       res.json({ ok: true });
     } catch (error) {

@@ -92,6 +92,45 @@ export async function getApiKeyByToken(
   return row ? mapApiKeyRow(row) : null
 }
 
+export async function getCodexClientApiKeyByOwnerUserId(
+  ownerUserId: string,
+): Promise<ApiKeyRecord | null> {
+  const userId = ownerUserId.trim()
+  if (!userId) return null
+  const keys = await listApiKeys({ ownerUserId: userId })
+  return keys.find((item) => item.name === "Codex client") ?? keys[0] ?? null
+}
+
+export async function getApiKeyById(id: string): Promise<ApiKeyRecord | null> {
+  const keyId = id.trim()
+  if (!keyId) return null
+  const res = await query<{
+    id: string
+    owner_user_id: string | null
+    name: string
+    api_key: string
+    quota: number | string | null
+    used: number | string
+    expires_at: Date | null
+    revoked_at: Date | null
+    created_at: Date
+    updated_at: Date
+  }>(
+    `
+      SELECT
+        keys.id, keys.owner_user_id, keys.name, keys.api_key, keys.quota,
+        keys.used, keys.expires_at, keys.revoked_at,
+        keys.created_at, keys.updated_at
+      FROM api_keys keys
+      WHERE keys.id = $1::uuid
+      LIMIT 1
+    `,
+    [keyId],
+  )
+  const row = res.rows[0]
+  return row ? mapApiKeyRow(row) : null
+}
+
 export async function createApiKey(input: {
   ownerUserId?: string | null
   name: string

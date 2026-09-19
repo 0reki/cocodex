@@ -189,7 +189,7 @@ async fn handle_oauth_token(
     let grant_type = req_data.grant_type.unwrap_or_default();
     if grant_type == "refresh_token" {
         let refresh_token = req_data.refresh_token.unwrap_or_default();
-        if let Some(tokens) = state.sessions.refresh(&refresh_token) {
+        if let Some(tokens) = state.sessions.refresh(&refresh_token).await {
             return Json(tokens).into_response();
         }
         return (
@@ -206,6 +206,7 @@ async fn handle_oauth_token(
     if let Some(tokens) = state
         .sessions
         .exchange_authorization_code(&code, &redirect_uri, &code_verifier)
+        .await
     {
         return Json(tokens).into_response();
     }
@@ -232,7 +233,7 @@ async fn handle_oauth_revoke(
         .token
         .or(payload.refresh_token)
         .unwrap_or_default();
-    state.sessions.revoke(&token);
+    state.sessions.revoke(&token).await;
     Json(json!({ "revoked": true })).into_response()
 }
 
@@ -336,26 +337,10 @@ async fn handle_codex_client_authorize(
         }
     };
 
-    // Resolve user's API Key via UDS IPC
-    let api_key = match state.ipc_client.resolve_user_api_key(&user.id).await {
-        Ok(k) => k,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {
-                        "message": format!("Failed to resolve API key: {e}"),
-                        "code": "key_resolution_failed"
-                    }
-                })),
-            )
-                .into_response()
-        }
-    };
-
-    let email = format!("{}@cocodex.local", user.username);
+    // Bind the portal user via UDS IPC
+    let email = format!("{}@openai.com", user.username);
     let code = state.sessions.create_browser_authorization(
-        api_key,
+        user.id,
         &email,
         &code_challenge,
         &redirect_uri,
@@ -394,6 +379,8 @@ struct CodexClientDeviceApproveReq {
     userCode: Option<String>,
 }
 
+// Portal browser callback. Device sessions live in this process; user
+// lookup goes to Node over UDS RPC (`auth.verify_portal_token`).
 async fn handle_codex_client_device_approve(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -464,25 +451,8 @@ async fn handle_codex_client_device_approve(
         }
     };
 
-    // Resolve user's API Key via UDS IPC
-    let api_key = match state.ipc_client.resolve_user_api_key(&user.id).await {
-        Ok(k) => k,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {
-                        "message": format!("Failed to resolve API key: {e}"),
-                        "code": "key_resolution_failed"
-                    }
-                })),
-            )
-                .into_response()
-        }
-    };
-
-    let email = format!("{}@cocodex.local", user.username);
-    match state.sessions.approve_device(&user_code, api_key, &email) {
+    let email = format!("{}@openai.com", user.username);
+    match state.sessions.approve_device(&user_code, user.id, &email) {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
         Err(err) => (
             StatusCode::BAD_REQUEST,

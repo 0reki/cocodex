@@ -38,6 +38,7 @@ export function createAuthServices(deps: {
   apiKeyAuthTokenById: Map<string, string>;
   apiKeyPendingCharges: Map<string, UsdAmount>;
   getPortalUserById: (id: string) => Promise<PortalUserRecord | null>;
+  onAuthInvalidate?: (ownerUserId: string) => void;
 }) {
   function storeApiKey(apiKey: ApiKeyRecord) {
     const token = apiKey.apiKey.trim();
@@ -56,6 +57,36 @@ export function createAuthServices(deps: {
     storeApiKey(apiKey);
   }
 
+  function getCachedApiKeyByToken(token: string): ApiKeyRecord | null {
+    const normalized = token.trim();
+    if (!normalized) return null;
+    const cached = deps.lruGet(deps.apiKeyAuthLruCache, normalized);
+    if (!cached) return null;
+    if (!isApiKeyUsable(cached.value)) {
+      invalidateApiKeyAuthCacheByToken(normalized);
+      return null;
+    }
+    return cached.value;
+  }
+
+  function getCachedApiKeyById(id: string): ApiKeyRecord | null {
+    const token = deps.apiKeyAuthTokenById.get(id.trim());
+    return token ? getCachedApiKeyByToken(token) : null;
+  }
+
+  function getCachedApiKeyByOwnerUserId(ownerUserId: string): ApiKeyRecord | null {
+    const normalized = ownerUserId.trim();
+    if (!normalized) return null;
+    let fallback: ApiKeyRecord | null = null;
+    for (const entry of deps.apiKeyAuthLruCache.values()) {
+      if (entry.value.ownerUserId !== normalized) continue;
+      if (!isApiKeyUsable(entry.value)) continue;
+      if (entry.value.name === "Codex client") return entry.value;
+      fallback ??= entry.value;
+    }
+    return fallback;
+  }
+
   function invalidateApiKeyAuthCacheByToken(token: string) {
     const normalized = token.trim();
     if (!normalized) return;
@@ -64,6 +95,9 @@ export function createAuthServices(deps: {
     if (cached && deps.apiKeyAuthTokenById.get(cached.id) === normalized) {
       deps.apiKeyAuthTokenById.delete(cached.id);
     }
+    if (cached?.ownerUserId) {
+      deps.onAuthInvalidate?.(cached.ownerUserId);
+    }
   }
 
   function invalidateApiKeyAuthCacheByOwnerUserId(ownerUserId: string) {
@@ -71,9 +105,14 @@ export function createAuthServices(deps: {
     if (!normalized) return;
     for (const [token, entry] of deps.apiKeyAuthLruCache) {
       if (entry.value.ownerUserId === normalized) {
-        invalidateApiKeyAuthCacheByToken(token);
+        const cached = deps.apiKeyAuthLruCache.get(token)?.value;
+        deps.apiKeyAuthLruCache.delete(token);
+        if (cached && deps.apiKeyAuthTokenById.get(cached.id) === token) {
+          deps.apiKeyAuthTokenById.delete(cached.id);
+        }
       }
     }
+    deps.onAuthInvalidate?.(normalized);
   }
 
   function isApiKeyUsable(apiKey: ApiKeyRecord) {
@@ -326,6 +365,9 @@ export function createAuthServices(deps: {
     getAccessTokenAuthErrorDetail,
     getPortalPrincipalFromLocals,
     cacheApiKey,
+    getCachedApiKeyById,
+    getCachedApiKeyByOwnerUserId,
+    getCachedApiKeyByToken,
     hydrateResponseAuthState,
     invalidateApiKeyAuthCacheByToken,
     invalidateApiKeyAuthCacheByOwnerUserId,

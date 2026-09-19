@@ -4,6 +4,7 @@ export function createSourceAccountServices(deps: {
   listAssignedOpenAIAccounts: () => Promise<
     Array<{ ownerUserId: string; account: OpenAIAccountRecord }>
   >;
+  onUpstreamInvalidate?: () => void;
 }) {
   const assignedAccounts = new Map<string, OpenAIAccountRecord>();
 
@@ -24,7 +25,9 @@ export function createSourceAccountServices(deps: {
   }
 
   async function invalidateActiveSourceAccount() {
-    return hydrateSourceAccountCache();
+    const result = await hydrateSourceAccountCache();
+    deps.onUpstreamInvalidate?.();
+    return result;
   }
 
   function getAssignedSourceAccount(ownerUserId: string) {

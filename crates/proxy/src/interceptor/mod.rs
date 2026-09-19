@@ -1,11 +1,14 @@
 pub mod custom;
+pub mod observe;
+pub mod platform;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::response::Response;
 use http::{HeaderMap, Method, Request, Uri};
+use observe::RequestObservation;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
@@ -22,8 +25,12 @@ pub struct RequestContext {
     pub client_token: Option<String>,
     pub upstream_token: Option<String>,
     pub upstream_account_id: Option<String>,
+    pub upstream_user_agent: Option<String>,
+    pub upstream_client_version: Option<String>,
+    pub upstream_installation_id: Option<String>,
     pub metadata: HashMap<String, String>,
     pub started_at: Instant,
+    pub observation: Arc<Mutex<RequestObservation>>,
 }
 
 impl RequestContext {
@@ -52,20 +59,24 @@ impl RequestContext {
             client_token,
             upstream_token: None,
             upstream_account_id: None,
+            upstream_user_agent: None,
+            upstream_client_version: None,
+            upstream_installation_id: None,
             metadata: HashMap::new(),
             started_at: Instant::now(),
+            observation: Arc::new(Mutex::new(RequestObservation::default())),
         }
     }
 }
 
 /// Normalizes client paths to the canonical ChatGPT upstream path format (`/backend-api/...`).
 ///
-/// Codex client can connect using either:
-/// 1. `chatgpt_base_url` pointing to `/backend-api` (e.g. `https://chatgpt.com/backend-api/`)
-///    which results in paths starting with `/backend-api/...`
-/// 2. `chatgpt_base_url` pointing to the proxy root (e.g. `http://127.0.0.1:53141`)
-///    which results in paths starting with `/api/codex/...`
-/// 3. Direct wham paths starting with `/wham/...`
+/// Codex can be pointed at this gateway in three ways:
+/// 1. `chatgpt_base_url` = `{gateway}/backend-api` (ChatGPT path style) →
+///    `/backend-api/...` and `/wham/...`
+/// 2. `chatgpt_base_url` = `{gateway}` (Codex API path style) → `/api/codex/...`
+/// 3. `openai_base_url` = `{gateway}/v1` (OpenAI API path style) → `/v1/...`,
+///    rewritten to `/backend-api/codex/...` for ChatGPT upstream
 pub fn normalize_upstream_path(raw_path: &str) -> String {
     if raw_path.starts_with("/backend-api/") || raw_path == "/backend-api" {
         raw_path.to_string()
@@ -81,6 +92,10 @@ pub fn normalize_upstream_path(raw_path: &str) -> String {
             format!("/backend-api/codex/{stripped}")
         }
     } else if raw_path == "/api/codex" {
+        "/backend-api/codex".to_string()
+    } else if let Some(stripped) = raw_path.strip_prefix("/v1/") {
+        format!("/backend-api/codex/{stripped}")
+    } else if raw_path == "/v1" {
         "/backend-api/codex".to_string()
     } else {
         raw_path.to_string()
@@ -120,7 +135,7 @@ pub enum WsAction {
 /// Core trait for intercepting and customizing proxy behavior.
 #[async_trait]
 pub trait Interceptor: Send + Sync {
-    /// Hook executed on incoming HTTP requests to `/backend-api/*` before forwarding to upstream.
+    /// Hook executed on incoming Codex/ChatGPT requests before forwarding to upstream.
     async fn on_request(
         &self,
         ctx: &mut RequestContext,
@@ -135,11 +150,8 @@ pub trait Interceptor: Send + Sync {
     ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Hook executed when a chunk of data is streamed from upstream (e.g. SSE event chunk).
-    async fn on_response_chunk(
-        &self,
-        ctx: &RequestContext,
-        chunk: &[u8],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    /// Synchronous so the forwarder can inspect chunks without dropping futures.
+    fn on_response_chunk(&self, ctx: &RequestContext, chunk: &[u8]);
 
     /// Hook executed on WebSocket frames sent from Client -> Upstream.
     async fn on_ws_client_message(

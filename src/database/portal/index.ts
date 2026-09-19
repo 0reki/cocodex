@@ -8,6 +8,7 @@ export {
   setPortalUserEnabledById,
   updatePortalUsernameById,
   updatePortalUserPasswordById,
+  updatePortalUserQuotaById,
 } from "../internal/portal-users.ts"
 export {
   createPortalInvitation,
@@ -20,3 +21,8 @@ export {
   listPortalUserUpstreamAssignments,
   setPortalUserUpstreamAssignment,
 } from "../internal/portal-user-upstream.ts"
+export {
+  consumeCodexClientRefreshToken,
+  revokeCodexClientRefreshTokens,
+  storeCodexClientRefreshToken,
+} from "../internal/codex-client-refresh.ts"

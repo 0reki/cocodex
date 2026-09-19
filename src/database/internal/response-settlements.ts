@@ -28,9 +28,10 @@ export async function flushResponseSettlements(
 ): Promise<{
   acceptedSettlementIds: string[]
   apiKeyUsedUsd: Record<string, string>
+  ownerUsedUsd: Record<string, string>
 }> {
   if (settlements.length === 0) {
-    return { acceptedSettlementIds: [], apiKeyUsedUsd: {} }
+    return { acceptedSettlementIds: [], apiKeyUsedUsd: {}, ownerUsedUsd: {} }
   }
   const payload = settlements.map((item) => ({
     settlement_id: item.settlementId,
@@ -56,6 +57,7 @@ export async function flushResponseSettlements(
   const result = await query<{
     accepted_settlement_ids: string[]
     api_key_used: Record<string, string>
+    owner_used: Record<string, string>
   }>(
     `
       WITH raw_input AS (
@@ -122,6 +124,19 @@ export async function flushResponseSettlements(
         WHERE keys.id = charges.key_id
         RETURNING keys.id, keys.used
       ),
+      user_charges AS (
+        SELECT owner_user_id, SUM(charge) AS amount
+        FROM accepted
+        WHERE owner_user_id IS NOT NULL AND charge > 0
+        GROUP BY owner_user_id
+      ),
+      updated_users AS (
+        UPDATE portal_users users
+        SET used = GREATEST(0, COALESCE(users.used, 0) + charges.amount)
+        FROM user_charges charges
+        WHERE users.id = charges.owner_user_id
+        RETURNING users.id, users.used
+      ),
       rollup_values AS (
         SELECT
           date_trunc('hour', request_time) AS hour_bucket,
@@ -160,12 +175,17 @@ export async function flushResponseSettlements(
         COALESCE(
           (SELECT jsonb_object_agg(id::text, used::text) FROM updated_keys),
           '{}'::jsonb
-        ) AS api_key_used
+        ) AS api_key_used,
+        COALESCE(
+          (SELECT jsonb_object_agg(id::text, used::text) FROM updated_users),
+          '{}'::jsonb
+        ) AS owner_used
     `,
     [JSON.stringify(payload)],
   )
   return {
     acceptedSettlementIds: result.rows[0]?.accepted_settlement_ids ?? [],
     apiKeyUsedUsd: result.rows[0]?.api_key_used ?? {},
+    ownerUsedUsd: result.rows[0]?.owner_used ?? {},
   }
 }

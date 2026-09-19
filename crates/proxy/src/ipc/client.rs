@@ -9,8 +9,11 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
+use super::account_cache::UpstreamAccountCache;
+use super::owner_cache::OwnerAuthCache;
 use super::protocol::{
-    ApiKeyRecord, JsonRpcRequest, JsonRpcResponse, ReportUsageParams, VerifyApiKeyResult,
+    ApiKeyRecord, JsonRpcRequest, JsonRpcResponse, ReportUsageParams,
+    ResolveUpstreamAccountResult, StoredRefreshToken, VerifyApiKeyResult, VerifyOwnerResult,
     VerifyPortalTokenResult,
 };
 
@@ -72,6 +75,8 @@ enum IpcCommand {
 pub struct IpcClient {
     tx: mpsc::Sender<IpcCommand>,
     req_counter: Arc<AtomicU64>,
+    auth_cache: OwnerAuthCache,
+    account_cache: UpstreamAccountCache,
 }
 
 impl IpcClient {
@@ -79,10 +84,30 @@ impl IpcClient {
         let socket_path = socket_path.as_ref().to_path_buf();
         let (tx, rx) = mpsc::channel(256);
         let req_counter = Arc::new(AtomicU64::new(1));
+        let auth_cache = OwnerAuthCache::default();
+        let account_cache = UpstreamAccountCache::default();
 
-        tokio::spawn(ipc_worker_loop(socket_path, rx));
+        tokio::spawn(ipc_worker_loop(
+            socket_path,
+            rx,
+            auth_cache.clone(),
+            account_cache.clone(),
+        ));
 
-        Self { tx, req_counter }
+        Self {
+            tx,
+            req_counter,
+            auth_cache,
+            account_cache,
+        }
+    }
+
+    pub fn owner_auth_cache(&self) -> OwnerAuthCache {
+        self.auth_cache.clone()
+    }
+
+    pub fn upstream_account_cache(&self) -> UpstreamAccountCache {
+        self.account_cache.clone()
     }
 
     async fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, IpcClientError> {
@@ -149,6 +174,20 @@ impl IpcClient {
         Ok(parsed)
     }
 
+    pub async fn verify_api_key_id(
+        &self,
+        api_key_id: &str,
+    ) -> Result<VerifyApiKeyResult, IpcClientError> {
+        let res = self
+            .call(
+                "auth.verify_api_key",
+                serde_json::json!({ "api_key_id": api_key_id }),
+            )
+            .await?;
+        let parsed: VerifyApiKeyResult = serde_json::from_value(res)?;
+        Ok(parsed)
+    }
+
     pub async fn resolve_user_api_key(&self, user_id: &str) -> Result<ApiKeyRecord, IpcClientError> {
         let res = self
             .call("auth.resolve_user_api_key", serde_json::json!({ "user_id": user_id }))
@@ -165,13 +204,101 @@ impl IpcClient {
         Ok(parsed)
     }
 
+    pub async fn verify_owner_user_id(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<VerifyOwnerResult, IpcClientError> {
+        let res = self
+            .call(
+                "auth.verify_api_key",
+                serde_json::json!({ "owner_user_id": owner_user_id }),
+            )
+            .await?;
+        let parsed: VerifyOwnerResult = serde_json::from_value(res)?;
+        Ok(parsed)
+    }
+
+    pub async fn store_refresh_token(
+        &self,
+        token_hash: &str,
+        owner_user_id: &str,
+        email: &str,
+        expires_at_secs: u64,
+    ) -> Result<(), IpcClientError> {
+        self.call(
+            "auth.store_refresh_token",
+            serde_json::json!({
+                "token_hash": token_hash,
+                "owner_user_id": owner_user_id,
+                "email": email,
+                "expires_at_secs": expires_at_secs,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn consume_refresh_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<StoredRefreshToken>, IpcClientError> {
+        let res = self
+            .call(
+                "auth.consume_refresh_token",
+                serde_json::json!({ "token_hash": token_hash }),
+            )
+            .await?;
+        if res.get("found").and_then(|value| value.as_bool()) != Some(true) {
+            return Ok(None);
+        }
+        let parsed: StoredRefreshToken = serde_json::from_value(res)?;
+        Ok(Some(parsed))
+    }
+
+    pub async fn revoke_refresh_token(
+        &self,
+        token_hash: Option<&str>,
+        owner_user_id: Option<&str>,
+    ) -> Result<(), IpcClientError> {
+        self.call(
+            "auth.revoke_refresh_token",
+            serde_json::json!({
+                "token_hash": token_hash,
+                "owner_user_id": owner_user_id,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Resolves the active upstream account bound to a client platform
+    /// (`windows` / `linux` / `darwin`) via the Node backend.
+    pub async fn resolve_upstream_account(
+        &self,
+        platform: &str,
+    ) -> Result<ResolveUpstreamAccountResult, IpcClientError> {
+        let res = self
+            .call(
+                "upstream.resolve_account",
+                serde_json::json!({ "platform": platform }),
+            )
+            .await?;
+        let parsed: ResolveUpstreamAccountResult = serde_json::from_value(res)?;
+        Ok(parsed)
+    }
+
     pub async fn report_usage(&self, params: ReportUsageParams) -> Result<(), IpcClientError> {
         let val = serde_json::to_value(params)?;
         self.notify("usage.report_consumption", val).await
     }
 }
 
-async fn ipc_worker_loop(socket_path: PathBuf, mut rx: mpsc::Receiver<IpcCommand>) {
+async fn ipc_worker_loop(
+    socket_path: PathBuf,
+    mut rx: mpsc::Receiver<IpcCommand>,
+    auth_cache: OwnerAuthCache,
+    account_cache: UpstreamAccountCache,
+) {
     while let Some(first_cmd) = rx.recv().await {
         // Attempt connection to Unix socket
         let stream = match UnixStream::connect(&socket_path).await {
@@ -188,7 +315,9 @@ async fn ipc_worker_loop(socket_path: PathBuf, mut rx: mpsc::Receiver<IpcCommand
         };
 
         info!("Connected to Node UDS at {:?}", socket_path);
-        if let Err(e) = handle_connection(stream, first_cmd, &mut rx).await {
+        if let Err(e) =
+            handle_connection(stream, first_cmd, &mut rx, &auth_cache, &account_cache).await
+        {
             warn!("IPC connection broken: {}", e);
         }
     }
@@ -223,6 +352,8 @@ async fn handle_connection(
     stream: UnixStream,
     first_cmd: IpcCommand,
     rx: &mut mpsc::Receiver<IpcCommand>,
+    auth_cache: &OwnerAuthCache,
+    account_cache: &UpstreamAccountCache,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -255,10 +386,27 @@ async fn handle_connection(
                 }
                 let line = line_buf.trim();
                 if !line.is_empty() {
-                    if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(line) {
-                        if let Some(id) = &resp.id {
-                            if let Some(responder) = pending.remove(id) {
-                                let _ = responder.send(Ok(resp));
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                        let method = value.get("method").and_then(|method| method.as_str());
+                        if method == Some("auth.invalidate") {
+                            let owner_user_id = value
+                                .get("params")
+                                .and_then(|params| params.get("owner_user_id"))
+                                .and_then(|id| id.as_str())
+                                .unwrap_or("");
+                            auth_cache.invalidate(owner_user_id).await;
+                        } else if method == Some("upstream.invalidate") {
+                            let platform = value
+                                .get("params")
+                                .and_then(|params| params.get("platform"))
+                                .and_then(|id| id.as_str())
+                                .unwrap_or("");
+                            account_cache.invalidate(platform).await;
+                        } else if let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value) {
+                            if let Some(id) = &resp.id {
+                                if let Some(responder) = pending.remove(id) {
+                                    let _ = responder.send(Ok(resp));
+                                }
                             }
                         }
                     }

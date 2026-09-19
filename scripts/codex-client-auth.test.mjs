@@ -2,32 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildChatgptBackendUrl } from "../src/openai-api/internal/backend-proxy.ts";
-import zlib from "node:zlib";
 import {
   classifyCodexBackendForward,
   isCodexBackendApiPath,
   isCodexResponsesPath,
   isPublicCodexClientPath,
 } from "../src/server/utils/openai/codex-backend-alias.ts";
-import { peekCodexRequestRecord } from "../src/server/routes/openai/codex-backend-forward-routes.ts";
 import {
   createCodexClientSessionStore,
   createPkcePair,
   verifyPkce,
 } from "../src/server/services/auth/codex-client-session.ts";
-
-const apiKey = {
-  id: "key-1",
-  ownerUserId: "user-1",
-  name: "Codex client",
-  apiKey: "sk-test",
-  quota: null,
-  used: "0",
-  expiresAt: null,
-  revokedAt: null,
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
-};
 
 test("codex backend paths stay on the subscription prefix", () => {
   assert.equal(isCodexBackendApiPath("/backend-api/codex/responses"), true);
@@ -43,42 +28,41 @@ test("codex backend paths stay on the subscription prefix", () => {
   assert.equal(isPublicCodexClientPath("/api/users"), false);
 });
 
-test("peekCodexRequestRecord reads json and zstd copies without rewriting", async () => {
-  const payload = { model: "gpt-5.4", service_tier: "priority" };
-  const raw = Buffer.from(JSON.stringify(payload));
-  assert.deepEqual(await peekCodexRequestRecord(raw, undefined), payload);
-  const compressed = await new Promise((resolve, reject) => {
-    zlib.zstdCompress(raw, (error, result) => {
-      if (error) reject(error);
-      else resolve(result);
-    });
-  });
-  assert.deepEqual(await peekCodexRequestRecord(compressed, "zstd"), payload);
-});
-
-test("device oauth issues chatgpt-shaped tokens without upstream login", () => {
+test("device oauth issues chatgpt-shaped tokens without upstream login", async () => {
   const sessions = createCodexClientSessionStore({});
   const device = sessions.createDeviceCode();
   assert.equal(typeof device.interval, "string");
   sessions.approveDevice({
     userCode: device.user_code,
-    apiKey,
-    email: "alice@cocodex.local",
+    ownerUserId: "user-1",
+    email: "alice@openai.com",
   });
   const polled = sessions.pollDeviceToken(device.device_auth_id, device.user_code);
   assert.equal(polled.status, "complete");
-  const tokens = sessions.exchangeAuthorizationCode({
+  const tokens = await sessions.exchangeAuthorizationCode({
     code: polled.authorization_code,
     redirectUri: "/deviceauth/callback",
     codeVerifier: polled.code_verifier,
   });
   assert.ok(tokens);
-  assert.equal(tokens.access_token, "sk-test");
+  assert.notEqual(tokens.access_token, "sk-test");
+  assert.equal(tokens.token_type, "Bearer");
+  assert.equal(tokens.account_id, "user-1");
+  assert.match(tokens.refresh_token, /^rt\.1\./);
+  assert.equal(tokens.access_token.split(".").length, 3);
+  assert.equal(tokens.id_token.split(".").length, 3);
+  const accessPayload = JSON.parse(
+    Buffer.from(tokens.access_token.split(".")[1], "base64url").toString(),
+  );
+  assert.equal(accessPayload.api_key_id, undefined);
+  assert.equal(accessPayload["https://api.openai.com/auth"].chatgpt_account_id, "user-1");
+  assert.deepEqual(accessPayload.aud, ["https://api.openai.com/v1"]);
   const payload = JSON.parse(
     Buffer.from(tokens.id_token.split(".")[1], "base64url").toString(),
   );
-  assert.equal(payload.email, "alice@cocodex.local");
+  assert.equal(payload.email, "alice@openai.com");
   assert.equal(payload["https://api.openai.com/auth"].chatgpt_plan_type, "pro");
+  assert.equal(payload["https://api.openai.com/auth"].chatgpt_account_id, "user-1");
 });
 
 test("backend forward only allows chatgpt backend-api urls", () => {

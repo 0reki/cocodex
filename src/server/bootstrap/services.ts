@@ -33,6 +33,7 @@ type BootstrapServerServicesDependencies =
     | "apiKeyAuthTokenById"
     | "apiKeyPendingCharges"
     | "getPortalUserById"
+    | "onAuthInvalidate"
   > &
   Pick<SourceAccountDependencies, "listAssignedOpenAIAccounts"> &
   Pick<UpstreamErrorDependencies, "isRecord"> &
@@ -52,6 +53,8 @@ type BootstrapServerServicesDependencies =
     | "resolveOpenAIUpstreamAccountId"
     | "updateOpenAIAccountTokensById"
   > & {
+    onUpstreamInvalidate?: () => void;
+    onOwnerSettled?: (ownerUserId: string, usedUsd: string) => void;
     RESPONSE_SETTLEMENT_BATCH_SIZE: number;
     RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS: number;
     RESPONSE_SETTLEMENT_ID_CACHE_SIZE: number;
@@ -73,16 +76,19 @@ export function bootstrapServerServices(
     apiKeyAuthTokenById: deps.apiKeyAuthTokenById,
     apiKeyPendingCharges: deps.apiKeyPendingCharges,
     getPortalUserById: deps.getPortalUserById,
+    onAuthInvalidate: deps.onAuthInvalidate,
   });
 
   const source = createSourceAccountServices({
     listAssignedOpenAIAccounts: deps.listAssignedOpenAIAccounts,
+    onUpstreamInvalidate: deps.onUpstreamInvalidate,
   });
 
   const settlement = createResponseSettlementServices({
     flushResponseSettlements: deps.flushResponseSettlements,
     applyApiKeyPendingCharge: auth.applyApiKeyPendingCharge,
     settleApiKeyPendingCharge: auth.settleApiKeyPendingCharge,
+    onOwnerSettled: deps.onOwnerSettled,
     batchSize: deps.RESPONSE_SETTLEMENT_BATCH_SIZE,
     flushIntervalMs: deps.RESPONSE_SETTLEMENT_FLUSH_INTERVAL_MS,
     settledIdCacheSize: deps.RESPONSE_SETTLEMENT_ID_CACHE_SIZE,
@@ -107,6 +113,7 @@ export function bootstrapServerServices(
     resolveOpenAIUpstreamAccountId: deps.resolveOpenAIUpstreamAccountId,
     updateOpenAIAccountTokensById: deps.updateOpenAIAccountTokensById,
     isTokenInvalidatedError: upstreamError.isTokenInvalidatedError,
+    onUpstreamInvalidate: deps.onUpstreamInvalidate,
   });
 
   const upstreamQuota = createUpstreamQuotaServices({

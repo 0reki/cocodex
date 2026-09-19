@@ -5,7 +5,7 @@ import express, {
   type Response,
 } from "express";
 import crypto from "node:crypto";
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer } from "node:http";
 
 import {
   createApiKey,
@@ -33,45 +33,37 @@ import {
   listModelResponseLogsCursorByOwnerUserId,
   listPortalUsers,
   listPortalUserUpstreamAssignments,
+  normalizeOpenAIAccountPlatform,
   normalizeOpenAIAccountStatus,
   runDatabaseSelfCheck,
   recordUserUpstreamQuotaUsage,
   setPortalUserEnabledById,
   setPortalUserUpstreamAssignment,
+  storeCodexClientRefreshToken,
+  consumeCodexClientRefreshToken,
+  revokeCodexClientRefreshTokens,
   syncUpstreamQuotaWindow,
   updateApiKeyById,
   updateOpenAIAccountTokensById,
   updatePortalUsernameById,
   updatePortalUserPasswordById,
+  updatePortalUserQuotaById,
   upsertOpenAIAccount,
 } from "./database/index.ts";
 import { resetDatabasePool } from "./database/core/db.ts";
-import {
-  loadModelPricingFromEnv,
-} from "./server/utils/index.ts";
+import { loadModelPricingFromEnv } from "./server/utils/index.ts";
 import {
   parseContentEncodingHeader,
   readRequestBodyBuffer,
   zstdDecompressBuffer,
 } from "./server/utils/index.ts";
 import {
-  WS_READY_STATE_CONNECTING,
-  WS_READY_STATE_OPEN,
-  WsServerCtor,
-  normalizeWsCloseCode,
-  normalizeWsCloseReason,
-  parseUpgradePathname,
   sendWebSocketUpgradeErrorResponse,
-  wsRawDataToText,
 } from "./server/utils/index.ts";
 import {
-  applyServiceTierBillingMultiplier,
   generateApiKeyValue,
-  isCodexBackendApiPath,
-  isCodexResponsesPath,
   isPublicCodexClientPath,
   loadBackendEnv,
-  resolveFastServiceTierForBilling,
   resolveOpenAIUpstreamAccountId,
 } from "./server/utils/index.ts";
 import { createCodexClientSessionStore } from "./server/services/auth/codex-client-session.ts";
@@ -85,26 +77,20 @@ import {
   registerPortalAuthRoutes,
   registerCodexClientPortalRoutes,
   registerCodexClientProtocolRoutes,
-  registerCodexBackendForwardRoutes,
   registerPublicOpenAIRoutes,
   registerRequestLogRoutes,
   registerSetupRoutes,
   registerUserRoutes,
-  ResponsesWebSocketUpgradeError,
-  prepareResponsesWebSocketProxyContext,
-  setupResponsesWebSocketProxy,
 } from "./server/routes/index.ts";
 import { lruGet } from "./server/services/index.ts";
 import {
   bootstrapServerServices,
   createServerRuntimeState,
-  sendWsErrorEvent,
 } from "./server/bootstrap/index.ts";
 import {
   extractCodexResultFromSse,
   extractCodexTerminalResponseFromSse,
   isRecord,
-  parseJsonRecordText,
 } from "./server/openai-response-utils.ts";
 import {
   pollCodexDeviceAuth,
@@ -112,6 +98,9 @@ import {
 } from "./openai-api/index.ts";
 
 loadBackendEnv();
+
+const authInvalidateListeners: Array<(ownerUserId: string) => void> = [];
+const upstreamInvalidateListeners: Array<() => void> = [];
 
 const {
   RESPONSE_SETTLEMENT_BATCH_SIZE,
@@ -129,50 +118,29 @@ const {
 const modelPricing = loadModelPricingFromEnv();
 
 const {
-  createRequestAbortContext,
   getOpenAIApiRuntimeConfig,
   authenticatePortalAccessTokenWithReason,
-  authenticateApiKeyByAuthorizationHeaderWithReason,
-  authenticateApiKeyWithReason,
-  getApiKeyAuthErrorDetail,
   getAccessTokenAuthErrorDetail,
   getPortalPrincipalFromLocals,
   cacheApiKey,
   invalidateApiKeyAuthCacheByToken,
   invalidateApiKeyAuthCacheByOwnerUserId,
-  isApiKeyQuotaExceeded,
-  isApiKeyBoundToUser,
   getAssignedSourceAccount,
   hydrateResponseAuthState,
   hydrateSourceAccountCache,
   hydrateUpstreamQuotaCache,
   invalidateActiveSourceAccount,
-  extractErrorInfo,
-  buildPassthroughUpstreamError,
-  isAbortError,
-  shouldPersistModelResponseLog,
-  persistQuotaExceededLog,
-  persistShortCircuitErrorLog,
-  enqueueResponseSettlement,
-  tryReserveResponseRequest,
-  cancelResponseRequestReservation,
   getResponseSettlementQueueHealth,
   initializeResponseSettlementServices,
+  enqueueResponseSettlement,
   flushAllResponseSettlements,
   flushUpstreamTokenPersistence,
   stopResponseSettlementServices,
   stopUpstreamQuotaServices,
   extractResponseUsage,
   estimateUsageCost,
-  resolveUsagePricingModelId,
-  buildOpenAIModelsList,
   postCodexResponsesWithTokenRefresh,
-  postCodexImageWithTokenRefresh,
-  postCodexSearchWithTokenRefresh,
-  forwardCodexBackendWithTokenRefresh,
-  connectResponsesWebSocketProxyUpstream,
   getCodexDailyWorkspaceUsageWithTokenRefresh,
-  getCodexModelsWithTokenRefresh,
   getCodexUsageWithTokenRefresh,
   ensureUserUpstreamQuota,
   getUserUpstreamQuotaSummary,
@@ -203,48 +171,57 @@ const {
   apiKeyAuthLruCache,
   apiKeyAuthTokenById,
   apiKeyPendingCharges,
+  onAuthInvalidate: (ownerUserId) => {
+    for (const listener of authInvalidateListeners) listener(ownerUserId);
+  },
+  onUpstreamInvalidate: () => {
+    for (const listener of upstreamInvalidateListeners) listener();
+  },
+  onOwnerSettled: (ownerUserId, usedUsd) => {
+    void getPortalUserById(ownerUserId)
+      .then((user) => {
+        if (
+          user?.quota !== null &&
+          user?.quota !== undefined &&
+          Number(usedUsd) >= Number(user.quota)
+        ) {
+          for (const listener of authInvalidateListeners) listener(ownerUserId);
+        }
+      })
+      .catch(() => undefined);
+  },
 });
 
 const app = express();
-const CODEX_CLIENT_API_KEY_NAME = "Codex client";
 const codexClientSessions = createCodexClientSessionStore({
-  cacheApiKey,
+  storeRefreshToken: async ({ tokenHash, ownerUserId, email, expiresAtMs }) => {
+    await storeCodexClientRefreshToken({
+      tokenHash,
+      ownerUserId,
+      email,
+      expiresAt: new Date(expiresAtMs),
+    });
+  },
+  consumeRefreshToken: async (tokenHash) => {
+    const record = await consumeCodexClientRefreshToken(tokenHash);
+    if (!record) return null;
+    return { ownerUserId: record.ownerUserId, email: record.email };
+  },
+  revokeRefreshTokens: async (input) => {
+    await revokeCodexClientRefreshTokens({
+      tokenHash: input.tokenHash,
+      ownerUserId: input.ownerUserId,
+    });
+  },
 });
 const port = Number(process.env.PORT ?? 53141);
 const host = process.env.HOST?.trim() || "localhost";
 const JSON_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
-const IMAGE_JSON_BODY_LIMIT_BYTES = 128 * 1024 * 1024;
 const defaultJsonParser = express.json({ limit: JSON_BODY_LIMIT_BYTES });
-const imageJsonParser = express.json({ limit: IMAGE_JSON_BODY_LIMIT_BYTES });
-const responsesWebSocketServer = new WsServerCtor({ noServer: true });
-const responsesWebSocketUpgradeHeaders = new WeakMap<
-  IncomingMessage,
-  Record<string, string>
->();
-responsesWebSocketServer.on("headers", (headers, request) => {
-  const upstreamHeaders = responsesWebSocketUpgradeHeaders.get(request);
-  responsesWebSocketUpgradeHeaders.delete(request);
-  if (!upstreamHeaders) return;
-  for (const [name, value] of Object.entries(upstreamHeaders)) {
-    if (!value.includes("\r") && !value.includes("\n")) {
-      headers.push(`${name}: ${value}`);
-    }
-  }
-});
 
 app.use(cors());
+app.use(express.urlencoded({ extended: false }));
 app.use((req, res, next) => {
-  if (isCodexBackendApiPath(req.path)) {
-    next();
-    return;
-  }
-  express.urlencoded({ extended: false })(req, res, next);
-});
-app.use((req, res, next) => {
-  if (isCodexBackendApiPath(req.path)) {
-    next();
-    return;
-  }
   const encodings = parseContentEncodingHeader(req.headers["content-encoding"]);
   const isZstdOnly = encodings.length === 1 && encodings[0] === "zstd";
   if (!isZstdOnly) {
@@ -306,8 +283,8 @@ app.use((req, res, next) => {
   })().catch((error: unknown) => {
     const status =
       isRecord(error) &&
-        typeof error.status === "number" &&
-        Number.isFinite(error.status)
+      typeof error.status === "number" &&
+      Number.isFinite(error.status)
         ? Math.trunc(error.status)
         : null;
     const code =
@@ -332,47 +309,6 @@ app.use((req, res, next) => {
   });
 });
 
-app.use((req, res, next) => {
-  const originalJson = res.json.bind(res);
-  res.json = ((body: unknown) => {
-    if (
-      req.path.startsWith("/backend-api/") &&
-      res.statusCode >= 400 &&
-      isRecord(body)
-    ) {
-      const intentId =
-        typeof res.locals.intentId === "string" && res.locals.intentId.trim()
-          ? res.locals.intentId.trim()
-          : crypto.randomUUID();
-      const suffix = `(Intent id: ${intentId})`;
-      const errorValue = body.error;
-      if (typeof errorValue === "string") {
-        if (!errorValue.includes("Intent id:")) {
-          return originalJson({
-            ...body,
-            error: `${errorValue} ${suffix}`,
-          });
-        }
-        return originalJson(body);
-      }
-      if (isRecord(errorValue)) {
-        const message = errorValue.message;
-        if (typeof message === "string" && !message.includes("Intent id:")) {
-          return originalJson({
-            ...body,
-            error: {
-              ...errorValue,
-              message: `${message} ${suffix}`,
-            },
-          });
-        }
-      }
-    }
-    return originalJson(body);
-  }) as typeof res.json;
-  next();
-});
-
 registerSetupRoutes(app);
 registerPortalAuthRoutes(app);
 registerCodexClientProtocolRoutes(app, {
@@ -381,11 +317,7 @@ registerCodexClientProtocolRoutes(app, {
 
 app.use(async (req, res, next) => {
   try {
-    if (
-      req.path.startsWith("/backend-api/") ||
-      req.path === "/health" ||
-      isPublicCodexClientPath(req.path)
-    ) {
+    if (req.path === "/health" || isPublicCodexClientPath(req.path)) {
       next();
       return;
     }
@@ -440,34 +372,6 @@ registerPublicOpenAIRoutes(app, {
   getResponseSettlementQueueHealth,
 });
 
-registerCodexBackendForwardRoutes(app, {
-  createRequestAbortContext,
-  resolveFastServiceTierForBilling,
-  authenticateApiKeyWithReason,
-  getApiKeyAuthErrorDetail,
-  persistShortCircuitErrorLog,
-  isApiKeyQuotaExceeded,
-  persistQuotaExceededLog,
-  isApiKeyBoundToUser,
-  tryReserveResponseRequest,
-  getAssignedSourceAccount,
-  getOpenAIApiRuntimeConfig,
-  resolveOpenAIUpstreamAccountId,
-  forwardCodexBackendWithTokenRefresh,
-  extractErrorInfo,
-  isAbortError,
-  buildPassthroughUpstreamError,
-  shouldPersistModelResponseLog,
-  extractResponseUsage,
-  applyServiceTierBillingMultiplier,
-  estimateUsageCost,
-  resolveUsagePricingModelId,
-  enqueueResponseSettlement,
-  cancelResponseRequestReservation,
-  ensureUserUpstreamQuota,
-  settleUserUpstreamQuota,
-});
-
 registerAdminRoutes(app, {
   listOpenAIAccountsPage,
   getPortalPrincipalFromLocals,
@@ -486,6 +390,7 @@ registerAdminRoutes(app, {
   activateOpenAIAccountByEmail,
   disableOpenAIAccountsByEmails,
   normalizeOpenAIAccountStatus,
+  normalizeOpenAIAccountPlatform,
   upsertOpenAIAccount,
   requestCodexDeviceCode,
   pollCodexDeviceAuth,
@@ -495,22 +400,6 @@ registerCodexClientPortalRoutes(app, {
   sessions: codexClientSessions,
   getPortalPrincipalFromLocals,
   getPortalUserById,
-  resolveOwnedApiKey: async (user) => {
-    const keys = await listApiKeys({ ownerUserId: user.id });
-    const existing =
-      keys.find((item) => item.name === CODEX_CLIENT_API_KEY_NAME) ?? keys[0];
-    if (existing) {
-      cacheApiKey(existing);
-      return existing;
-    }
-    const created = await createApiKey({
-      ownerUserId: user.id,
-      name: CODEX_CLIENT_API_KEY_NAME,
-      apiKey: generateApiKeyValue(),
-    });
-    cacheApiKey(created);
-    return created;
-  },
 });
 
 registerUserRoutes(app, {
@@ -529,6 +418,7 @@ registerUserRoutes(app, {
   createPortalInvitation,
   updatePortalUsernameById,
   updatePortalUserPasswordById,
+  updatePortalUserQuotaById,
   setPortalUserEnabledById,
 });
 
@@ -612,139 +502,13 @@ app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
 
 const httpServer = createServer(app);
 
-httpServer.on("upgrade", (request, socket, head) => {
-  const pathname = parseUpgradePathname(request) ?? "";
-  if (!isCodexResponsesPath(pathname)) {
-    sendWebSocketUpgradeErrorResponse(socket, 404, {
-      error: {
-        message: "Not found",
-        type: "invalid_request_error",
-        code: "not_found",
-      },
-    });
-    return;
-  }
-
-  void (async () => {
-    let context: Awaited<
-      ReturnType<typeof prepareResponsesWebSocketProxyContext>
-    > | null = null;
-    try {
-      context = await prepareResponsesWebSocketProxyContext(
-        {
-          isRecord,
-          resolveFastServiceTierForBilling,
-          authenticateApiKeyByAuthorizationHeaderWithReason,
-          getApiKeyAuthErrorDetail,
-          isApiKeyQuotaExceeded,
-          isApiKeyBoundToUser,
-          getAssignedSourceAccount,
-          resolveOpenAIUpstreamAccountId,
-          getOpenAIApiRuntimeConfig,
-          connectResponsesWebSocketProxyUpstream,
-          extractErrorInfo,
-          buildPassthroughUpstreamError,
-        },
-        request,
-      );
-    } catch (error) {
-      if (error instanceof ResponsesWebSocketUpgradeError) {
-        sendWebSocketUpgradeErrorResponse(socket, error.status, error.payload);
-        return;
-      }
-      const errorInfo = extractErrorInfo(error);
-      const passthroughError = buildPassthroughUpstreamError({
-        status: errorInfo.status,
-        errorPayload: errorInfo.errorPayload,
-        fallbackCode: "responses_websocket_upgrade_failed",
-        fallbackMessage:
-          errorInfo.message ?? "Failed to establish responses websocket",
-      });
-      sendWebSocketUpgradeErrorResponse(socket, passthroughError.status, {
-        error: passthroughError.error,
-      });
-      return;
-    }
-
-    try {
-      let upgradeHandled = false;
-      const releaseOnUpgradeSocketClose = () => {
-        if (upgradeHandled) return;
-        if (
-          context.upstreamSocket.readyState === WS_READY_STATE_OPEN ||
-          context.upstreamSocket.readyState === WS_READY_STATE_CONNECTING
-        ) {
-          context.upstreamSocket.close(1011, "client_closed_before_upgrade");
-        }
-      };
-      socket.once("close", releaseOnUpgradeSocketClose);
-      responsesWebSocketUpgradeHeaders.set(
-        request,
-        context.upstreamResponseHeaders,
-      );
-      responsesWebSocketServer.handleUpgrade(request, socket, head, (ws) => {
-        upgradeHandled = true;
-        responsesWebSocketUpgradeHeaders.delete(request);
-        socket.off("close", releaseOnUpgradeSocketClose);
-        setupResponsesWebSocketProxy(
-          {
-            shouldPersistModelResponseLog,
-            enqueueResponseSettlement,
-            tryReserveResponseRequest,
-            cancelResponseRequestReservation,
-            extractResponseUsage,
-            applyServiceTierBillingMultiplier,
-            estimateUsageCost,
-            resolveUsagePricingModelId,
-            normalizeWsCloseCode,
-            normalizeWsCloseReason,
-            resolveFastServiceTierForBilling,
-            sendWsErrorEvent,
-            wsRawDataToText,
-            parseJsonRecordText,
-            isRecord,
-            WS_READY_STATE_OPEN,
-            WS_READY_STATE_CONNECTING,
-            ensureUserUpstreamQuota,
-            settleUserUpstreamQuota,
-          },
-          {
-            clientSocket: ws,
-            upstreamSocket: context.upstreamSocket,
-            context,
-          },
-        );
-      });
-    } catch (error) {
-      responsesWebSocketUpgradeHeaders.delete(request);
-      if (
-        context.upstreamSocket.readyState === WS_READY_STATE_OPEN ||
-        context.upstreamSocket.readyState === WS_READY_STATE_CONNECTING
-      ) {
-        context.upstreamSocket.close(1011, "upgrade_failed");
-      }
-      sendWebSocketUpgradeErrorResponse(socket, 500, {
-        error: {
-          message:
-            error instanceof Error
-              ? error.message
-              : "Failed to complete websocket upgrade",
-          type: "server_error",
-          code: "responses_websocket_upgrade_failed",
-        },
-      });
-    }
-  })().catch((error) => {
-    sendWebSocketUpgradeErrorResponse(socket, 500, {
-      error: {
-        message:
-          error instanceof Error
-            ? error.message
-            : "Unexpected websocket upgrade error",
-        type: "server_error",
-        code: "responses_websocket_upgrade_failed",
-      },
-    });
+httpServer.on("upgrade", (_request, socket) => {
+  sendWebSocketUpgradeErrorResponse(socket, 404, {
+    error: {
+      message: "Not found",
+      type: "invalid_request_error",
+      code: "not_found",
+    },
   });
 });
 
@@ -782,7 +546,16 @@ async function startServer() {
     await initializeResponseSettlementServices();
 
     try {
-      ipcServerInstance = await startNodeIpcServer({ cacheApiKey });
+      ipcServerInstance = await startNodeIpcServer({
+        invalidateCachedOwner: invalidateApiKeyAuthCacheByOwnerUserId,
+        enqueueSettlement: enqueueResponseSettlement,
+      });
+      authInvalidateListeners.push((ownerUserId) => {
+        ipcServerInstance?.invalidateAuth(ownerUserId);
+      });
+      upstreamInvalidateListeners.push(() => {
+        ipcServerInstance?.invalidateUpstream();
+      });
     } catch (ipcErr) {
       console.warn("[backend] failed to start UDS IPC server:", ipcErr);
     }

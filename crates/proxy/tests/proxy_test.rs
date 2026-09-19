@@ -40,13 +40,7 @@ impl Interceptor for TestInterceptor {
         Ok(resp)
     }
 
-    async fn on_response_chunk(
-        &self,
-        _ctx: &RequestContext,
-        _chunk: &[u8],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        Ok(())
-    }
+    fn on_response_chunk(&self, _ctx: &RequestContext, _chunk: &[u8]) {}
 
     async fn on_ws_client_message(
         &self,
@@ -106,6 +100,58 @@ async fn test_interceptor_short_circuit_on_backend_api() {
     let body_bytes = to_bytes(response.into_body(), 1024).await.unwrap();
     assert_eq!(&body_bytes[..], b"custom-intercepted-response");
     assert!(interceptor.intercepted.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn test_openai_v1_base_url_is_handled_as_backend_api() {
+    let interceptor = Arc::new(TestInterceptor {
+        intercepted: AtomicBool::new(false),
+    });
+
+    let config = ProxyConfig {
+        bind_addr: "127.0.0.1:53141".parse().unwrap(),
+        node_backend_url: "http://127.0.0.1:53142".to_string(),
+        upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
+        ipc_socket_path: "./data/test-ipc.sock".to_string(),
+        public_app_url: "http://localhost:53332".to_string(),
+    };
+
+    let app = create_router(config, Some(interceptor.clone()));
+
+    let request = Request::builder()
+        .uri("/v1/responses")
+        .method("POST")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-custom-intercepted").unwrap(),
+        "true"
+    );
+    assert!(interceptor.intercepted.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn test_backend_api_requires_access_token() {
+    let config = ProxyConfig {
+        bind_addr: "127.0.0.1:53141".parse().unwrap(),
+        node_backend_url: "http://127.0.0.1:53142".to_string(),
+        upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
+        ipc_socket_path: "./data/test-ipc.sock".to_string(),
+        public_app_url: "http://localhost:53332".to_string(),
+    };
+
+    let app = create_router(config, None);
+    let request = Request::builder()
+        .uri("/backend-api/codex/models")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -196,6 +242,22 @@ async fn test_path_normalization() {
     assert_eq!(
         normalize_upstream_path("/wham/accounts/check"),
         "/backend-api/wham/accounts/check"
+    );
+    assert_eq!(
+        normalize_upstream_path("/v1/responses"),
+        "/backend-api/codex/responses"
+    );
+    assert_eq!(
+        normalize_upstream_path("/v1/realtime"),
+        "/backend-api/codex/realtime"
+    );
+    assert_eq!(
+        normalize_upstream_path("/v1/live"),
+        "/backend-api/codex/live"
+    );
+    assert_eq!(
+        normalize_upstream_path("/v1/models"),
+        "/backend-api/codex/models"
     );
 }
 

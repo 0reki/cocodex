@@ -3,11 +3,18 @@ import {
   CHATGPT_CODEX_USAGE_URL,
   DEFAULT_CODEX_ORIGINATOR,
 } from "./runtime-constants.ts";
-import { buildCodexUserAgent } from "./client-identity.ts";
+import { buildCodexUserAgent, buildCodexUserAgentForPlatform } from "./client-identity.ts";
 import type {
   GetCodexDailyWorkspaceUsageOptions,
   GetCodexUsageOptions,
 } from "./runtime-types.ts";
+
+function accountUserAgent(options: GetCodexUsageOptions) {
+  const clientVersion = options.clientVersion.trim();
+  return options.platform
+    ? buildCodexUserAgentForPlatform(options.platform, clientVersion)
+    : buildCodexUserAgent(clientVersion);
+}
 
 function codexUsageHeaders(options: GetCodexUsageOptions) {
   const accessToken = options.accessToken.trim();
@@ -18,7 +25,7 @@ function codexUsageHeaders(options: GetCodexUsageOptions) {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${accessToken}`,
     originator: DEFAULT_CODEX_ORIGINATOR,
-    "User-Agent": buildCodexUserAgent(clientVersion),
+    "User-Agent": accountUserAgent(options),
   };
   const accountId = options.accountId?.trim();
   if (accountId) headers["ChatGPT-Account-Id"] = accountId;
@@ -36,7 +43,7 @@ function analyticsUsageHeaders(options: GetCodexUsageOptions) {
     Authorization: `Bearer ${accessToken}`,
     "OpenAI-Beta": "codex-1",
     originator: "codex-tui",
-    "User-Agent": buildCodexUserAgent(clientVersion),
+    "User-Agent": accountUserAgent(options),
     version: clientVersion,
   };
   const accountId = options.accountId?.trim();

@@ -15,12 +15,14 @@ type PortalUserRow = {
   password_hash: string
   role: string
   enabled: boolean
+  quota: number | string | null
+  used: number | string
   created_at: Date
   updated_at: Date
 }
 
 const PORTAL_USER_COLUMNS = `
-  id, username, password_hash, role, enabled, created_at, updated_at
+  id, username, password_hash, role, enabled, quota, used, created_at, updated_at
 `
 
 function mapPortalUserRow(row: PortalUserRow): PortalUserRecord {
@@ -31,6 +33,8 @@ function mapPortalUserRow(row: PortalUserRow): PortalUserRecord {
     passwordHash: row.password_hash,
     role,
     enabled: row.enabled,
+    quota: row.quota === null || row.quota === undefined ? null : String(row.quota),
+    used: String(row.used ?? "0"),
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   }
@@ -186,6 +190,25 @@ export async function setPortalUserEnabledById(
       RETURNING ${PORTAL_USER_COLUMNS}
     `,
     [normalizedId, enabled],
+  )
+  const row = result.rows[0]
+  return row ? mapPortalUserRow(row) : null
+}
+
+export async function updatePortalUserQuotaById(
+  id: string,
+  quota: string | null,
+): Promise<PortalUserRecord | null> {
+  const normalizedId = id.trim()
+  if (!normalizedId) return null
+  const result = await query<PortalUserRow>(
+    `
+      UPDATE portal_users
+      SET quota = $2
+      WHERE id = $1::uuid
+      RETURNING ${PORTAL_USER_COLUMNS}
+    `,
+    [normalizedId, quota],
   )
   const row = result.rows[0]
   return row ? mapPortalUserRow(row) : null

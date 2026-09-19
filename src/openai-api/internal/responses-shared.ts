@@ -29,6 +29,7 @@ export function resolveResponseTransport(
       sessionId,
       version,
       userAgent: options.userAgent,
+      platform: options.platform,
       originator: options.originator,
       requestHeaders: options.requestHeaders,
     }),

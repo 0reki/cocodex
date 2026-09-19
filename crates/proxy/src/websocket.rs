@@ -2,7 +2,7 @@ use crate::interceptor::{RequestContext, SharedInterceptor, WsAction};
 use axum::extract::ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
-use http::header::{AUTHORIZATION, HOST};
+use http::header::HOST;
 use std::sync::Arc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message as TungsteniteWsMessage;
 use tracing::{debug, info, warn};
 use url::Url;
 
-/// Handles WebSocket upgrade on `/backend-api/codex/responses`.
+/// Handles WebSocket upgrade and proxies frames to ChatGPT upstream.
 pub async fn handle_ws_upgrade(
     ws: WebSocketUpgrade,
     ctx: RequestContext,
@@ -38,43 +38,24 @@ async fn proxy_websocket(
         format!("wss://{}", upstream_origin.trim_start_matches('/'))
     };
 
-    let target_url_str = format!("{ws_origin}{}", ctx.target_path);
+    let target_url_str = match ctx.query.as_deref() {
+        Some(query) if !query.is_empty() => {
+            format!("{ws_origin}{}?{query}", ctx.target_path)
+        }
+        _ => format!("{ws_origin}{}", ctx.target_path),
+    };
     let target_url = Url::parse(&target_url_str)?;
     let mut request = target_url_str.as_str().into_client_request()?;
 
-    // Copy relevant headers to upstream handshake
     let req_headers = request.headers_mut();
-    for (name, val) in &ctx.client_headers {
+    for (name, val) in crate::forwarder::copy_upstream_request_headers(&ctx.client_headers) {
         let name_str = name.as_str().to_ascii_lowercase();
-        if matches!(
-            name_str.as_str(),
-            "upgrade"
-                | "connection"
-                | "sec-websocket-key"
-                | "sec-websocket-version"
-                | "sec-websocket-extensions"
-                | "host"
-        ) {
+        if name_str.starts_with("sec-websocket-") {
             continue;
         }
         req_headers.insert(name.clone(), val.clone());
     }
-
-    if let Some(token) = &ctx.upstream_token {
-        let auth_val = format!("Bearer {token}");
-        if let Ok(hv) = auth_val.parse() {
-            req_headers.insert(AUTHORIZATION, hv);
-        }
-    }
-
-    if let Some(account_id) = &ctx.upstream_account_id {
-        if let Ok(hv) = account_id.parse() {
-            req_headers.insert(
-                http::HeaderName::from_static("chatgpt-account-id"),
-                hv,
-            );
-        }
-    }
+    crate::forwarder::apply_upstream_identity_headers(req_headers, &ctx);
 
     if let Some(host) = target_url.host_str() {
         if let Ok(hv) = host.parse() {

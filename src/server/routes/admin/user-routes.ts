@@ -9,6 +9,7 @@ import type {
   setPortalUserEnabledById,
   updatePortalUsernameById,
   updatePortalUserPasswordById,
+  updatePortalUserQuotaById,
 } from "../../../database/index.ts";
 import {
   PortalInvitationError,
@@ -20,6 +21,7 @@ import {
   hashPassword,
   hashPortalInvitationToken,
 } from "../../auth/portal-auth.ts";
+import { formatUsdAmount, parseUsdAmount } from "../../../shared/usd.ts";
 import type { ServerServices } from "../../bootstrap/services.ts";
 
 type UserRouteDependencies = Pick<
@@ -40,6 +42,7 @@ type UserRouteDependencies = Pick<
   setPortalUserUpstreamAssignment: typeof setPortalUserUpstreamAssignment;
   updatePortalUsernameById: typeof updatePortalUsernameById;
   updatePortalUserPasswordById: typeof updatePortalUserPasswordById;
+  updatePortalUserQuotaById: typeof updatePortalUserQuotaById;
   setPortalUserEnabledById: typeof setPortalUserEnabledById;
 };
 
@@ -49,6 +52,8 @@ function publicUser(
     username: string;
     role: "admin" | "user";
     enabled: boolean;
+    quota?: string | null;
+    used?: string;
     createdAt: string;
     updatedAt: string;
   },
@@ -59,6 +64,8 @@ function publicUser(
     username: user.username,
     role: user.role,
     enabled: user.enabled,
+    quota: user.quota === null || user.quota === undefined ? null : Number(user.quota),
+    used: Number(user.used ?? "0"),
     ...(sourceAccountId !== undefined ? { sourceAccountId } : {}),
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -299,6 +306,38 @@ export function registerUserRoutes(
         res.status(404).json({ ok: false, error: "User not found" });
         return;
       }
+      res.json({ ok: true, user: publicUser(user) });
+    } catch (error) {
+      sendUserWriteError(res, error);
+    }
+  });
+
+  app.put("/api/users/:id/quota", async (req: Request, res: Response) => {
+    try {
+      const id = getIdParam(req);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const quotaInput = body.quota;
+      if (!id) {
+        res.status(400).json({ ok: false, error: "id is required" });
+        return;
+      }
+      let quota: string | null = null;
+      if (
+        !(quotaInput === null || quotaInput === undefined || quotaInput === "")
+      ) {
+        const quotaAmount = parseUsdAmount(quotaInput);
+        if (quotaAmount === null || quotaAmount < 0n) {
+          res.status(400).json({ ok: false, error: "quota is invalid" });
+          return;
+        }
+        quota = formatUsdAmount(quotaAmount);
+      }
+      const user = await deps.updatePortalUserQuotaById(id, quota);
+      if (!user) {
+        res.status(404).json({ ok: false, error: "User not found" });
+        return;
+      }
+      deps.invalidateApiKeyAuthCacheByOwnerUserId(id);
       res.json({ ok: true, user: publicUser(user) });
     } catch (error) {
       sendUserWriteError(res, error);
