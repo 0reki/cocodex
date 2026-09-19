@@ -374,6 +374,20 @@ mod tests {
         assert!(classify_backend_kind("/backend-api/codex/responses").billable());
         assert!(!classify_backend_kind("/backend-api/codex/images/generations").billable());
         assert!(!classify_backend_kind("/backend-api/codex/models").billable());
+        // Housekeeping traffic is passthrough and never logged or settled.
+        for path in [
+            "/backend-api/codex/analytics-events/events",
+            "/backend-api/codex/models",
+            "/backend-api/ps/mcp",
+            "/backend-api/ps/plugins/list",
+            "/backend-api/wham/usage",
+        ] {
+            assert_eq!(
+                classify_backend_kind(path),
+                BackendKind::Passthrough,
+                "{path}"
+            );
+        }
     }
 
     #[test]

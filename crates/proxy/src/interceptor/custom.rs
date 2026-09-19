@@ -645,6 +645,14 @@ impl Interceptor for CustomInterceptor {
             "Request finished"
         );
 
+        // Only usage endpoints (Responses, Images, Search) are logged and
+        // settled. Housekeeping traffic — analytics events, plugins, models,
+        // the MCP handshake, usage polls — carries no model or tokens and
+        // must not fill the request log.
+        if classify_backend_kind(&ctx.target_path) == BackendKind::Passthrough {
+            return;
+        }
+
         let (responses, websocket, client_left) = {
             let Ok(mut obs) = ctx.observation.lock() else {
                 return;
