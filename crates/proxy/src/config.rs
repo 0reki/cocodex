@@ -83,6 +83,8 @@ impl ProxyConfig {
         // Fail at startup rather than on the first request.
         crate::billing::pricing::Pricing::from_env()?;
         crate::upstream::identity::VersionResolver::from_env(reqwest::Client::new())?;
+        crate::upstream::cookies::CookieJars::from_env()?;
+        crate::egress_locale::EgressLocaleResolver::from_env(reqwest::Client::new())?;
 
         Ok(Self {
             bind_addr,

@@ -28,6 +28,9 @@ struct LogRow {
     stream_end_reason: Option<String>,
     path: String,
     model_id: Option<String>,
+    requested_model: Option<String>,
+    used_model: Option<String>,
+    turn_state_len: Option<i32>,
     key_id: Option<String>,
     service_tier: Option<String>,
     status_code: Option<i32>,
@@ -52,6 +55,9 @@ impl LogRow {
             "streamEndReason": self.stream_end_reason,
             "path": self.path,
             "modelId": self.model_id,
+            "requestedModel": self.requested_model,
+            "usedModel": self.used_model,
+            "turnStateLen": self.turn_state_len,
             "keyId": self.key_id,
             "serviceTier": self.service_tier,
             "statusCode": self.status_code,
@@ -178,7 +184,8 @@ pub async fn list(
         r#"
         SELECT
           logs.id, logs.intent_id, logs.is_final, logs.stream_end_reason,
-          logs.path, logs.model_id, logs.key_id::text AS key_id, logs.service_tier,
+          logs.path, logs.model_id, logs.requested_model, logs.used_model,
+          logs.turn_state_len, logs.key_id::text AS key_id, logs.service_tier,
           logs.status_code, logs.ttfb_ms, logs.latency_ms, logs.tokens_info,
           logs.total_tokens, logs.cost::float8 AS cost, logs.error_code, logs.error_message,
           logs.request_time, logs.created_at, logs.updated_at

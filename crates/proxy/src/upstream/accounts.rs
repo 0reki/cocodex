@@ -93,6 +93,12 @@ impl AccountService {
         Ok(row)
     }
 
+    /// Any usable login of the account, for requests that do not depend on
+    /// the device (Codex sends them without a User-Agent).
+    pub async fn resolve_any(&self, account_id: &str) -> Result<Option<Account>, sqlx::Error> {
+        db::accounts::representative(&self.pool, account_id).await
+    }
+
     async fn refresh_lock(&self, row_id: &str) -> Arc<Mutex<()>> {
         self.refresh_locks
             .lock()

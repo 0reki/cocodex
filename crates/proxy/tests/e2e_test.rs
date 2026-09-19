@@ -29,12 +29,18 @@ const ACCOUNT: &str = "acct-e2e";
 struct Upstream {
     /// Weekly window used percent, in hundredths.
     weekly_used: Arc<AtomicU64>,
-    device_polls: Arc<AtomicUsize>,
     refreshes: Arc<AtomicUsize>,
     responses: Arc<AtomicUsize>,
 }
 
+/// A ten-character opaque turn state, so `turnStateLen` is a known 10.
+const TURN_STATE: &str = "abcdefghij";
+
 fn sse_turn(text: &str) -> String {
+    let metadata = json!({
+        "type": "response.metadata",
+        "headers": { "x-codex-turn-state": TURN_STATE }
+    });
     let completed = json!({
         "type": "response.completed",
         "response": {
@@ -43,7 +49,9 @@ fn sse_turn(text: &str) -> String {
         }
     });
     format!(
-        "event: response.output_text.delta\ndata: {}\n\nevent: response.completed\ndata: {completed}\n\n",
+        "event: response.metadata\ndata: {metadata}\n\n\
+         event: response.output_text.delta\ndata: {}\n\n\
+         event: response.completed\ndata: {completed}\n\n",
         json!({ "type": "response.output_text.delta", "delta": text })
     )
 }
@@ -133,26 +141,6 @@ async fn mock_openai(state: Upstream) -> String {
             get(|| async { axum::Json(json!({ "data": [] })) }),
         )
         .route("/oauth/token", post(oauth_token))
-        .route(
-            "/api/accounts/deviceauth/usercode",
-            post(|| async {
-                axum::Json(
-                    json!({ "device_auth_id": "dev-1", "user_code": "ABCD-1234", "interval": 1 }),
-                )
-            }),
-        )
-        .route(
-            "/api/accounts/deviceauth/token",
-            post(|State(up): State<Upstream>| async move {
-                if up.device_polls.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return StatusCode::FORBIDDEN.into_response();
-                }
-                axum::Json(
-                    json!({ "authorization_code": "auth-code", "code_verifier": "verifier" }),
-                )
-                .into_response()
-            }),
-        )
         .with_state(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -267,36 +255,41 @@ async fn console_and_codex_client_end_to_end() {
     assert!(!admin.is_empty(), "admin could not log in after setup");
     let admin = admin.as_str();
 
-    // 2. Upstream logins: Windows via device auth, Linux imported with a stale token.
-    let (code, device) = client
+    // 2. Upstream logins: Windows via the browser OAuth flow, Linux imported
+    // with a stale token.
+    let (code, start) = client
         .call(
             "POST",
-            "/api/openai-accounts/device-auth/start",
+            "/api/openai-accounts/oauth/start",
             Some(admin),
             Some(json!({ "platform": "windows" })),
         )
         .await;
-    assert_eq!(code, StatusCode::CREATED, "{device}");
-    let poll = json!({ "deviceAuthId": device["deviceAuthId"], "userCode": device["userCode"], "platform": "windows" });
-    let (_, pending) = client
-        .call(
-            "POST",
-            "/api/openai-accounts/device-auth/poll",
-            Some(admin),
-            Some(poll.clone()),
-        )
-        .await;
-    assert_eq!(pending["status"], "pending");
+    assert_eq!(code, StatusCode::CREATED, "{start}");
+    let authorize = url::Url::parse(start["authorizeUrl"].as_str().unwrap()).unwrap();
+    assert_eq!(authorize.path(), "/oauth/authorize");
+    // The admin pastes back the redirect the browser lands on.
+    let callback = format!(
+        "{}?code=auth-code&state={}",
+        start["redirectUri"].as_str().unwrap(),
+        start["state"].as_str().unwrap()
+    );
     let (code, complete) = client
         .call(
             "POST",
-            "/api/openai-accounts/device-auth/poll",
+            "/api/openai-accounts/oauth/exchange",
             Some(admin),
-            Some(poll),
+            Some(json!({
+                "code": callback,
+                "codeVerifier": start["codeVerifier"],
+                "state": start["state"],
+                "platform": "windows"
+            })),
         )
         .await;
     assert_eq!(code, StatusCode::CREATED, "{complete}");
     assert_eq!(complete["account"]["accountId"], ACCOUNT);
+    assert_eq!(complete["account"]["platform"], "windows");
     let (code, linux) = client
         .call(
             "POST",
@@ -399,6 +392,7 @@ async fn console_and_codex_client_end_to_end() {
         .post(format!("{}/backend-api/codex/responses", client.base))
         .bearer_auth(&codex)
         .header("user-agent", LINUX_UA)
+        .header("x-codex-routing-hint", "model=gpt-5.4")
         .json(&json!({ "model": "gpt-5.4", "input": "ping", "stream": true }))
         .send()
         .await
@@ -461,6 +455,11 @@ async fn console_and_codex_client_end_to_end() {
         .await;
     let item = &logs["items"][0];
     assert_eq!(item["modelId"], "gpt-5.4");
+    // The completed event's model is the used one; the turn state length and
+    // requested model are recorded too.
+    assert_eq!(item["usedModel"], "gpt-5.4");
+    assert_eq!(item["requestedModel"], "gpt-5.4");
+    assert_eq!(item["turnStateLen"], 10);
     assert_eq!(item["totalTokens"], 1500);
     // 1000 input at $2.50/M + 500 output at $15/M.
     assert_eq!(item["cost"], 0.01);

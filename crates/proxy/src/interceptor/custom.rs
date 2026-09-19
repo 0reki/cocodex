@@ -1,5 +1,5 @@
 use super::observe::{BackendKind, ResponseObservation, Terminal, classify_backend_kind};
-use super::platform::{PLATFORM_HEADER, detect_platform};
+use super::platform::detect_platform;
 use super::{Interceptor, RequestAction, RequestContext, WsAction};
 use crate::auth::jwt::JwtError;
 use crate::billing::pricing;
@@ -64,11 +64,18 @@ impl Rejection {
 /// platform, then settle each response.
 pub struct CustomInterceptor {
     runtime: Arc<Runtime>,
+    egress_locale: Arc<crate::egress_locale::EgressLocaleResolver>,
 }
 
 impl CustomInterceptor {
-    pub fn new(runtime: Arc<Runtime>) -> Self {
-        Self { runtime }
+    pub fn new(
+        runtime: Arc<Runtime>,
+        egress_locale: Arc<crate::egress_locale::EgressLocaleResolver>,
+    ) -> Self {
+        Self {
+            runtime,
+            egress_locale,
+        }
     }
 
     async fn owner_rejection(&self, ready: &Ready, owner: &str) -> Option<Rejection> {
@@ -116,7 +123,15 @@ impl CustomInterceptor {
     }
 
     /// Checks an authenticated request and picks its upstream login.
-    async fn admit(&self, ctx: &mut RequestContext, platform: &str) -> Result<(), Rejection> {
+    ///
+    /// `platform` is `None` for requests Codex sends without a User-Agent:
+    /// they carry nothing that depends on the device, so any of the
+    /// account's logins serves them.
+    async fn admit(
+        &self,
+        ctx: &mut RequestContext,
+        platform: Option<&str>,
+    ) -> Result<(), Rejection> {
         let token = ctx.client_token.clone().ok_or_else(|| {
             Rejection::new(
                 StatusCode::UNAUTHORIZED,
@@ -170,6 +185,12 @@ impl CustomInterceptor {
         }
 
         let owner = claims.openai_auth.chatgpt_account_id.clone();
+        let client_user_id = claims.openai_auth.chatgpt_user_id.clone();
+        let client_email = claims
+            .openai_profile
+            .as_ref()
+            .map(|profile| profile.email.clone())
+            .unwrap_or_default();
         ctx.metadata.insert(META_OWNER.into(), owner.clone());
         if let Ok(mut obs) = ctx.observation.lock() {
             obs.owner_user_id = Some(owner.clone());
@@ -204,13 +225,20 @@ impl CustomInterceptor {
             return Err(rejection);
         }
 
-        let row = match ready.accounts.resolve(&account_id, platform).await {
+        let resolved = match platform {
+            Some(platform) => ready.accounts.resolve(&account_id, platform).await,
+            None => ready.accounts.resolve_any(&account_id).await,
+        };
+        let row = match resolved {
             Ok(Some(row)) => row,
             Ok(None) => {
                 return Err(Rejection::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "upstream_account_unavailable",
-                    format!("No upstream login for platform '{platform}'"),
+                    format!(
+                        "No upstream login for platform '{}'",
+                        platform.unwrap_or("any")
+                    ),
                 ));
             }
             Err(error) => {
@@ -224,27 +252,40 @@ impl CustomInterceptor {
         };
         // A login made for one OS keeps that OS's identity; a generic
         // login presents the client's own OS.
-        let identity_platform = if row.platform() == "all" {
-            platform
-        } else {
-            row.platform()
+        let identity_platform = match (row.platform(), platform) {
+            ("all", Some(platform)) => platform,
+            (row_platform, _) => row_platform,
         };
-        let user_agent = ready.accounts.client.user_agent(identity_platform);
+        ctx.metadata
+            .insert(META_PLATFORM.to_string(), identity_platform.to_string());
         info!(
             request_id = %ctx.request_id,
-            platform,
+            platform = identity_platform,
             email = %row.email,
             "routing request to upstream login"
         );
         ctx.metadata.insert(META_ROW.into(), row.id.clone());
         ctx.upstream_token = Some(row.access_token.clone());
         ctx.upstream_account_id = Some(row.account_id.clone());
-        ctx.upstream_client_version = crate::forwarder::client_version_from_user_agent(&user_agent);
-        ctx.upstream_user_agent = Some(user_agent);
-        ctx.upstream_installation_id = Some(crate::forwarder::gateway_installation_id(
+        ctx.upstream_client_version = Some(ready.accounts.client.versions.version());
+        ctx.upstream_installation_id = Some(crate::client_identity::gateway_installation_id(
             &row.account_id,
             identity_platform,
         ));
+        ctx.upstream_platform =
+            Some(crate::upstream::identity::platform_family(identity_platform).to_string());
+        // The conversation's timezone and date follow the gateway's egress
+        // IP, not the user's machine.
+        let (timezone, current_date) = self.egress_locale.snapshot();
+        ctx.presented_timezone = Some(timezone);
+        ctx.presented_current_date = Some(current_date);
+        let (upstream_user_id, token_email) = upstream_token_identity(&row);
+        ctx.identity_swap = vec![
+            (upstream_user_id, client_user_id),
+            (row.account_id.clone(), owner),
+            (token_email, client_email.clone()),
+            (row.email.clone(), client_email),
+        ];
         Ok(())
     }
 
@@ -262,9 +303,13 @@ impl CustomInterceptor {
             return;
         };
         let kind = classify_backend_kind(&ctx.target_path);
-        let model = response
-            .model
+        // Billing follows the completed model; without a completed event, the
+        // requested one.
+        let requested_model = response.requested_model.clone();
+        let used_model = response.completed_model.clone();
+        let model = used_model
             .clone()
+            .or_else(|| requested_model.clone())
             .or_else(|| default_model_for_kind(kind))
             .unwrap_or_else(|| "codex-chatgpt".to_string());
         let tokens_info = response
@@ -307,6 +352,9 @@ impl CustomInterceptor {
             stream_end_reason: end_reason.map(str::to_string),
             path: ctx.target_path.clone(),
             model_id: Some(model),
+            requested_model,
+            used_model,
+            turn_state_len: response.turn_state_len.map(|len| len as i64),
             service_tier: response.service_tier.clone(),
             status_code: Some(status as i64),
             ttfb_ms: response.ttfb_ms.map(|v| v as i64),
@@ -358,6 +406,46 @@ impl CustomInterceptor {
     }
 }
 
+/// The login's ChatGPT user id (`user-…`) and email as its ID token states
+/// them (the access token as a fallback).
+fn upstream_token_identity(row: &crate::db::accounts::Account) -> (String, String) {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let claims: Vec<serde_json::Value> = [&row.id_token, &row.access_token]
+        .into_iter()
+        .filter_map(|token| token.split('.').nth(1))
+        .filter_map(|payload| URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok())
+        .filter_map(|bytes| serde_json::from_slice(&bytes).ok())
+        .collect();
+    let first = |read: &dyn Fn(&serde_json::Value) -> Option<&str>| {
+        claims
+            .iter()
+            .find_map(|claims| read(claims).filter(|value| !value.is_empty()))
+            .unwrap_or_default()
+            .to_string()
+    };
+    let user_id = first(&|claims| {
+        let auth = &claims["https://api.openai.com/auth"];
+        auth["chatgpt_user_id"]
+            .as_str()
+            .or_else(|| auth["user_id"].as_str())
+    });
+    let email = first(&|claims| {
+        claims["email"]
+            .as_str()
+            .or_else(|| claims["https://api.openai.com/profile"]["email"].as_str())
+    });
+    (user_id, email)
+}
+
+/// The ChatGPT MCP endpoint without an `Authorization` header: Codex sends
+/// its session setup this way, and nothing in it identifies the user.
+fn is_unauthenticated_mcp(path: &str, headers: &http::HeaderMap) -> bool {
+    path.trim_end_matches('/').ends_with("/ps/mcp")
+        && !headers.contains_key(http::header::AUTHORIZATION)
+}
+
 #[async_trait]
 impl Interceptor for CustomInterceptor {
     async fn on_request(
@@ -365,33 +453,57 @@ impl Interceptor for CustomInterceptor {
         ctx: &mut RequestContext,
         req: Request<Body>,
     ) -> Result<RequestAction, Box<dyn std::error::Error + Send + Sync>> {
-        let Some(platform) = detect_platform(req.headers()) else {
-            return Ok(RequestAction::ShortCircuit(auth_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_token",
-                "Invalid access token",
-            )));
+        // Codex opens the ChatGPT MCP session without credentials; a
+        // genuine client's request reaches upstream just like that.
+        if is_unauthenticated_mcp(&ctx.target_path, req.headers()) {
+            if let Ok(ready) = self.runtime.ready().await {
+                ctx.upstream_client_version = Some(ready.accounts.client.versions.version());
+            }
+            debug!(request_id = %ctx.request_id, "forwarding unauthenticated MCP request");
+            return Ok(RequestAction::Forward(req));
+        }
+
+        // A few Codex requests carry no User-Agent at all; anything else
+        // must identify its OS.
+        let platform = match detect_platform(req.headers()) {
+            Some(platform) => Some(platform.as_str()),
+            None if !req.headers().contains_key(http::header::USER_AGENT) => None,
+            None => {
+                return Ok(RequestAction::ShortCircuit(auth_error(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    "Invalid access token",
+                )));
+            }
         };
-        ctx.metadata
-            .insert(META_PLATFORM.to_string(), platform.as_str().to_string());
+        if let Some(platform) = platform {
+            ctx.metadata
+                .insert(META_PLATFORM.to_string(), platform.to_string());
+        }
         debug!(
             request_id = %ctx.request_id,
             method = %ctx.method,
             path = %ctx.path,
-            platform = platform.as_str(),
+            platform = platform.unwrap_or(""),
             "CustomInterceptor: on_request hook"
         );
 
-        if let Err(rejection) = self.admit(ctx, platform.as_str()).await {
+        if let Err(rejection) = self.admit(ctx, platform).await {
             if let Ok(mut obs) = ctx.observation.lock() {
                 obs.record_error(rejection.code, &rejection.message);
             }
             return Ok(RequestAction::ShortCircuit(rejection.response()));
         }
 
-        let (mut parts, body) = req.into_parts();
-        parts.headers.remove(PLATFORM_HEADER);
-        Ok(RequestAction::Forward(Request::from_parts(parts, body)))
+        // The requested model of an HTTP response is only in the request; the
+        // routing hint carries it (a WebSocket turn brings its own).
+        if let Some(model) = routing_hint_model(req.headers())
+            && let Ok(mut obs) = ctx.observation.lock()
+        {
+            obs.set_requested_model(model);
+        }
+
+        Ok(RequestAction::Forward(req))
     }
 
     async fn on_response(
@@ -411,13 +523,17 @@ impl Interceptor for CustomInterceptor {
                     obs.is_sse = Some(false);
                 }
             }
+            // The upstream `openai-model` header names the model that served
+            // the request, the used model even for a header-only response.
             if let Some(model) = resp
                 .headers()
                 .get("openai-model")
                 .and_then(|v| v.to_str().ok())
                 && !model.is_empty()
             {
-                obs.current.model.get_or_insert_with(|| model.to_string());
+                obs.current
+                    .completed_model
+                    .get_or_insert_with(|| model.to_string());
             }
         }
         Ok(resp)
@@ -565,6 +681,22 @@ impl Interceptor for CustomInterceptor {
             self.settle(&ready, ctx, response, status, error, client_left);
         }
     }
+}
+
+/// The model in a `x-codex-routing-hint: model=<m>[;tier=<t>]` request
+/// header, which Codex sends on every Responses request.
+fn routing_hint_model(headers: &http::HeaderMap) -> Option<&str> {
+    headers
+        .get("x-codex-routing-hint")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|hint| {
+            hint.split(';').find_map(|part| {
+                part.trim()
+                    .strip_prefix("model=")
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+            })
+        })
 }
 
 fn default_model_for_kind(kind: BackendKind) -> Option<String> {

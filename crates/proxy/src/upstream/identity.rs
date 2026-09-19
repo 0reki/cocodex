@@ -18,15 +18,179 @@ fn ascii_only(value: String) -> String {
         .collect()
 }
 
-/// Mirrors Codex `get_codex_user_agent()` with a representative OS build.
+/// The OS a platform string presents upstream: `windows`, `macos` or
+/// `linux` (the default, also used for generic `all` logins). The User-Agent,
+/// the installation id and the cookie jar all follow this value, so one
+/// upstream login on one OS looks like one Codex installation.
+pub fn platform_family(platform: &str) -> &'static str {
+    match platform.trim().to_lowercase().as_str() {
+        "windows" => "windows",
+        "darwin" | "macos" => "macos",
+        _ => "linux",
+    }
+}
+
+/// Originator of the interactive Codex CLI, used on the calls the gateway
+/// makes in a login's name (usage reads, the console's account test).
+pub const CLI_ORIGINATOR: &str = "codex-tui";
+
+/// The machine an upstream login presents on one OS: the `os_info` pieces
+/// of the User-Agent, the `std::env::consts` values in analytics events,
+/// and for the gateway's own calls a terminal token and default sandbox.
+/// Clients keep their type (originator, terminal or host, app-server client
+/// name); the machine is the gateway's.
+pub struct OsProfile {
+    /// `{os_type} {version}` as `os_info` formats it.
+    pub ua_os: &'static str,
+    /// `os_info` architecture (`arm64` on Apple silicon).
+    pub ua_arch: &'static str,
+    /// `codex_terminal_detection::user_agent()` for the gateway's own calls;
+    /// client traffic keeps the client's terminal.
+    pub terminal: &'static str,
+    /// `std::env::consts::OS`.
+    pub runtime_os: &'static str,
+    /// `os_info` version.
+    pub runtime_os_version: &'static str,
+    /// `std::env::consts::ARCH`.
+    pub runtime_arch: &'static str,
+    /// Turn-metadata `sandbox` tag of the platform's default sandbox.
+    pub sandbox: &'static str,
+}
+
+pub fn os_profile(platform: &str) -> &'static OsProfile {
+    const WINDOWS: OsProfile = OsProfile {
+        ua_os: "Windows 10.0.22631",
+        ua_arch: "x86_64",
+        terminal: "WindowsTerminal",
+        runtime_os: "windows",
+        runtime_os_version: "10.0.22631",
+        runtime_arch: "x86_64",
+        sandbox: "windows_elevated",
+    };
+    const MACOS: OsProfile = OsProfile {
+        ua_os: "Mac OS 15.5.0",
+        ua_arch: "arm64",
+        terminal: "Apple_Terminal/455",
+        runtime_os: "macos",
+        runtime_os_version: "15.5.0",
+        runtime_arch: "aarch64",
+        sandbox: "seatbelt",
+    };
+    const LINUX: OsProfile = OsProfile {
+        ua_os: "Debian 13.0.0",
+        ua_arch: "x86_64",
+        terminal: "xterm-256color",
+        runtime_os: "linux",
+        runtime_os_version: "13.0.0",
+        runtime_arch: "x86_64",
+        sandbox: "seccomp",
+    };
+    match platform_family(platform) {
+        "windows" => &WINDOWS,
+        "macos" => &MACOS,
+        _ => &LINUX,
+    }
+}
+
+/// Mirrors Codex `get_codex_user_agent()`:
+/// `{originator}/{version} ({os}; {arch}) {terminal}` followed, once the
+/// app-server client is initialized, by `({client}; {client_version})`.
+fn codex_user_agent(
+    originator: &str,
+    platform: &str,
+    version: &str,
+    terminal: &str,
+    suffix: Option<(&str, &str)>,
+) -> String {
+    let os = os_profile(platform);
+    let mut user_agent = format!(
+        "{originator}/{version} ({}; {}) {terminal}",
+        os.ua_os, os.ua_arch
+    );
+    if let Some((client, client_version)) = suffix {
+        user_agent.push_str(&format!(" ({client}; {client_version})"));
+    }
+    ascii_only(user_agent)
+}
+
+/// The interactive CLI's User-Agent on `platform`, for the gateway's own
+/// calls.
 pub fn user_agent_for_platform(platform: &str, version: &str) -> String {
-    ascii_only(match platform.trim().to_lowercase().as_str() {
-        "windows" => format!("codex_cli_rs/{version} (Windows 10.0.22631; x86_64) WindowsTerminal"),
-        "darwin" | "macos" => {
-            format!("codex_cli_rs/{version} (Mac OS 14.5.0; arm64) Apple_Terminal")
-        }
-        _ => format!("codex_cli_rs/{version} (Debian 12; x86_64) unknown"),
-    })
+    codex_user_agent(
+        CLI_ORIGINATOR,
+        platform,
+        version,
+        os_profile(platform).terminal,
+        Some((CLI_ORIGINATOR, version)),
+    )
+}
+
+/// The Codex version a client User-Agent carries: `{originator}/{version}`
+/// (also `codex-mcp-client/{version}`).
+pub fn codex_version_from_user_agent(user_agent: &str) -> Option<&str> {
+    let after_slash = user_agent.split_once('/')?.1;
+    let version = after_slash.split([' ', '(']).next()?.trim();
+    (!version.is_empty()).then_some(version)
+}
+
+/// The version an app-server client reports for itself (the UA suffix and
+/// analytics `client_version`): the CLI's is its Codex version, which
+/// becomes the presented one; a host app's own version is kept.
+pub fn presented_client_version<'a>(
+    reported: &'a str,
+    client_codex_version: Option<&str>,
+    version: &'a str,
+) -> &'a str {
+    if Some(reported) == client_codex_version {
+        version
+    } else {
+        reported
+    }
+}
+
+/// The User-Agent presented upstream in place of the client's. The client's
+/// type survives (the originator, the terminal or host it runs in, and the
+/// app-server client name); the Codex version, OS and architecture are the
+/// upstream login's. `codex-mcp-client/{version}` names no machine and only gets
+/// the version; an agent in no Codex shape becomes the CLI's.
+pub fn rewrite_user_agent(client: &str, platform: &str, version: &str) -> String {
+    let Some((name, rest)) = client.split_once('/') else {
+        return user_agent_for_platform(platform, version);
+    };
+    let Some(current) = codex_version_from_user_agent(client) else {
+        return user_agent_for_platform(platform, version);
+    };
+    if !rest.contains(" (") {
+        return if name.is_empty() || name.contains(' ') {
+            user_agent_for_platform(platform, version)
+        } else {
+            ascii_only(format!("{name}/{version}"))
+        };
+    }
+    // The app-server suffix is a second parenthesized group at the end.
+    let has_suffix = rest.ends_with(')') && rest.matches(" (").count() >= 2;
+    let (machine_and_terminal, suffix) = match rest.rsplit_once(" (") {
+        Some((head, tail)) if has_suffix => (
+            head,
+            tail.strip_suffix(')')
+                .and_then(|inner| inner.split_once("; "))
+                .map(|(client, client_version)| {
+                    (
+                        client,
+                        presented_client_version(client_version, Some(current), version),
+                    )
+                }),
+        ),
+        _ => (rest, None),
+    };
+    // `{version} ({os}; {arch}) {terminal}`: the terminal follows the
+    // machine group.
+    let terminal = machine_and_terminal
+        .split_once(") ")
+        .map(|(_, terminal)| terminal.trim())
+        .filter(|terminal| !terminal.is_empty())
+        .unwrap_or_else(|| os_profile(platform).terminal);
+    codex_user_agent(name, platform, version, terminal, suffix)
 }
 
 fn is_stable(version: &str) -> bool {
@@ -178,15 +342,61 @@ mod tests {
     fn platform_user_agents_match_codex_format() {
         assert_eq!(
             user_agent_for_platform("windows", "0.200.0"),
-            "codex_cli_rs/0.200.0 (Windows 10.0.22631; x86_64) WindowsTerminal"
+            "codex-tui/0.200.0 (Windows 10.0.22631; x86_64) WindowsTerminal (codex-tui; 0.200.0)"
         );
         assert_eq!(
             user_agent_for_platform("macos", "0.200.0"),
-            "codex_cli_rs/0.200.0 (Mac OS 14.5.0; arm64) Apple_Terminal"
+            "codex-tui/0.200.0 (Mac OS 15.5.0; arm64) Apple_Terminal/455 (codex-tui; 0.200.0)"
         );
         assert_eq!(
-            user_agent_for_platform("all", "0.200.0"),
-            "codex_cli_rs/0.200.0 (Debian 12; x86_64) unknown"
+            user_agent_for_platform("linux", "0.200.0"),
+            "codex-tui/0.200.0 (Debian 13.0.0; x86_64) xterm-256color (codex-tui; 0.200.0)"
+        );
+    }
+
+    #[test]
+    fn client_user_agents_keep_only_their_type_and_terminal() {
+        // Captured from Codex 0.155.1 on Linux.
+        assert_eq!(
+            rewrite_user_agent(
+                "codex-tui/0.155.1 (Ubuntu 24.4.0; x86_64) gnome-terminal (codex-tui; 0.155.1)",
+                "linux",
+                "0.156.0"
+            ),
+            "codex-tui/0.156.0 (Debian 13.0.0; x86_64) gnome-terminal (codex-tui; 0.156.0)"
+        );
+        assert_eq!(
+            rewrite_user_agent(
+                "codex_cli_rs/0.155.1 (Debian 13.0.0; x86_64) xterm-256color",
+                "linux",
+                "0.156.0"
+            ),
+            "codex_cli_rs/0.156.0 (Debian 13.0.0; x86_64) xterm-256color"
+        );
+        assert_eq!(
+            rewrite_user_agent(
+                "codex_exec/0.155.1 (Windows 10.0.26100; x86_64) vscode/1.99.0 (codex_exec; 0.155.1)",
+                "windows",
+                "0.156.0"
+            ),
+            "codex_exec/0.156.0 (Windows 10.0.22631; x86_64) vscode/1.99.0 (codex_exec; 0.156.0)"
+        );
+        assert_eq!(
+            rewrite_user_agent("codex-mcp-client/0.155.1", "macos", "0.156.0"),
+            "codex-mcp-client/0.156.0"
+        );
+        // A host app keeps its type and its own app version.
+        assert_eq!(
+            rewrite_user_agent(
+                "Codex Desktop/0.155.1 (Mac OS 14.1.0; arm64) unknown (Codex Desktop; 26.915.1)",
+                "macos",
+                "0.156.0"
+            ),
+            "Codex Desktop/0.156.0 (Mac OS 15.5.0; arm64) unknown (Codex Desktop; 26.915.1)"
+        );
+        assert_eq!(
+            rewrite_user_agent("Apifox/1.0.0 (x)", "linux", "0.156.0"),
+            "Apifox/0.156.0 (Debian 13.0.0; x86_64) xterm-256color"
         );
     }
 

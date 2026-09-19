@@ -59,7 +59,9 @@ Session 立即失效。
 Codex 的两种 base URL 写法都可以：`/backend-api/*`、`/api/codex/*`，
 另支持 `WS /backend-api/codex/responses`。每个请求：
 
-1. 按 `X-Cocodex-Platform` 或 User-Agent 识别客户端系统（windows / linux / darwin），识别不出拒绝
+1. 按 User-Agent 识别客户端系统（windows / linux / darwin），识别不出拒绝；
+   完全不带 User-Agent 的请求（如 `/accounts/verified_access`）与设备无关，使用该账号任一平台的登录。
+   不带 `Authorization` 的 `/ps/mcp`（Codex 建立 MCP 会话时就是这样发的）不鉴权直接透传，只改写版本号
 2. 校验 Codex token 与 Session、用户状态和美元额度
 3. 找到管理员分配给用户的 ChatGPT 账号（按 `account_id`），未分配返回 403
 4. 选该账号在此平台的登录（没有时用 `all` 登录），并换上该平台的真实 Codex User-Agent

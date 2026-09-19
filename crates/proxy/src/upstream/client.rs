@@ -8,11 +8,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
 
-use super::identity::{VersionResolver, user_agent_for_platform};
+use super::identity::{CLI_ORIGINATOR, VersionResolver, os_profile, user_agent_for_platform};
 
 pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const DEFAULT_ORIGINATOR: &str = "codex_cli_rs";
-const DEFAULT_SANDBOX: &str = "windows_elevated";
 
 #[derive(Debug, Clone)]
 pub struct UpstreamError {
@@ -46,24 +44,31 @@ pub struct RefreshedTokens {
     pub refresh_token: Option<String>,
 }
 
-pub struct DeviceCode {
-    pub device_auth_id: String,
-    pub user_code: String,
-    pub verification_url: String,
-    pub interval_seconds: u64,
-    pub expires_in_seconds: u64,
+/// The account and tokens learned from a finished OpenAI login.
+pub struct CompletedLogin {
+    pub email: String,
+    pub account_id: String,
+    pub id_token: String,
+    pub access_token: String,
+    pub refresh_token: String,
 }
 
-pub enum DevicePoll {
-    Pending,
-    Complete {
-        email: String,
-        account_id: String,
-        id_token: String,
-        access_token: String,
-        refresh_token: String,
-    },
+/// Everything the console shows to start a browser OAuth login and finish it.
+/// The verifier and state are handed back to the caller for the exchange, the
+/// way a PKCE public client (the browser here) holds them.
+pub struct OAuthStart {
+    pub authorize_url: String,
+    pub code_verifier: String,
+    pub state: String,
+    pub redirect_uri: String,
 }
+
+/// The browser redirect Codex registers for its OAuth client; the console
+/// shows it to the admin, who pastes back the `code` it receives.
+pub const CODEX_OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+/// The scope the Codex CLI requests, so the login looks identical upstream.
+const CODEX_OAUTH_SCOPE: &str =
+    "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
 /// The account a call is made on behalf of.
 pub struct Credentials<'a> {
@@ -77,6 +82,10 @@ pub struct UpstreamClient {
     pub chatgpt_origin: String,
     pub auth_origin: String,
     pub versions: Arc<VersionResolver>,
+    /// Shared with the proxy path so every chatgpt.com call the gateway makes
+    /// for a login carries that login's infrastructure cookies, the way one
+    /// Codex process shares one cookie jar.
+    pub cookies: Arc<super::cookies::CookieJars>,
 }
 
 fn truncate(text: &str) -> String {
@@ -152,100 +161,84 @@ impl UpstreamClient {
         })
     }
 
-    pub async fn request_device_code(&self, platform: &str) -> Result<DeviceCode, UpstreamError> {
-        let response = self
-            .http
-            .post(format!(
-                "{}/api/accounts/deviceauth/usercode",
-                self.auth_origin
-            ))
-            .timeout(Duration::from_secs(15))
-            .header("Accept", "application/json")
-            .header("User-Agent", self.user_agent(platform))
-            .json(&json!({ "client_id": CODEX_OAUTH_CLIENT_ID }))
-            .send()
-            .await
-            .map_err(|e| transport(e, "/deviceauth/usercode"))?;
-        if response.status().as_u16() == 404 {
-            return Err(UpstreamError::new(
-                Some(404),
-                "Device code login is not enabled for this ChatGPT account or workspace",
-            ));
+    /// The authorization URL the admin opens to log an upstream account in,
+    /// identical to what the Codex CLI builds, plus the PKCE verifier and
+    /// state to finish the exchange with.
+    pub fn oauth_authorize_url(&self, platform: &str) -> OAuthStart {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use rand::RngCore;
+        use sha2::{Digest, Sha256};
+
+        let mut verifier_bytes = [0u8; 64];
+        rand::thread_rng().fill_bytes(&mut verifier_bytes);
+        let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+        let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+        let mut state_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut state_bytes);
+        let state = URL_SAFE_NO_PAD.encode(state_bytes);
+
+        let mut url = url::Url::parse(&format!("{}/oauth/authorize", self.auth_origin))
+            .expect("auth origin is validated at startup");
+        url.query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("client_id", CODEX_OAUTH_CLIENT_ID)
+            .append_pair("redirect_uri", CODEX_OAUTH_REDIRECT_URI)
+            .append_pair("code_challenge", &code_challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("state", &state)
+            .append_pair("scope", CODEX_OAUTH_SCOPE)
+            .append_pair("id_token_add_organizations", "true")
+            .append_pair("codex_cli_simplified_flow", "true")
+            .append_pair("originator", CLI_ORIGINATOR);
+        // The platform decides the User-Agent, not the authorize URL, but
+        // keep it so a caller can log which login this belongs to.
+        let _ = platform;
+        OAuthStart {
+            authorize_url: url.to_string(),
+            code_verifier,
+            state,
+            redirect_uri: CODEX_OAUTH_REDIRECT_URI.to_string(),
         }
-        let payload = read_json(response, "/deviceauth/usercode").await?;
-        let device_auth_id = string_field(&payload, "device_auth_id");
-        let user_code = Some(string_field(&payload, "user_code"))
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| string_field(&payload, "usercode"));
-        if device_auth_id.is_empty() || user_code.is_empty() {
-            return Err(UpstreamError::new(
-                None,
-                "Invalid device code response from OpenAI",
-            ));
-        }
-        let interval = payload
-            .get("interval")
-            .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok()))
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .map(|v| v.trunc() as u64)
-            .unwrap_or(5);
-        Ok(DeviceCode {
-            device_auth_id,
-            user_code,
-            verification_url: format!("{}/codex/device", self.auth_origin),
-            interval_seconds: interval,
-            expires_in_seconds: 15 * 60,
-        })
     }
 
-    pub async fn poll_device(
+    /// Finishes a browser OAuth login: exchanges the pasted code for tokens.
+    pub async fn exchange_oauth_code(
         &self,
-        device_auth_id: &str,
-        user_code: &str,
+        code: &str,
+        code_verifier: &str,
+        redirect_uri: &str,
         platform: &str,
-    ) -> Result<DevicePoll, UpstreamError> {
-        let user_agent = self.user_agent(platform);
-        let response = self
-            .http
-            .post(format!(
-                "{}/api/accounts/deviceauth/token",
-                self.auth_origin
-            ))
-            .timeout(Duration::from_secs(15))
-            .header("Accept", "application/json")
-            .header("User-Agent", &user_agent)
-            .json(&json!({ "device_auth_id": device_auth_id, "user_code": user_code }))
-            .send()
-            .await
-            .map_err(|e| transport(e, "/deviceauth/token"))?;
-        if matches!(response.status().as_u16(), 403 | 404) {
-            return Ok(DevicePoll::Pending);
-        }
-        let code = read_json(response, "/deviceauth/token").await?;
-        let authorization_code = string_field(&code, "authorization_code");
-        let code_verifier = string_field(&code, "code_verifier");
-        if authorization_code.is_empty() || code_verifier.is_empty() {
-            return Err(UpstreamError::new(
-                None,
-                "Invalid device authorization response from OpenAI",
-            ));
-        }
+    ) -> Result<CompletedLogin, UpstreamError> {
+        self.exchange_authorization_code(
+            code.trim(),
+            code_verifier.trim(),
+            redirect_uri,
+            &self.user_agent(platform),
+        )
+        .await
+    }
 
+    /// Trades an authorization code for tokens and reads the account out of
+    /// the returned ID token.
+    async fn exchange_authorization_code(
+        &self,
+        code: &str,
+        code_verifier: &str,
+        redirect_uri: &str,
+        user_agent: &str,
+    ) -> Result<CompletedLogin, UpstreamError> {
         let response = self
             .http
             .post(format!("{}/oauth/token", self.auth_origin))
             .timeout(Duration::from_secs(15))
             .header("Accept", "application/json")
-            .header("User-Agent", &user_agent)
+            .header("User-Agent", user_agent)
             .form(&[
                 ("grant_type", "authorization_code"),
-                ("code", authorization_code.as_str()),
-                (
-                    "redirect_uri",
-                    &format!("{}/deviceauth/callback", self.auth_origin),
-                ),
+                ("code", code),
+                ("redirect_uri", redirect_uri),
                 ("client_id", CODEX_OAUTH_CLIENT_ID),
-                ("code_verifier", code_verifier.as_str()),
+                ("code_verifier", code_verifier),
             ])
             .send()
             .await
@@ -282,7 +275,7 @@ impl UpstreamClient {
                 "OpenAI ID token is missing account information",
             ));
         }
-        Ok(DevicePoll::Complete {
+        Ok(CompletedLogin {
             email,
             account_id,
             id_token,
@@ -291,21 +284,47 @@ impl UpstreamClient {
         })
     }
 
+    /// Attaches the login's cookies to a chatgpt.com request the way the
+    /// client would.
+    fn with_cookies(
+        &self,
+        mut request: reqwest::RequestBuilder,
+        credentials: &Credentials<'_>,
+        url: &str,
+    ) -> reqwest::RequestBuilder {
+        if let Ok(parsed) = url::Url::parse(url)
+            && let Some(cookie) =
+                self.cookies
+                    .cookie_header(credentials.account_id, credentials.platform, &parsed)
+            && let Ok(value) = cookie.to_str()
+        {
+            request = request.header("Cookie", value.to_string());
+        }
+        request
+    }
+
     async fn get_json(
         &self,
         url: String,
         endpoint: &str,
+        credentials: &Credentials<'_>,
         headers: Vec<(&'static str, String)>,
     ) -> Result<Value, UpstreamError> {
-        let mut request = self.http.get(url).timeout(Duration::from_secs(10));
+        let mut request = self.http.get(&url).timeout(Duration::from_secs(10));
         for (name, value) in headers {
             request = request.header(name, value);
         }
-        let payload = read_json(
-            request.send().await.map_err(|e| transport(e, endpoint))?,
-            endpoint,
-        )
-        .await?;
+        request = self.with_cookies(request, credentials, &url);
+        let response = request.send().await.map_err(|e| transport(e, endpoint))?;
+        if let Ok(parsed) = url::Url::parse(&url) {
+            self.cookies.store(
+                credentials.account_id,
+                credentials.platform,
+                &parsed,
+                response.headers(),
+            );
+        }
+        let payload = read_json(response, endpoint).await?;
         if !payload.is_object() {
             return Err(UpstreamError::new(
                 None,
@@ -320,13 +339,14 @@ impl UpstreamClient {
         self.get_json(
             format!("{}/backend-api/wham/usage", self.chatgpt_origin),
             "/backend-api/wham/usage",
+            credentials,
             vec![
+                // The CLI's own usage read carries no `originator`.
+                ("User-Agent", self.user_agent(credentials.platform)),
                 (
                     "Authorization",
                     format!("Bearer {}", credentials.access_token),
                 ),
-                ("originator", DEFAULT_ORIGINATOR.to_string()),
-                ("User-Agent", self.user_agent(credentials.platform)),
                 ("ChatGPT-Account-Id", credentials.account_id.to_string()),
             ],
         )
@@ -350,6 +370,7 @@ impl UpstreamClient {
         self.get_json(
             url.to_string(),
             path,
+            credentials,
             vec![
                 ("Accept", "application/json".to_string()),
                 (
@@ -357,7 +378,7 @@ impl UpstreamClient {
                     format!("Bearer {}", credentials.access_token),
                 ),
                 ("OpenAI-Beta", "codex-1".to_string()),
-                ("originator", "codex-tui".to_string()),
+                ("originator", CLI_ORIGINATOR.to_string()),
                 ("User-Agent", self.user_agent(credentials.platform)),
                 ("version", self.versions.version()),
                 ("ChatGPT-Account-Id", credentials.account_id.to_string()),
@@ -375,23 +396,21 @@ impl UpstreamClient {
     ) -> Result<(u16, String), UpstreamError> {
         let body = zstd::encode_all(payload.to_string().as_bytes(), 3)
             .map_err(|e| UpstreamError::new(None, e.to_string()))?;
+        let url = format!("{}/backend-api/codex/responses", self.chatgpt_origin);
         let mut request = self
             .http
-            .post(format!(
-                "{}/backend-api/codex/responses",
-                self.chatgpt_origin
-            ))
+            .post(&url)
             .timeout(Duration::from_secs(300))
             .header(
                 "Authorization",
                 format!("Bearer {}", credentials.access_token),
             )
-            .header("originator", DEFAULT_ORIGINATOR)
+            .header("originator", CLI_ORIGINATOR)
             .header("session-id", uuid::Uuid::new_v4().to_string())
             .header("version", self.versions.version())
             .header(
                 "x-codex-turn-metadata",
-                json!({ "turn_id": uuid::Uuid::new_v4().to_string(), "sandbox": DEFAULT_SANDBOX })
+                json!({ "turn_id": uuid::Uuid::new_v4().to_string(), "sandbox": os_profile(credentials.platform).sandbox })
                     .to_string(),
             )
             .header("User-Agent", self.user_agent(credentials.platform))
@@ -408,11 +427,20 @@ impl UpstreamClient {
             };
             request = request.header("x-codex-routing-hint", hint);
         }
+        request = self.with_cookies(request, credentials, &url);
         let response = request
             .body(body)
             .send()
             .await
             .map_err(|e| transport(e, "/backend-api/codex/responses"))?;
+        if let Ok(parsed) = url::Url::parse(&url) {
+            self.cookies.store(
+                credentials.account_id,
+                credentials.platform,
+                &parsed,
+                response.headers(),
+            );
+        }
         let status = response.status().as_u16();
         let text = response
             .text()
@@ -425,5 +453,49 @@ impl UpstreamClient {
             ));
         }
         Ok((status, text))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client() -> UpstreamClient {
+        let http = reqwest::Client::new();
+        UpstreamClient {
+            http: http.clone(),
+            chatgpt_origin: "https://chatgpt.com".to_string(),
+            auth_origin: "https://auth.openai.com".to_string(),
+            versions: std::sync::Arc::new(VersionResolver::from_env(http).unwrap()),
+            cookies: std::sync::Arc::new(super::super::cookies::CookieJars::from_env().unwrap()),
+        }
+    }
+
+    #[test]
+    fn authorize_url_matches_the_codex_oauth_shape() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use sha2::{Digest, Sha256};
+
+        let start = client().oauth_authorize_url("windows");
+        let url = url::Url::parse(&start.authorize_url).unwrap();
+        assert_eq!(url.path(), "/oauth/authorize");
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["response_type"], "code");
+        assert_eq!(query["client_id"], CODEX_OAUTH_CLIENT_ID);
+        assert_eq!(query["redirect_uri"], CODEX_OAUTH_REDIRECT_URI);
+        assert_eq!(query["code_challenge_method"], "S256");
+        assert_eq!(query["codex_cli_simplified_flow"], "true");
+        assert_eq!(query["id_token_add_organizations"], "true");
+        assert_eq!(query["scope"], CODEX_OAUTH_SCOPE);
+        assert_eq!(query["state"], start.state);
+        // The challenge is the S256 hash of the verifier handed back.
+        let expected = URL_SAFE_NO_PAD.encode(Sha256::digest(start.code_verifier.as_bytes()));
+        assert_eq!(query["code_challenge"], expected);
+        // Two starts never share a verifier.
+        assert_ne!(
+            start.code_verifier,
+            client().oauth_authorize_url("windows").code_verifier
+        );
     }
 }

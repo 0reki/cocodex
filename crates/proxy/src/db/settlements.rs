@@ -22,6 +22,16 @@ pub struct Settlement {
     pub stream_end_reason: Option<String>,
     pub path: String,
     pub model_id: Option<String>,
+    /// The model the client asked for. Skipped when absent so a legacy WAL
+    /// record round-trips byte for byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    /// The model the upstream completed event reports as used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_model: Option<String>,
+    /// Length of the upstream turn state, when the response carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_state_len: Option<i64>,
     pub service_tier: Option<String>,
     pub status_code: Option<i64>,
     pub ttfb_ms: Option<i64>,
@@ -99,6 +109,9 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
                 "stream_end_reason": item.stream_end_reason,
                 "path": item.path,
                 "model_id": item.model_id,
+                "requested_model": item.requested_model,
+                "used_model": item.used_model,
+                "turn_state_len": item.turn_state_len,
                 "service_tier": item.service_tier,
                 "status_code": item.status_code,
                 "ttfb_ms": item.ttfb_ms,
@@ -127,6 +140,9 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
             stream_end_reason text,
             path text,
             model_id text,
+            requested_model text,
+            used_model text,
+            turn_state_len integer,
             service_tier text,
             status_code integer,
             ttfb_ms integer,
@@ -147,14 +163,17 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
         inserted_logs AS (
           INSERT INTO model_response_logs (
             settlement_id, intent_id, owner_user_id, key_id, is_final,
-            stream_end_reason, path, model_id, service_tier, status_code,
+            stream_end_reason, path, model_id, requested_model, used_model,
+            turn_state_len, service_tier, status_code,
             ttfb_ms, latency_ms, tokens_info, total_tokens, cost,
             error_code, error_message, request_time
           )
           SELECT
             input.settlement_id, input.intent_id,
             users.id, input.key_id, input.is_final,
-            input.stream_end_reason, input.path, input.model_id, input.service_tier,
+            input.stream_end_reason, input.path, input.model_id,
+            input.requested_model, input.used_model, input.turn_state_len,
+            input.service_tier,
             input.status_code, input.ttfb_ms, input.latency_ms, input.tokens_info,
             input.total_tokens, input.cost, input.error_code, input.error_message,
             input.request_time

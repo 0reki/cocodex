@@ -167,3 +167,37 @@ async fn test_unknown_paths_are_not_found() {
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
     }
 }
+
+#[tokio::test]
+async fn cors_headers_only_on_console_routes() {
+    let app = create_router(
+        common::config(common::offline_settings(), "http://127.0.0.1:9"),
+        Some(Arc::new(TestInterceptor {
+            intercepted: AtomicBool::new(false),
+        })),
+    );
+    let request = |uri: &str| {
+        Request::builder()
+            .uri(uri)
+            .header("origin", "https://console.example")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let console = app.clone().oneshot(request("/health")).await.unwrap();
+    assert_eq!(console.headers()["access-control-allow-origin"], "*");
+
+    // chatgpt.com sends no CORS headers; neither does the gateway for Codex.
+    let gateway = app
+        .oneshot(request("/backend-api/codex/models"))
+        .await
+        .unwrap();
+    assert_eq!(gateway.headers()["x-custom-intercepted"], "true");
+    assert!(
+        gateway
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none()
+    );
+    assert!(gateway.headers().get("vary").is_none());
+}

@@ -22,7 +22,7 @@ flowchart TD
     end
 
     subgraph Proxy["Rust 网关 (crates/proxy - 53141)"]
-        Detector["平台检测器 (OS Detector)<br/>解析 User-Agent / X-Cocodex-Platform"]
+        Detector["平台检测器 (OS Detector)<br/>解析 User-Agent"]
         Router["平台账号路由器 (Platform Router)"]
         Forwarder["Upstream Forwarder<br/>(对齐对应平台的真实 UA)"]
     end
@@ -104,9 +104,8 @@ flowchart TD
 
 - **平台检测模块** (`crates/proxy/src/interceptor/platform.rs` [新文件])：
   - 检测输入优先级：
-    1. 显式请求头：`X-Cocodex-Platform`（值：`windows`, `linux`, `darwin`）
-    2. 客户端 `User-Agent`：正则匹配 `windows` / `linux` / `darwin|macintosh|mac os`
-    3. 默认兜底：`linux`
+    1. 客户端 `User-Agent`（唯一依据，客户端不会发其他标明系统的头）
+    2. 识别不出拒绝；完全不带 User-Agent 的请求与设备无关，使用该账号任一平台的登录
 - **代理转发与 Token 替换** (`crates/proxy/src/interceptor/custom.rs` & `forwarder.rs`)：
   - 针对进入的 `/backend-api/*` 和 WebSocket `/backend-api/codex/responses` 请求：
     1. 通过 `detect_platform(&req)` 判定客户端来源平台；

@@ -15,7 +15,7 @@ use crate::AppState;
 use crate::billing::usage;
 use crate::db;
 use crate::db::accounts::{Account, UpsertInput, normalize_platform, normalize_status};
-use crate::upstream::client::{Credentials, DevicePoll};
+use crate::upstream::client::{CODEX_OAUTH_REDIRECT_URI, Credentials};
 use crate::upstream::sse;
 use crate::upstream::usage_summary;
 
@@ -24,8 +24,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/openai-accounts", get(list).post(upsert))
         .route("/api/openai-accounts/bulk-remove", post(bulk_remove))
         .route("/api/openai-accounts/bulk-disable", post(bulk_disable))
-        .route("/api/openai-accounts/device-auth/start", post(device_start))
-        .route("/api/openai-accounts/device-auth/poll", post(device_poll))
+        .route("/api/openai-accounts/oauth/start", post(oauth_start))
+        .route("/api/openai-accounts/oauth/exchange", post(oauth_exchange))
         .route("/api/openai-accounts/{email}", get(detail).delete(remove))
         .route("/api/openai-accounts/{email}/disable", post(disable))
         .route("/api/openai-accounts/{email}/activate", post(activate))
@@ -254,76 +254,95 @@ async fn upsert(Db(ready): Db, body: Body) -> Response {
     }
 }
 
-async fn device_start(Db(ready): Db, body: Body) -> Response {
+async fn oauth_start(Db(ready): Db, body: Body) -> Response {
     let platform = match parse_platform(&body) {
         Ok(platform) => platform,
         Err(response) => return response,
     };
-    match ready
+    let start = ready
         .accounts
         .client
-        .request_device_code(platform.unwrap_or("all"))
-        .await
-    {
-        Ok(code) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "deviceAuthId": code.device_auth_id,
-                "userCode": code.user_code,
-                "verificationUrl": code.verification_url,
-                "intervalSeconds": code.interval_seconds,
-                "expiresInSeconds": code.expires_in_seconds,
-                "platform": platform,
-                "expiresAt": db::iso(chrono::Utc::now() + chrono::Duration::seconds(code.expires_in_seconds as i64)),
-            })),
-        )
-            .into_response(),
-        Err(error) => failure(StatusCode::BAD_GATEWAY, "Failed to start OpenAI device authentication", error),
-    }
+        .oauth_authorize_url(platform.unwrap_or("all"));
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "authorizeUrl": start.authorize_url,
+            "codeVerifier": start.code_verifier,
+            "state": start.state,
+            "redirectUri": start.redirect_uri,
+            "platform": platform,
+        })),
+    )
+        .into_response()
 }
 
-async fn device_poll(Db(ready): Db, body: Body) -> Response {
-    let device_auth_id = body.str("deviceAuthId");
-    let user_code = body.str("userCode");
-    if device_auth_id.is_empty() || user_code.is_empty() {
-        return bad_request("deviceAuthId and userCode are required");
+async fn oauth_exchange(Db(ready): Db, body: Body) -> Response {
+    let code = extract_authorization_code(&body.str("code"));
+    let code_verifier = body.str("codeVerifier");
+    if code.is_empty() || code_verifier.is_empty() {
+        return bad_request("code and codeVerifier are required");
     }
     let platform = match parse_platform(&body) {
         Ok(platform) => platform,
         Err(response) => return response,
     };
+    let redirect_uri = Some(body.str("redirectUri"))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| CODEX_OAUTH_REDIRECT_URI.to_string());
     let result = ready
         .accounts
         .client
-        .poll_device(&device_auth_id, &user_code, platform.unwrap_or("all"))
+        .exchange_oauth_code(
+            &code,
+            &code_verifier,
+            &redirect_uri,
+            platform.unwrap_or("all"),
+        )
         .await;
-    let (email, account_id, id_token, access_token, refresh_token) = match result {
-        Ok(DevicePoll::Pending) => return Json(json!({ "status": "pending" })).into_response(),
-        Ok(DevicePoll::Complete {
-            email,
-            account_id,
-            id_token,
-            access_token,
-            refresh_token,
-        }) => (email, account_id, id_token, access_token, refresh_token),
+    let login = match result {
+        Ok(login) => login,
         Err(error) => {
             return failure(
                 StatusCode::BAD_GATEWAY,
-                "Failed to complete OpenAI device authentication",
+                "Failed to complete OpenAI OAuth login",
                 error,
             );
         }
     };
+    save_login(&ready, login, platform, "OAuth login").await
+}
+
+/// The console may paste either the raw `code` or the whole redirect URL the
+/// browser landed on; pull the `code` query parameter out of a URL.
+fn extract_authorization_code(input: &str) -> String {
+    let input = input.trim();
+    if let Ok(url) = url::Url::parse(input)
+        && let Some(code) = url
+            .query_pairs()
+            .find(|(key, _)| key == "code")
+            .map(|(_, value)| value.into_owned())
+    {
+        return code;
+    }
+    input.to_string()
+}
+
+async fn save_login(
+    ready: &crate::runtime::Ready,
+    login: crate::upstream::client::CompletedLogin,
+    platform: Option<&'static str>,
+    what: &str,
+) -> Response {
     let saved = db::accounts::upsert(
         &ready.db,
         UpsertInput {
-            email,
-            account_id,
+            email: login.email,
+            account_id: login.account_id,
             status: None,
             platform,
-            id_token,
-            access_token,
-            refresh_token,
+            id_token: login.id_token,
+            access_token: login.access_token,
+            refresh_token: login.refresh_token,
         },
     )
     .await;
@@ -338,7 +357,7 @@ async fn device_poll(Db(ready): Db, body: Body) -> Response {
         }
         Err(error) => failure(
             StatusCode::BAD_GATEWAY,
-            "Failed to complete OpenAI device authentication",
+            &format!("Failed to complete OpenAI {what}"),
             error,
         ),
     }
@@ -491,4 +510,23 @@ async fn test(
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_authorization_code;
+
+    #[test]
+    fn code_is_read_from_a_raw_value_or_the_pasted_redirect_url() {
+        assert_eq!(extract_authorization_code("  abc123  "), "abc123");
+        assert_eq!(
+            extract_authorization_code("http://localhost:1455/auth/callback?code=xyz789&state=s"),
+            "xyz789"
+        );
+        // A URL with no code falls back to the whole string.
+        assert_eq!(
+            extract_authorization_code("http://localhost:1455/auth/callback"),
+            "http://localhost:1455/auth/callback"
+        );
+    }
 }

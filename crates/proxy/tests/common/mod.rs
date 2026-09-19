@@ -87,8 +87,13 @@ pub fn config(settings: Settings, origin: &str) -> cocodex_proxy::config::ProxyC
 /// Pins the impersonated Codex version so tests never ask GitHub.
 pub fn pin_codex_version() {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    // SAFETY: set once, before any test reads the environment variable.
-    ONCE.call_once(|| unsafe { std::env::set_var("CODEX_CLIENT_VERSION", "0.154.0") });
+    // SAFETY: set once, before any test reads the environment variables.
+    // The pinned egress locale keeps tests off the geolocation network and
+    // makes the presented timezone deterministic.
+    ONCE.call_once(|| unsafe {
+        std::env::set_var("CODEX_CLIENT_VERSION", "0.154.0");
+        std::env::set_var("COCODEX_EGRESS_LOCALE", "America/New_York|-14400");
+    });
 }
 
 impl TestDb {
@@ -116,6 +121,27 @@ impl TestDb {
         .fetch_one(&self.pool)
         .await
         .unwrap()
+    }
+
+    /// Gives the logins of `account_id` an ID token naming their ChatGPT
+    /// user, as a real OpenAI login has.
+    pub async fn set_upstream_user_id(&self, account_id: &str, user_id: &str) {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let claims = serde_json::json!({
+            "https://api.openai.com/auth": { "chatgpt_user_id": user_id }
+        });
+        let id_token = format!(
+            "e30.{}.sig",
+            URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes())
+        );
+        sqlx::query("UPDATE openai_accounts SET id_token = $1 WHERE account_id = $2")
+            .bind(id_token)
+            .bind(account_id)
+            .execute(&self.pool)
+            .await
+            .unwrap();
     }
 
     pub async fn assign(&self, owner_user_id: &str, account_id: &str) {

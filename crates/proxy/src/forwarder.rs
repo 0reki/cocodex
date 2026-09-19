@@ -1,8 +1,11 @@
+use crate::client_identity;
 use crate::interceptor::{RequestAction, RequestContext, SharedInterceptor};
+use crate::upstream::cookies::CookieJars;
+use crate::upstream::identity;
 use crate::websocket::handle_ws_upgrade;
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::http::header::{AUTHORIZATION, HOST, HeaderName, HeaderValue, USER_AGENT};
+use axum::http::header::{AUTHORIZATION, COOKIE, HOST, HeaderName, HeaderValue, USER_AGENT};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
@@ -20,12 +23,21 @@ pub struct BackendForwarder {
     client: Client,
     upstream_origin: String,
     interceptor: SharedInterceptor,
+    cookies: Arc<CookieJars>,
 }
 
 impl BackendForwarder {
-    pub fn new(upstream_origin: String, interceptor: SharedInterceptor) -> Self {
-        // reqwest client without request timeout so long-lived responses flow uninterrupted
+    pub fn new(
+        upstream_origin: String,
+        interceptor: SharedInterceptor,
+        cookies: Arc<CookieJars>,
+    ) -> Self {
+        // No request timeout so long-lived responses flow uninterrupted, and
+        // no automatic `accept-encoding`: Codex sends none, so upstream
+        // answers uncompressed and the body is relayed as is.
         let client = Client::builder()
+            .no_gzip()
+            .no_zstd()
             .build()
             .expect("Failed to build reqwest client");
 
@@ -33,6 +45,7 @@ impl BackendForwarder {
             client,
             upstream_origin,
             interceptor,
+            cookies,
         }
     }
 
@@ -96,6 +109,7 @@ impl BackendForwarder {
                 ctx,
                 self.upstream_origin.clone(),
                 Arc::clone(&self.interceptor),
+                Arc::clone(&self.cookies),
             )
             .await;
         }
@@ -114,23 +128,25 @@ impl BackendForwarder {
     ) -> Result<reqwest::Response, reqwest::Error> {
         let mut forward_headers = copy_upstream_request_headers(headers);
         apply_upstream_identity_headers(&mut forward_headers, ctx);
+        apply_upstream_cookies(&mut forward_headers, ctx, &self.cookies, url);
         if let Some(host) = url.host_str()
             && let Ok(hv) = HeaderValue::from_str(host)
         {
             forward_headers.insert(HOST, hv);
         }
-        self.client
+        let response = self
+            .client
             .request(method.clone(), url.clone())
             .headers(forward_headers)
             .body(body.clone())
             .send()
-            .await
+            .await?;
+        store_upstream_cookies(ctx, &self.cookies, url, response.headers());
+        Ok(response)
     }
 
     async fn forward_http(&self, mut ctx: RequestContext, req: Request<Body>) -> Response {
-        let query = req
-            .uri()
-            .query()
+        let query = upstream_query(&ctx, req.uri().query())
             .map(|q| format!("?{q}"))
             .unwrap_or_default();
         let upstream_url_str = format!("{}{}{query}", self.upstream_origin, ctx.target_path);
@@ -161,6 +177,10 @@ impl BackendForwarder {
                 );
             }
         };
+        // The body carries the same installation id and turn metadata as the
+        // headers (and analytics the client's version and machine), so
+        // rewrite both to the upstream login's identity.
+        let body = client_identity::rewrite_request_body(&ctx, &parts.headers, body);
 
         debug!(
             request_id = %ctx.request_id,
@@ -228,20 +248,43 @@ impl BackendForwarder {
         });
         let finish_guard_chunk = Arc::clone(&finish_guard);
 
+        // Upstream reports its login's identity back (e.g. `/wham/usage`,
+        // Responses `safety_identifier`); the client sees its own instead.
+        // A compressed body is relayed as is: Codex never asks for one.
+        let compressed = upstream_resp
+            .headers()
+            .get(http::header::CONTENT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| !v.trim().eq_ignore_ascii_case("identity"));
+        let swap = Arc::new(std::sync::Mutex::new(if compressed {
+            client_identity::IdentitySwap::default()
+        } else {
+            client_identity::IdentitySwap::new(&ctx.identity_swap)
+        }));
+        let swap_chunk = Arc::clone(&swap);
+
         let completion_ctx = ctx.clone();
         let end_marker = futures_util::stream::once(async move {
             if let Ok(mut obs) = completion_ctx.observation.lock() {
                 obs.upstream_complete = true;
             }
-            None
+            let rest = swap
+                .lock()
+                .map(|mut swap| swap.finish())
+                .unwrap_or_default();
+            (!rest.is_empty()).then(|| Ok(bytes::Bytes::from(rest)))
         })
         .filter_map(|item: Option<Result<bytes::Bytes, std::io::Error>>| async move { item });
         let byte_stream = upstream_resp.bytes_stream().map(move |item| {
             let _keep_guard = &finish_guard_chunk;
             match item {
                 Ok(bytes) => {
+                    // Metering reads what upstream actually sent.
                     interceptor_chunk.on_response_chunk(&ctx_chunk, &bytes);
-                    Ok(bytes)
+                    Ok(match swap_chunk.lock() {
+                        Ok(mut swap) if !swap.is_empty() => bytes::Bytes::from(swap.push(&bytes)),
+                        _ => bytes,
+                    })
                 }
                 Err(e) => {
                     warn!("Stream read error from upstream: {e}");
@@ -297,107 +340,131 @@ impl Drop for StreamFinishGuard {
     }
 }
 
-pub(crate) const DEFAULT_CODEX_ORIGINATOR: &str = "codex_cli_rs";
+/// `x-oai-attestation` as Codex sends it when the host app's attestation
+/// times out (`codex-rs/app-server/src/attestation.rs`: version 1, status 1).
+const ATTESTATION_TIMED_OUT: &str = r#"{"v":1,"s":1}"#;
 
-/// Stable install id for one upstream account on one OS.
-/// Same account+platform always yields the same UUID; a different account or
-/// OS yields a different one.
-pub fn gateway_installation_id(account_id: &str, platform: &str) -> String {
-    use sha2::{Digest, Sha256};
-
-    let digest = Sha256::digest(format!("cocodex-install:{platform}:{account_id}").as_bytes());
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        digest[0],
-        digest[1],
-        digest[2],
-        digest[3],
-        digest[4],
-        digest[5],
-        (digest[6] & 0x0f) | 0x50,
-        digest[7],
-        (digest[8] & 0x3f) | 0x80,
-        digest[9],
-        digest[10],
-        digest[11],
-        digest[12],
-        digest[13],
-        digest[14],
-        digest[15],
-    )
-}
-
-/// Codex UA is `{originator}/{version} ({os} {ver}; {arch}) {terminal}`.
-pub(crate) fn client_version_from_user_agent(user_agent: &str) -> Option<String> {
-    let after_slash = user_agent.split_once('/')?.1;
-    let version = after_slash.split([' ', '(']).next()?.trim();
-    if version.is_empty() {
-        None
-    } else {
-        Some(version.to_string())
-    }
-}
-
+/// Replaces the client's identity in its headers with the upstream login's;
+/// only the client's type (originator) is kept. Only headers the
+/// client sent are rewritten: a genuine client of that login sends exactly
+/// the same set (Codex omits `originator` and `version` on several
+/// endpoints, and the User-Agent on some), so nothing is added and nothing
+/// is dropped.
 pub(crate) fn apply_upstream_identity_headers(headers: &mut HeaderMap, ctx: &RequestContext) {
-    if let Some(token) = &ctx.upstream_token
-        && let Ok(hv) = HeaderValue::from_str(&format!("Bearer {token}"))
+    // The client's own credentials are the gateway's and never go upstream.
+    match ctx
+        .upstream_token
+        .as_ref()
+        .and_then(|token| HeaderValue::from_str(&format!("Bearer {token}")).ok())
     {
-        headers.insert(AUTHORIZATION, hv);
+        Some(hv) => {
+            headers.insert(AUTHORIZATION, hv);
+        }
+        None => {
+            headers.remove(AUTHORIZATION);
+        }
     }
-    if let Some(account_id) = &ctx.upstream_account_id
-        && let Ok(hv) = HeaderValue::from_str(account_id)
-    {
-        headers.insert(HeaderName::from_static("chatgpt-account-id"), hv);
+    let account_header = HeaderName::from_static("chatgpt-account-id");
+    if headers.contains_key(&account_header) {
+        match ctx
+            .upstream_account_id
+            .as_deref()
+            .and_then(|id| HeaderValue::from_str(id).ok())
+        {
+            Some(hv) => {
+                headers.insert(account_header, hv);
+            }
+            None => {
+                headers.remove(account_header);
+            }
+        }
     }
-    if let Some(user_agent) = &ctx.upstream_user_agent
-        && let Ok(hv) = HeaderValue::from_str(user_agent)
+    // Only the client's type (originator, app-server client name) is its
+    // own; the version and the machine are the upstream login's.
+    let version = ctx.upstream_client_version.as_deref();
+    if let Some(version) = version
+        && let Some(client) = headers.get(USER_AGENT).and_then(|v| v.to_str().ok())
+        && let Some(presented) = match ctx.upstream_platform.as_deref() {
+            Some(platform) => Some(identity::rewrite_user_agent(client, platform, version)),
+            // Unauthenticated MCP traffic has no login; its agent names no
+            // machine anyway.
+            None => (!client.contains(' '))
+                .then(|| identity::rewrite_user_agent(client, "linux", version)),
+        }
+        && let Ok(hv) = HeaderValue::from_str(&presented)
     {
         headers.insert(USER_AGENT, hv);
     }
-    headers.insert(
-        HeaderName::from_static("originator"),
-        HeaderValue::from_static(DEFAULT_CODEX_ORIGINATOR),
-    );
-    if let Some(version) = &ctx.upstream_client_version
+    // A host app's attestation proves its own device and session, which the
+    // gateway can neither forward nor forge. Codex sends this envelope when
+    // the host misses its 100 ms budget, so the header stays as a genuine
+    // client of the login could send it.
+    let attestation = HeaderName::from_static("x-oai-attestation");
+    if headers.contains_key(&attestation) {
+        headers.insert(attestation, HeaderValue::from_static(ATTESTATION_TIMED_OUT));
+    }
+    let version_header = HeaderName::from_static("version");
+    if headers.contains_key(&version_header)
+        && let Some(version) = version
         && let Ok(hv) = HeaderValue::from_str(version)
     {
-        headers.insert(HeaderName::from_static("version"), hv);
+        headers.insert(version_header, hv);
     }
 
-    let installation_id = ctx.upstream_installation_id.as_deref();
-    if headers.contains_key("x-codex-installation-id")
-        && let Some(installation_id) = installation_id
-        && let Ok(hv) = HeaderValue::from_str(installation_id)
+    let Some(identity) = client_identity::PresentedIdentity::from_ctx(ctx) else {
+        return;
+    };
+    let installation_header = HeaderName::from_static("x-codex-installation-id");
+    if headers.contains_key(&installation_header)
+        && let Ok(hv) = HeaderValue::from_str(identity.installation_id)
     {
-        headers.insert(HeaderName::from_static("x-codex-installation-id"), hv);
+        headers.insert(installation_header, hv);
     }
     if let Some(raw) = headers
         .get("x-codex-turn-metadata")
         .and_then(|value| value.to_str().ok())
-        && let Some(installation_id) = installation_id
-        && let Some(rewritten) = rewrite_turn_metadata(raw, installation_id)
+        && let Some(rewritten) = client_identity::rewrite_turn_metadata(raw, &identity)
         && let Ok(hv) = HeaderValue::from_str(&rewritten)
     {
         headers.insert(HeaderName::from_static("x-codex-turn-metadata"), hv);
     }
 }
 
-fn rewrite_turn_metadata(raw: &str, installation_id: &str) -> Option<String> {
-    let mut value: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let object = value.as_object_mut()?;
-    if object.contains_key("installation_id") {
-        object.insert(
-            "installation_id".to_string(),
-            serde_json::Value::String(installation_id.to_string()),
-        );
+/// The upstream query string: identical to the client's except that the
+/// `client_version` Codex sends to `/models` becomes the presented version.
+pub(crate) fn upstream_query(ctx: &RequestContext, query: Option<&str>) -> Option<String> {
+    let query = query?;
+    Some(match ctx.upstream_client_version.as_deref() {
+        Some(version) => client_identity::rewrite_client_version_query(query, version),
+        None => query.to_string(),
+    })
+}
+
+/// Sends the upstream login's infrastructure cookies, as Codex does on every
+/// request and WebSocket handshake to ChatGPT.
+pub(crate) fn apply_upstream_cookies(
+    headers: &mut HeaderMap,
+    ctx: &RequestContext,
+    cookies: &CookieJars,
+    url: &Url,
+) {
+    if let (Some(account_id), Some(platform)) = (&ctx.upstream_account_id, &ctx.upstream_platform)
+        && let Some(cookie) = cookies.cookie_header(account_id, platform, url)
+    {
+        headers.insert(COOKIE, cookie);
     }
-    if object.contains_key("workspaces") {
-        object.insert(
-            "workspaces".to_string(),
-            serde_json::Value::Object(serde_json::Map::new()),
-        );
+}
+
+/// Keeps the allowlisted cookies from an upstream response in the login's jar.
+pub(crate) fn store_upstream_cookies(
+    ctx: &RequestContext,
+    cookies: &CookieJars,
+    url: &Url,
+    headers: &HeaderMap,
+) {
+    if let (Some(account_id), Some(platform)) = (&ctx.upstream_account_id, &ctx.upstream_platform) {
+        cookies.store(account_id, platform, url, headers);
     }
-    Some(value.to_string())
 }
 
 pub(crate) fn copy_upstream_request_headers(headers: &HeaderMap) -> HeaderMap {
@@ -406,7 +473,7 @@ pub(crate) fn copy_upstream_request_headers(headers: &HeaderMap) -> HeaderMap {
         if should_drop_request_header(name.as_str()) {
             continue;
         }
-        forwarded.insert(name.clone(), val.clone());
+        forwarded.append(name.clone(), val.clone());
     }
     forwarded
 }
@@ -426,16 +493,22 @@ fn should_drop_request_header(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     is_hop_by_hop_header(&name)
         || is_proxy_context_header(&name)
-        || is_client_account_header(&name)
-        || is_replaced_identity_header(&name)
+        // Kept so its presence is mirrored; the value is always replaced.
+        || (is_client_account_header(&name) && name != "chatgpt-account-id")
+        // Codex never sends it; reqwest must not negotiate compression the
+        // client did not ask for either (see `BackendForwarder::new`).
+        || name == "accept-encoding"
 }
 
 fn should_drop_response_header(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     is_hop_by_hop_header(&name)
         || is_client_account_header(&name)
+        // Upstream cookies belong to the gateway's per-login jar, not the client.
         || name == "set-cookie"
-        || name == "content-encoding"
+        // A relayed WebSocket handshake negotiates its own key and extensions;
+        // the client side is handled by the gateway's own upgrade response.
+        || name.starts_with("sec-websocket-")
 }
 
 fn is_hop_by_hop_header(name: &str) -> bool {
@@ -458,7 +531,7 @@ fn is_hop_by_hop_header(name: &str) -> bool {
 fn is_proxy_context_header(name: &str) -> bool {
     matches!(
         name,
-        "cookie" | "forwarded" | "origin" | "via" | "x-real-ip" | "x-cocodex-platform"
+        "cookie" | "forwarded" | "origin" | "via" | "x-real-ip"
     ) || name.starts_with("cf-")
         || name.starts_with("x-forwarded-")
 }
@@ -469,18 +542,8 @@ fn is_client_account_header(name: &str) -> bool {
         "chatgpt-account-id"
             | "openai-organization"
             | "openai-project"
-            | "x-oai-attestation"
             | "x-openai-fedramp"
             | "x-openai-actor-authorization"
-    )
-}
-
-/// Values we always replace with gateway identity. The headers themselves
-/// are still sent — copy drops the client value, then overlay writes ours.
-fn is_replaced_identity_header(name: &str) -> bool {
-    matches!(
-        name,
-        "authorization" | "user-agent" | "originator" | "version"
     )
 }
 
@@ -490,55 +553,52 @@ mod tests {
     use crate::interceptor::RequestContext;
     use axum::http::Request;
 
-    fn ctx_with_identity() -> RequestContext {
-        let req = Request::builder()
+    const CLIENT_UA: &str =
+        "codex-tui/0.155.1 (Debian 13.0.0; x86_64) xterm-256color (codex-tui; 0.155.1)";
+
+    fn ctx_with_identity(request: http::request::Builder) -> RequestContext {
+        let req = request
             .uri("/backend-api/codex/responses")
-            .header("authorization", "Bearer client-jwt")
-            .header("user-agent", "codex_vscode/0.1.0 (Mac OS 15.1.0; arm64) unknown")
-            .header("originator", "codex_vscode")
-            .header("version", "0.1.0")
-            .header("session-id", "sess-keep")
-            .header("thread-id", "thread-keep")
-            .header("x-codex-installation-id", "install-leak")
-            .header(
-                "x-codex-turn-metadata",
-                r#"{"installation_id":"install-leak","session_id":"sess-keep","workspaces":{"repo":{"associated_remote_urls":{"origin":"https://github.com/user/secret.git"}}}}"#,
-            )
-            .header("openai-beta", "responses_websockets=2026-02-06")
-            .header("content-type", "application/json")
             .body(Body::empty())
             .unwrap();
         let mut ctx = RequestContext::new(&req);
         ctx.upstream_token = Some("upstream-token".into());
         ctx.upstream_account_id = Some("upstream-account".into());
-        ctx.upstream_user_agent =
-            Some("codex_cli_rs/0.154.0 (Windows 10.0.22631; x86_64) WindowsTerminal".into());
-        ctx.upstream_client_version = Some("0.154.0".into());
-        ctx.upstream_installation_id = Some(gateway_installation_id("upstream-account", "windows"));
+        ctx.upstream_client_version = Some("0.156.0".into());
+        ctx.upstream_installation_id = Some(client_identity::gateway_installation_id(
+            "upstream-account",
+            "windows",
+        ));
+        ctx.upstream_platform = Some("windows".into());
         ctx
     }
 
-    #[test]
-    fn parses_version_from_codex_user_agent() {
-        assert_eq!(
-            client_version_from_user_agent(
-                "codex_cli_rs/0.154.0 (Windows 10.0.22631; x86_64) WindowsTerminal"
-            )
-            .as_deref(),
-            Some("0.154.0")
-        );
-        assert_eq!(
-            client_version_from_user_agent("codex_vscode/0.4.0 (Mac OS 15.1.0; arm64) unknown")
-                .as_deref(),
-            Some("0.4.0")
-        );
+    fn upstream_headers(ctx: &RequestContext) -> HeaderMap {
+        let mut forwarded = copy_upstream_request_headers(&ctx.client_headers);
+        apply_upstream_identity_headers(&mut forwarded, ctx);
+        forwarded
     }
 
     #[test]
     fn rewrites_client_identity_and_keeps_session_fields() {
-        let ctx = ctx_with_identity();
-        let mut forwarded = copy_upstream_request_headers(&ctx.client_headers);
-        apply_upstream_identity_headers(&mut forwarded, &ctx);
+        let ctx = ctx_with_identity(
+            Request::builder()
+                .header("authorization", "Bearer client-jwt")
+                .header("chatgpt-account-id", "gateway-account")
+                .header("user-agent", CLIENT_UA)
+                .header("originator", "codex-tui")
+                .header("version", "0.155.1")
+                .header("session-id", "sess-keep")
+                .header("thread-id", "thread-keep")
+                .header("x-codex-installation-id", "install-leak")
+                .header(
+                    "x-codex-turn-metadata",
+                    r#"{"installation_id":"install-leak","session_id":"sess-keep","sandbox":"seccomp","workspaces":{"repo":{"associated_remote_urls":{"origin":"https://github.com/user/secret.git"}}}}"#,
+                )
+                .header("openai-beta", "responses_websockets=2026-02-06")
+                .header("content-type", "application/json"),
+        );
+        let forwarded = upstream_headers(&ctx);
 
         assert_eq!(
             forwarded.get("authorization").unwrap(),
@@ -546,10 +606,10 @@ mod tests {
         );
         assert_eq!(
             forwarded.get("user-agent").unwrap(),
-            "codex_cli_rs/0.154.0 (Windows 10.0.22631; x86_64) WindowsTerminal"
+            "codex-tui/0.156.0 (Windows 10.0.22631; x86_64) xterm-256color (codex-tui; 0.156.0)"
         );
-        assert_eq!(forwarded.get("originator").unwrap(), "codex_cli_rs");
-        assert_eq!(forwarded.get("version").unwrap(), "0.154.0");
+        assert_eq!(forwarded.get("originator").unwrap(), "codex-tui");
+        assert_eq!(forwarded.get("version").unwrap(), "0.156.0");
         assert_eq!(
             forwarded.get("chatgpt-account-id").unwrap(),
             "upstream-account"
@@ -561,9 +621,10 @@ mod tests {
             "responses_websockets=2026-02-06"
         );
         assert_eq!(forwarded.get("content-type").unwrap(), "application/json");
+        let install = client_identity::gateway_installation_id("upstream-account", "windows");
         assert_eq!(
             forwarded.get("x-codex-installation-id").unwrap(),
-            gateway_installation_id("upstream-account", "windows").as_str()
+            install.as_str()
         );
         let metadata: serde_json::Value = serde_json::from_str(
             forwarded
@@ -573,21 +634,106 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            metadata["installation_id"].as_str(),
-            Some(gateway_installation_id("upstream-account", "windows").as_str())
-        );
+        assert_eq!(metadata["installation_id"].as_str(), Some(install.as_str()));
         assert_eq!(metadata["session_id"].as_str(), Some("sess-keep"));
-        assert_eq!(metadata["workspaces"], serde_json::json!({}));
+        // The user's own sandbox setting; logins are per OS, so it always
+        // belongs to the presented platform.
+        assert_eq!(metadata["sandbox"].as_str(), Some("seccomp"));
+        // The client's workspaces are its own and pass through unchanged.
+        assert_eq!(
+            metadata["workspaces"]["repo"]["associated_remote_urls"]["origin"].as_str(),
+            Some("https://github.com/user/secret.git")
+        );
     }
 
     #[test]
-    fn installation_id_differs_by_account_and_platform() {
-        let windows_a = gateway_installation_id("acct-a", "windows");
-        let windows_b = gateway_installation_id("acct-b", "windows");
-        let linux_a = gateway_installation_id("acct-a", "linux");
-        assert_eq!(windows_a, gateway_installation_id("acct-a", "windows"));
-        assert_ne!(windows_a, windows_b);
-        assert_ne!(windows_a, linux_a);
+    fn identity_headers_the_client_omits_stay_omitted() {
+        // Codex 0.155.1 sends `/wham/*` without `originator` or `version`,
+        // and `/accounts/verified_access` without a User-Agent.
+        let ctx = ctx_with_identity(
+            Request::builder()
+                .header("authorization", "Bearer client-jwt")
+                .header("accept", "*/*"),
+        );
+        let forwarded = upstream_headers(&ctx);
+        assert_eq!(
+            forwarded.get("authorization").unwrap(),
+            "Bearer upstream-token"
+        );
+        for name in [
+            "user-agent",
+            "originator",
+            "version",
+            "chatgpt-account-id",
+            "accept-encoding",
+        ] {
+            assert!(forwarded.get(name).is_none(), "{name} was added");
+        }
+    }
+
+    #[test]
+    fn client_type_is_kept_and_the_rest_presented() {
+        let ctx = ctx_with_identity(
+            Request::builder()
+                .header(
+                    "user-agent",
+                    "codex_exec/0.155.1 (Debian 13.0.0; x86_64) xterm-256color (codex_exec; 0.155.1)",
+                )
+                .header("originator", "codex_exec"),
+        );
+        let forwarded = upstream_headers(&ctx);
+        assert_eq!(
+            forwarded.get("user-agent").unwrap(),
+            "codex_exec/0.156.0 (Windows 10.0.22631; x86_64) xterm-256color (codex_exec; 0.156.0)"
+        );
+        assert_eq!(forwarded.get("originator").unwrap(), "codex_exec");
+
+        let ctx = ctx_with_identity(
+            Request::builder()
+                .header("user-agent", "codex-mcp-client/0.155.1")
+                .header("originator", "codex_vscode")
+                .header(
+                    "x-oai-attestation",
+                    r#"{"v":1,"s":0,"t":"v1.device-bound"}"#,
+                )
+                .header("accept-encoding", "gzip"),
+        );
+        let forwarded = upstream_headers(&ctx);
+        assert_eq!(
+            forwarded.get("user-agent").unwrap(),
+            "codex-mcp-client/0.156.0"
+        );
+        // The client's type is its own, whatever host it is.
+        assert_eq!(forwarded.get("originator").unwrap(), "codex_vscode");
+        // The host's own attestation never goes upstream; the header does.
+        assert_eq!(
+            forwarded.get("x-oai-attestation").unwrap(),
+            r#"{"v":1,"s":1}"#
+        );
+        assert!(forwarded.get("accept-encoding").is_none());
+    }
+
+    #[test]
+    fn client_credentials_never_leak_without_an_upstream_login() {
+        let req = Request::builder()
+            .uri("/backend-api/wham/usage")
+            .header("authorization", "Bearer client-jwt")
+            .header("chatgpt-account-id", "gateway-account")
+            .body(Body::empty())
+            .unwrap();
+        let ctx = RequestContext::new(&req);
+        let forwarded = upstream_headers(&ctx);
+        assert!(forwarded.get("authorization").is_none());
+        assert!(forwarded.get("chatgpt-account-id").is_none());
+    }
+
+    #[test]
+    fn client_version_query_uses_presented_version() {
+        let ctx = ctx_with_identity(Request::builder());
+        assert_eq!(
+            upstream_query(&ctx, Some("client_version=0.1.0")).as_deref(),
+            Some("client_version=0.156.0")
+        );
+        assert_eq!(upstream_query(&ctx, None), None);
     }
 }

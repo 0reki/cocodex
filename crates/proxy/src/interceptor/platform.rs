@@ -7,17 +7,14 @@
 //! Version/arch/terminal are per-machine and cannot be reproduced here; matching the
 //! type display as a prefix is enough to classify the client.
 //!
-//! Detection priority:
-//! 1. Explicit `X-Cocodex-Platform` request header (`windows` | `linux` | `darwin`).
-//! 2. Parse the first `(os; arch)` group from the Codex User-Agent.
+//! The User-Agent is the only signal: no Codex client sends anything else
+//! that names its OS. The first `(os; arch)` group is parsed.
 //!
 //! Unknown clients are rejected by the interceptor (401), not defaulted.
 
 use std::sync::OnceLock;
 
 use http::HeaderMap;
-
-pub const PLATFORM_HEADER: &str = "x-cocodex-platform";
 
 /// Known client platforms supported by the upstream account isolation scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,24 +45,13 @@ pub fn normalize_platform(raw: &str) -> Option<Platform> {
     }
 }
 
-/// Detects the client platform from request headers.
-/// Returns `None` when neither the explicit header nor User-Agent identifies a platform.
+/// Detects the client platform from its User-Agent; `None` when there is
+/// none or it names no known OS.
 pub fn detect_platform(headers: &HeaderMap) -> Option<Platform> {
-    if let Some(value) = headers.get(PLATFORM_HEADER).and_then(|v| v.to_str().ok())
-        && let Some(platform) = normalize_platform(value)
-    {
-        return Some(platform);
-    }
-
-    if let Some(user_agent) = headers
+    headers
         .get(http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
-        && let Some(platform) = detect_platform_from_user_agent(user_agent)
-    {
-        return Some(platform);
-    }
-
-    None
+        .and_then(detect_platform_from_user_agent)
 }
 
 /// Matches a Codex CLI / IDE User-Agent string to its originating OS.
@@ -279,19 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_header_overrides_user_agent() {
-        let map = headers(&[
-            (
-                "user-agent",
-                "codex_cli_rs/0.154.0 (Windows_NT 10.0.22631; x86_64) WindowsTerminal",
-            ),
-            ("x-cocodex-platform", "darwin"),
-        ]);
-        assert_eq!(detect_platform(&map), Some(Platform::Darwin));
-    }
-
-    #[test]
-    fn user_agent_used_when_header_missing() {
+    fn platform_comes_from_the_user_agent() {
         let map = headers(&[(
             "user-agent",
             "codex_cli_rs/0.154.0 (Windows_NT 10.0.22631; x86_64) WindowsTerminal",

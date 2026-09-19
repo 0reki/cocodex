@@ -25,9 +25,17 @@ pub struct RequestContext {
     pub client_token: Option<String>,
     pub upstream_token: Option<String>,
     pub upstream_account_id: Option<String>,
-    pub upstream_user_agent: Option<String>,
     pub upstream_client_version: Option<String>,
     pub upstream_installation_id: Option<String>,
+    /// OS the upstream login presents (`windows`, `macos` or `linux`).
+    pub upstream_platform: Option<String>,
+    /// (upstream value, client value) for the identity upstream reports
+    /// back: user id, account id and email.
+    pub identity_swap: Vec<(String, String)>,
+    /// The timezone and date (`%Y-%m-%d`) the gateway presents in the
+    /// conversation's `<environment_context>`, from its egress IP.
+    pub presented_timezone: Option<String>,
+    pub presented_current_date: Option<String>,
     pub metadata: HashMap<String, String>,
     pub started_at: Instant,
     pub observation: Arc<Mutex<RequestObservation>>,
@@ -62,9 +70,12 @@ impl RequestContext {
             client_token,
             upstream_token: None,
             upstream_account_id: None,
-            upstream_user_agent: None,
             upstream_client_version: None,
             upstream_installation_id: None,
+            upstream_platform: None,
+            identity_swap: Vec::new(),
+            presented_timezone: None,
+            presented_current_date: None,
             metadata: HashMap::new(),
             started_at: Instant::now(),
             observation: Arc::new(Mutex::new(RequestObservation::default())),

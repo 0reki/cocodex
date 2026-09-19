@@ -272,6 +272,15 @@ CREATE TABLE IF NOT EXISTS model_response_logs (
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
 );
 
+-- The model the client asked for, the model that served the request, and the
+-- length of the upstream turn state. `model_id` keeps the billed model.
+ALTER TABLE model_response_logs
+  ADD COLUMN IF NOT EXISTS requested_model TEXT;
+ALTER TABLE model_response_logs
+  ADD COLUMN IF NOT EXISTS used_model TEXT;
+ALTER TABLE model_response_logs
+  ADD COLUMN IF NOT EXISTS turn_state_len INTEGER;
+
 CREATE INDEX IF NOT EXISTS idx_model_response_logs_request_time
   ON model_response_logs (request_time DESC, id DESC);
 DROP INDEX IF EXISTS idx_model_response_logs_key_request_time;
