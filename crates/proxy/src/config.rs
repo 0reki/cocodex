@@ -40,13 +40,27 @@ pub struct ProxyArgs {
     pub public_app_url: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProxyConfig {
     pub bind_addr: SocketAddr,
     pub node_backend_url: String,
     pub upstream_chatgpt_origin: String,
     pub ipc_socket_path: String,
     pub public_app_url: String,
+    /// HS256 secret for gateway-issued client JWTs.
+    pub client_jwt_secret: String,
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("bind_addr", &self.bind_addr)
+            .field("node_backend_url", &self.node_backend_url)
+            .field("upstream_chatgpt_origin", &self.upstream_chatgpt_origin)
+            .field("ipc_socket_path", &self.ipc_socket_path)
+            .field("public_app_url", &self.public_app_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ProxyConfig {
@@ -63,6 +77,7 @@ impl ProxyConfig {
             .to_string();
         let ipc_socket_path = args.ipc_socket_path;
         let public_app_url = args.public_app_url.trim_end_matches('/').to_string();
+        let client_jwt_secret = crate::auth::jwt::client_jwt_secret_from_env()?;
 
         Ok(Self {
             bind_addr,
@@ -70,6 +85,7 @@ impl ProxyConfig {
             upstream_chatgpt_origin,
             ipc_socket_path,
             public_app_url,
+            client_jwt_secret,
         })
     }
 }

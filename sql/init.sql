@@ -291,6 +291,13 @@ CREATE TABLE IF NOT EXISTS codex_client_refresh_tokens (
 ALTER TABLE codex_client_refresh_tokens
   ALTER COLUMN api_key_id DROP NOT NULL;
 
+-- Access tokens are bound to a session and only honoured while the session
+-- still holds an unexpired refresh token.
+ALTER TABLE codex_client_refresh_tokens
+  ADD COLUMN IF NOT EXISTS session_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_codex_client_refresh_tokens_session
+  ON codex_client_refresh_tokens (session_id);
+
 CREATE INDEX IF NOT EXISTS idx_codex_client_refresh_tokens_owner
   ON codex_client_refresh_tokens (owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_codex_client_refresh_tokens_api_key

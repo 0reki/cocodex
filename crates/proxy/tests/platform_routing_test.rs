@@ -76,6 +76,8 @@ async fn test_platform_account_routing_end_to_end() {
                             "platform": platform,
                             "user_agent": user_agent,
                         })
+                    } else if method == "auth.verify_session" {
+                        serde_json::json!({ "valid": true, "expires_at_secs": u64::MAX / 2 })
                     } else if method == "auth.verify_api_key" {
                         serde_json::json!({
                             "valid": true,
@@ -115,10 +117,11 @@ async fn test_platform_account_routing_end_to_end() {
         upstream_chatgpt_origin: format!("http://127.0.0.1:{upstream_port}"),
         ipc_socket_path: socket_path.to_string_lossy().to_string(),
         public_app_url: "http://localhost:53332".to_string(),
+        client_jwt_secret: "test-client-jwt-secret".to_string(),
     };
     let app = create_router(config, None);
 
-    let jwt = ClientJwt::from_env();
+    let jwt = ClientJwt::from_secret("test-client-jwt-secret");
     let client_tokens = jwt.sign_session_tokens("user-1", "user-1@openai.com");
     let bearer = format!("Bearer {}", client_tokens.access_token);
 

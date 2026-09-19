@@ -3,7 +3,7 @@ use super::platform::{PLATFORM_HEADER, detect_platform};
 use super::{Interceptor, RequestAction, RequestContext, WsAction};
 use crate::auth::jwt::{ClientJwt, JwtError};
 use crate::ipc::protocol::{ReportUsageParams, ResolveUpstreamAccountResult, VerifyOwnerResult};
-use crate::ipc::{IpcClient, OwnerAuthCache, UpstreamAccountCache};
+use crate::ipc::{IpcClient, OwnerAuthCache, SessionCache, UpstreamAccountCache};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::header::{CONTENT_TYPE, HeaderValue};
@@ -19,17 +19,40 @@ pub struct CustomInterceptor {
     jwt: ClientJwt,
     auth_cache: OwnerAuthCache,
     account_cache: UpstreamAccountCache,
+    session_cache: SessionCache,
 }
 
 impl CustomInterceptor {
     pub fn new(ipc: IpcClient, jwt: ClientJwt) -> Self {
         let auth_cache = ipc.owner_auth_cache();
         let account_cache = ipc.upstream_account_cache();
+        let session_cache = ipc.session_cache();
         Self {
             ipc,
             jwt,
             auth_cache,
             account_cache,
+            session_cache,
+        }
+    }
+
+    /// An access token is only honoured while its session still holds an
+    /// unexpired refresh token. Live sessions are cached until Node
+    /// broadcasts a revocation, so this hits the database once per session.
+    async fn is_session_live(&self, session_id: &str) -> Result<bool, crate::ipc::IpcClientError> {
+        if self.session_cache.is_live(session_id).await {
+            return Ok(true);
+        }
+
+        let result = self.ipc.verify_session(session_id).await?;
+        match (result.valid, result.expires_at_secs) {
+            (true, Some(expires_at_secs)) => {
+                self.session_cache
+                    .remember(session_id.to_string(), expires_at_secs)
+                    .await;
+                Ok(true)
+            }
+            _ => Ok(false),
         }
     }
 
@@ -114,6 +137,29 @@ impl Interceptor for CustomInterceptor {
                 )));
             }
         };
+
+        match self.is_session_live(&claims.session_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(RequestAction::ShortCircuit(auth_error(
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    "Access token has been revoked",
+                )));
+            }
+            Err(error) => {
+                warn!(
+                    request_id = %ctx.request_id,
+                    error = %error,
+                    "Session verification IPC failed"
+                );
+                return Ok(RequestAction::ShortCircuit(auth_error(
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "upstream_error",
+                    "Failed to verify access token",
+                )));
+            }
+        }
 
         let owner_user_id = claims.openai_auth.chatgpt_account_id.clone();
         if let Ok(mut obs) = ctx.observation.lock() {
@@ -230,10 +276,9 @@ impl Interceptor for CustomInterceptor {
                 .headers()
                 .get("openai-model")
                 .and_then(|v| v.to_str().ok())
+                && !model.is_empty()
             {
-                if !model.is_empty() {
-                    obs.model.get_or_insert_with(|| model.to_string());
-                }
+                obs.model.get_or_insert_with(|| model.to_string());
             }
         }
         Ok(resp)
@@ -250,16 +295,13 @@ impl Interceptor for CustomInterceptor {
         ctx: &RequestContext,
         msg: WsMessage,
     ) -> Result<WsAction, Box<dyn std::error::Error + Send + Sync>> {
-        if let WsMessage::Text(text) = &msg {
-            if let Ok(mut obs) = ctx.observation.lock() {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-                    if obs.model.is_none() {
-                        if let Some(model) = value.get("model").and_then(|v| v.as_str()) {
-                            obs.model = Some(model.to_string());
-                        }
-                    }
-                }
-            }
+        if let WsMessage::Text(text) = &msg
+            && let Ok(mut obs) = ctx.observation.lock()
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
+            && obs.model.is_none()
+            && let Some(model) = value.get("model").and_then(|v| v.as_str())
+        {
+            obs.model = Some(model.to_string());
         }
         Ok(WsAction::Forward(msg))
     }
@@ -269,10 +311,10 @@ impl Interceptor for CustomInterceptor {
         ctx: &RequestContext,
         msg: WsMessage,
     ) -> Result<WsAction, Box<dyn std::error::Error + Send + Sync>> {
-        if let WsMessage::Text(text) = &msg {
-            if let Ok(mut obs) = ctx.observation.lock() {
-                obs.ingest_text(text);
-            }
+        if let WsMessage::Text(text) = &msg
+            && let Ok(mut obs) = ctx.observation.lock()
+        {
+            obs.ingest_text(text);
         }
         Ok(WsAction::Forward(msg))
     }
@@ -283,10 +325,13 @@ impl Interceptor for CustomInterceptor {
         status_code: Option<u16>,
         error: Option<&str>,
     ) {
-        if status_code == Some(401) {
-            if let Some(platform) = ctx.metadata.get("platform") {
-                self.account_cache.invalidate(platform).await;
-            }
+        // Only an upstream 401 means the cached upstream token went stale;
+        // our own client-auth rejections short-circuit before a token is set.
+        if status_code == Some(401)
+            && ctx.upstream_token.is_some()
+            && let Some(platform) = ctx.metadata.get("platform")
+        {
+            self.account_cache.invalidate(platform).await;
         }
 
         let elapsed = ctx.started_at.elapsed();
@@ -313,13 +358,12 @@ impl Interceptor for CustomInterceptor {
             }
             obs.settled = true;
             obs.finish_json_body();
-            if obs.error_message.is_none() {
-                if let Some(error) = error {
-                    obs.error_message = Some(error.to_string());
-                }
+            if obs.error_message.is_none()
+                && let Some(error) = error
+            {
+                obs.error_message = Some(error.to_string());
             }
             FinishSnapshot {
-                api_key_id: obs.api_key_id.clone(),
                 owner_user_id: obs.owner_user_id.clone(),
                 model: obs.model.clone(),
                 usage: obs.usage.clone(),
@@ -374,7 +418,6 @@ impl Interceptor for CustomInterceptor {
 }
 
 struct FinishSnapshot {
-    api_key_id: Option<String>,
     owner_user_id: Option<String>,
     model: Option<String>,
     usage: Option<super::observe::UsageStats>,

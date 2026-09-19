@@ -48,29 +48,6 @@ COCODEX_CONFIG_PATH=/var/lib/cocodex/config.json
 - `GET /api/setup/status`
 - `POST /api/setup/complete`
 
-## 端到端测试
-
-创建仅供本机使用的 E2E 配置：
-
-```bash
-cp .env.e2e.example .env.e2e
-```
-
-填写测试 PostgreSQL 和上游账号的完整 Token 后运行：
-
-```bash
-pnpm e2e
-```
-
-脚本会为每次执行创建独立 PostgreSQL schema，启动本地 Express 服务，并依次验证
-首次初始化、管理员与普通用户认证、用户启停、API Key 生命周期、账号管理与连通性、
-模型列表、Responses SSE/WebSocket、Images、异步计费、请求日志筛选与游标分页以及
-小时聚合；结束后会停止服务并删除该 schema 和临时配置，不依赖 OpenResty。
-日常快速回归可设置 `E2E_SKIP_IMAGES=true`，排查失败时可设置
-`E2E_KEEP_SCHEMA=true` 暂时保留测试数据。如果测试库已有可用账号，可设置
-`E2E_SOURCE_FIXTURE_EMAIL`，脚本会只读获取该账号的 Account ID、ID Token、Access
-Token 和 Refresh Token，避免重复填充测试凭据。
-
 ## 伪订阅接入
 
 给 Codex CLI 用户跑接入脚本，写入 `~/.codex/config.toml` 并持久化刷新地址（Codex 不支持把刷新 URL 写进 toml）：

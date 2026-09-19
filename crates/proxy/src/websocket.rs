@@ -48,7 +48,8 @@ async fn proxy_websocket(
     let mut request = target_url_str.as_str().into_client_request()?;
 
     let req_headers = request.headers_mut();
-    for (name, val) in crate::forwarder::copy_upstream_request_headers(&ctx.client_headers) {
+    let forwarded = crate::forwarder::copy_upstream_request_headers(&ctx.client_headers);
+    for (name, val) in forwarded.iter() {
         let name_str = name.as_str().to_ascii_lowercase();
         if name_str.starts_with("sec-websocket-") {
             continue;
@@ -57,10 +58,10 @@ async fn proxy_websocket(
     }
     crate::forwarder::apply_upstream_identity_headers(req_headers, &ctx);
 
-    if let Some(host) = target_url.host_str() {
-        if let Ok(hv) = host.parse() {
-            req_headers.insert(HOST, hv);
-        }
+    if let Some(host) = target_url.host_str()
+        && let Ok(hv) = host.parse()
+    {
+        req_headers.insert(HOST, hv);
     }
 
     debug!("Connecting to upstream WebSocket: {target_url_str}");

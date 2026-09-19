@@ -86,8 +86,16 @@ pub struct ResolveUpstreamAccountResult {
 pub struct StoredRefreshToken {
     pub email: String,
     pub owner_user_id: String,
+    pub session_id: String,
     #[serde(default)]
     pub found: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifySessionResult {
+    pub valid: bool,
+    #[serde(default)]
+    pub expires_at_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

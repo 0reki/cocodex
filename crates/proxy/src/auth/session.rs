@@ -8,13 +8,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
-use super::jwt::{ACCESS_TTL_SECS, ClientJwt, gateway_account_id, now_secs};
+use super::jwt::{ACCESS_TTL_SECS, ClientJwt, gateway_account_id, new_session_id, now_secs};
 use crate::ipc::IpcClient;
 
 const DEVICE_TTL_SECS: u64 = 15 * 60;
 const AUTH_CODE_TTL_SECS: u64 = 5 * 60;
 pub const REFRESH_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const DEVICE_INTERVAL_SECONDS: u64 = 5;
+/// Codex exchanges device-flow codes with `{issuer}/deviceauth/callback`.
+const DEVICE_CALLBACK_PATH: &str = "/deviceauth/callback";
+/// Codex's browser login listens on `http://localhost:{port}/auth/callback`.
+const BROWSER_CALLBACK_PATH: &str = "/auth/callback";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssuedCodexClientTokens {
@@ -66,6 +70,7 @@ struct RefreshSession {
     refresh_token: String,
     owner_user_id: String,
     email: String,
+    session_id: String,
     expires_at_secs: u64,
 }
 
@@ -132,6 +137,39 @@ pub fn verify_pkce(code_verifier: &str, code_challenge: &str) -> bool {
         == 0
 }
 
+/// Only Codex's own loopback callback may receive an authorization code;
+/// any other redirect would hand the code to a third party.
+pub fn is_allowed_browser_redirect_uri(redirect_uri: &str) -> bool {
+    let Ok(url) = url::Url::parse(redirect_uri) else {
+        return false;
+    };
+    let is_loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    url.scheme() == "http"
+        && is_loopback
+        && url.port().is_some()
+        && url.path() == BROWSER_CALLBACK_PATH
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+}
+
+fn redirect_uri_matches(stored: &str, presented: &str) -> bool {
+    if stored != DEVICE_CALLBACK_PATH {
+        return stored == presented;
+    }
+    // The issuer origin Codex is configured with may differ from any URL we
+    // know, so device codes match on the callback path alone.
+    presented == DEVICE_CALLBACK_PATH
+        || url::Url::parse(presented).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https") && url.path() == DEVICE_CALLBACK_PATH
+        })
+}
+
 pub struct CodexClientSessionStore {
     jwt: ClientJwt,
     ipc: Option<IpcClient>,
@@ -146,10 +184,6 @@ struct SessionState {
 }
 
 impl CodexClientSessionStore {
-    pub fn new() -> Self {
-        Self::with_jwt(ClientJwt::from_env())
-    }
-
     pub fn with_jwt(jwt: ClientJwt) -> Self {
         Self {
             jwt,
@@ -274,7 +308,7 @@ impl CodexClientSessionStore {
                 owner_user_id,
                 email: email.to_string(),
                 code_challenge,
-                redirect_uri: "/deviceauth/callback".to_string(),
+                redirect_uri: DEVICE_CALLBACK_PATH.to_string(),
                 expires_at_secs: ts + AUTH_CODE_TTL_SECS,
             },
         );
@@ -288,7 +322,10 @@ impl CodexClientSessionStore {
         email: &str,
         code_challenge: &str,
         redirect_uri: &str,
-    ) -> String {
+    ) -> Result<String, String> {
+        if !is_allowed_browser_redirect_uri(redirect_uri) {
+            return Err("redirectUri must be a loopback Codex callback".to_string());
+        }
         let mut state = self.inner.write().unwrap();
         let ts = now_secs();
         Self::sweep_expired(&mut state, ts);
@@ -306,7 +343,7 @@ impl CodexClientSessionStore {
             },
         );
 
-        code
+        Ok(code)
     }
 
     pub async fn exchange_authorization_code(
@@ -321,7 +358,7 @@ impl CodexClientSessionStore {
             Self::sweep_expired(&mut state, ts);
 
             let session = state.auth_codes.remove(code.trim())?;
-            if session.redirect_uri != redirect_uri {
+            if !redirect_uri_matches(&session.redirect_uri, redirect_uri) {
                 return None;
             }
             if !verify_pkce(code_verifier, &session.code_challenge) {
@@ -330,7 +367,7 @@ impl CodexClientSessionStore {
             session
         };
 
-        self.issue_tokens(&session.owner_user_id, &session.email)
+        self.start_session(&session.owner_user_id, &session.email)
             .await
     }
 
@@ -339,79 +376,104 @@ impl CodexClientSessionStore {
         if token.is_empty() {
             return None;
         }
-        let session = self.consume_refresh_session(token).await?;
-        self.issue_tokens(&session.owner_user_id, &session.email)
-            .await
+
+        let ts = now_secs();
+        let new_refresh_token = issue_refresh_token();
+        let expires_at_secs = ts + REFRESH_TTL_SECS;
+
+        let (owner_user_id, email, session_id) = if let Some(ipc) = &self.ipc {
+            match ipc
+                .rotate_refresh_token(
+                    &hash_refresh_token(token),
+                    &hash_refresh_token(&new_refresh_token),
+                    &new_session_id(),
+                    expires_at_secs,
+                )
+                .await
+            {
+                Ok(Some(record)) => (record.owner_user_id, record.email, record.session_id),
+                Ok(None) => return None,
+                Err(error) => {
+                    warn!(error = %error, "failed to rotate refresh token via IPC");
+                    return None;
+                }
+            }
+        } else {
+            let mut state = self.inner.write().unwrap();
+            Self::sweep_expired(&mut state, ts);
+            let old = state.refresh_sessions.remove(token)?;
+            state.refresh_sessions.insert(
+                new_refresh_token.clone(),
+                RefreshSession {
+                    refresh_token: new_refresh_token.clone(),
+                    owner_user_id: old.owner_user_id.clone(),
+                    email: old.email.clone(),
+                    session_id: old.session_id.clone(),
+                    expires_at_secs,
+                },
+            );
+            (old.owner_user_id, old.email, old.session_id)
+        };
+
+        Some(self.sign(&owner_user_id, &email, &session_id, new_refresh_token, ts))
     }
 
+    /// Revokes the session behind `token`, which may be a refresh token or
+    /// an access token. Its access tokens stop working once the session is gone.
     pub async fn revoke(&self, token: &str) {
         let normalized = token.trim();
         if normalized.is_empty() {
             return;
         }
+        let session_id = self
+            .jwt
+            .verify_access_token(normalized)
+            .ok()
+            .map(|claims| claims.session_id);
 
         if let Some(ipc) = &self.ipc {
             let token_hash = hash_refresh_token(normalized);
-            if let Err(error) = ipc.revoke_refresh_token(Some(&token_hash), None).await {
+            if let Err(error) = ipc
+                .revoke_refresh_token(Some(&token_hash), session_id.as_deref())
+                .await
+            {
                 warn!(error = %error, "failed to revoke refresh token via IPC");
-            }
-            if let Ok(claims) = self.jwt.verify_access_token(normalized) {
-                let owner = claims.openai_auth.chatgpt_account_id.trim();
-                if !owner.is_empty() {
-                    if let Err(error) = ipc.revoke_refresh_token(None, Some(owner)).await {
-                        warn!(error = %error, "failed to revoke refresh tokens for owner via IPC");
-                    }
-                }
             }
             return;
         }
 
         let mut state = self.inner.write().unwrap();
-        state.refresh_sessions.remove(normalized);
-        if let Ok(claims) = self.jwt.verify_access_token(normalized) {
-            let owner = claims.openai_auth.chatgpt_account_id;
+        let revoked_session = state
+            .refresh_sessions
+            .remove(normalized)
+            .map(|session| session.session_id)
+            .or(session_id);
+        if let Some(session_id) = revoked_session {
             state
                 .refresh_sessions
-                .retain(|_, session| gateway_account_id(&session.owner_user_id) != owner);
+                .retain(|_, session| session.session_id != session_id);
         }
     }
 
-    async fn consume_refresh_session(&self, refresh_token: &str) -> Option<RefreshSession> {
-        if let Some(ipc) = &self.ipc {
-            match ipc
-                .consume_refresh_token(&hash_refresh_token(refresh_token))
-                .await
-            {
-                Ok(Some(record)) => {
-                    return Some(RefreshSession {
-                        refresh_token: refresh_token.to_string(),
-                        owner_user_id: record.owner_user_id,
-                        email: record.email,
-                        expires_at_secs: 0,
-                    });
-                }
-                Ok(None) => return None,
-                Err(error) => {
-                    warn!(error = %error, "failed to consume refresh token via IPC");
-                    return None;
-                }
-            }
-        }
-
-        let mut state = self.inner.write().unwrap();
+    /// Whether `session_id` still holds an unexpired refresh token. Only used
+    /// without IPC (tests); the interceptor checks sessions through Node.
+    pub fn is_session_live(&self, session_id: &str) -> bool {
+        let state = self.inner.read().unwrap();
         let ts = now_secs();
-        Self::sweep_expired(&mut state, ts);
-        state.refresh_sessions.remove(refresh_token.trim())
+        state
+            .refresh_sessions
+            .values()
+            .any(|session| session.session_id == session_id && session.expires_at_secs > ts)
     }
 
-    async fn issue_tokens(
+    async fn start_session(
         &self,
         owner_user_id: &str,
         email: &str,
     ) -> Option<IssuedCodexClientTokens> {
         let ts = now_secs();
         let refresh_token = issue_refresh_token();
-        let signed = self.jwt.sign_session_tokens_at(owner_user_id, email, ts);
+        let session_id = new_session_id();
         let expires_at_secs = ts + REFRESH_TTL_SECS;
         let owner_user_id = gateway_account_id(owner_user_id);
 
@@ -421,6 +483,7 @@ impl CodexClientSessionStore {
                     &hash_refresh_token(&refresh_token),
                     &owner_user_id,
                     email,
+                    &session_id,
                     expires_at_secs,
                 )
                 .await
@@ -435,20 +498,35 @@ impl CodexClientSessionStore {
                 refresh_token.clone(),
                 RefreshSession {
                     refresh_token: refresh_token.clone(),
-                    owner_user_id,
+                    owner_user_id: owner_user_id.clone(),
                     email: email.to_string(),
+                    session_id: session_id.clone(),
                     expires_at_secs,
                 },
             );
         }
 
-        Some(IssuedCodexClientTokens {
+        Some(self.sign(&owner_user_id, email, &session_id, refresh_token, ts))
+    }
+
+    fn sign(
+        &self,
+        owner_user_id: &str,
+        email: &str,
+        session_id: &str,
+        refresh_token: String,
+        now: u64,
+    ) -> IssuedCodexClientTokens {
+        let signed = self
+            .jwt
+            .sign_tokens_for_session(owner_user_id, email, session_id, now);
+        IssuedCodexClientTokens {
             id_token: signed.id_token,
             access_token: signed.access_token,
             refresh_token,
             account_id: signed.account_id,
             token_type: "Bearer".to_string(),
             expires_in: ACCESS_TTL_SECS,
-        })
+        }
     }
 }

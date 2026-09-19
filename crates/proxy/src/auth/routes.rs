@@ -51,10 +51,9 @@ fn extract_portal_token(headers: &HeaderMap) -> Option<String> {
     if let Some(auth) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
+        && let Some(token) = auth.strip_prefix("Bearer ")
     {
-        if let Some(token) = auth.strip_prefix("Bearer ") {
-            return Some(token.trim().to_string());
-        }
+        return Some(token.trim().to_string());
     }
     if let Some(cookie) = headers
         .get(axum::http::header::COOKIE)
@@ -349,23 +348,20 @@ async fn handle_codex_client_authorize(
         }
     };
 
-    // Bind the portal user via UDS IPC
     let email = format!("{}@openai.com", user.username);
-    let code = state.sessions.create_browser_authorization(
+    let code = match state.sessions.create_browser_authorization(
         user.id,
         &email,
         &code_challenge,
         &redirect_uri,
-    );
-
-    let mut parsed_redirect = match url::Url::parse(&redirect_uri) {
-        Ok(u) => u,
-        Err(_) => {
+    ) {
+        Ok(code) => code,
+        Err(message) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": {
-                        "message": "Invalid redirectUri format",
+                        "message": message,
                         "code": "invalid_request"
                     }
                 })),
@@ -374,11 +370,16 @@ async fn handle_codex_client_authorize(
         }
     };
 
+    // Validated as a loopback callback above, so this parse cannot fail.
+    let Ok(mut parsed_redirect) = url::Url::parse(&redirect_uri) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+
     parsed_redirect.query_pairs_mut().append_pair("code", &code);
-    if let Some(s) = payload.state {
-        if !s.is_empty() {
-            parsed_redirect.query_pairs_mut().append_pair("state", &s);
-        }
+    if let Some(s) = payload.state
+        && !s.is_empty()
+    {
+        parsed_redirect.query_pairs_mut().append_pair("state", &s);
     }
 
     Json(json!({ "redirectTo": parsed_redirect.to_string() })).into_response()

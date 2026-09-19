@@ -12,7 +12,8 @@ import {
   getPortalUserById,
   listApiKeys,
   storeCodexClientRefreshToken,
-  consumeCodexClientRefreshToken,
+  rotateCodexClientRefreshToken,
+  getCodexClientSessionExpiry,
   revokeCodexClientRefreshTokens,
   type ApiKeyRecord,
   type PortalUserRecord,
@@ -104,6 +105,16 @@ export function startNodeIpcServer(
         client.write(line);
       }
     };
+    const broadcastSessionInvalidate = (sessionIds: string[]) => {
+      const line = `${JSON.stringify({
+        method: "auth.session_invalidate",
+        params: { session_ids: sessionIds },
+      })}\n`;
+      for (const client of clients) {
+        if (client.destroyed) continue;
+        client.write(line);
+      }
+    };
     const broadcastUpstreamInvalidate = (platform = "") => {
       const line = `${JSON.stringify({
         method: "upstream.invalidate",
@@ -147,6 +158,7 @@ export function startNodeIpcServer(
             request.method,
             request.params ?? {},
             options,
+            { invalidateSessions: broadcastSessionInvalidate },
           );
           // If request had an id, send response
           if (reqId !== null && reqId !== undefined) {
@@ -206,10 +218,15 @@ export function startNodeIpcServer(
   });
 }
 
+type RpcHooks = {
+  invalidateSessions: (sessionIds: string[]) => void;
+};
+
 async function handleRpcMethod(
   method: string,
   params: Record<string, unknown>,
   options: IpcServerOptions,
+  hooks: RpcHooks,
 ): Promise<unknown> {
   switch (method) {
     case "health.ping": {
@@ -374,53 +391,68 @@ async function handleRpcMethod(
     }
 
     case "auth.store_refresh_token": {
-      const tokenHash =
-        typeof params.token_hash === "string" ? params.token_hash.trim() : "";
-      const ownerUserId =
-        typeof params.owner_user_id === "string"
-          ? params.owner_user_id.trim()
-          : "";
-      const email = typeof params.email === "string" ? params.email.trim() : "";
-      const expiresAtSecs =
-        typeof params.expires_at_secs === "number"
-          ? params.expires_at_secs
-          : Number(params.expires_at_secs);
-      if (!tokenHash || !ownerUserId || !email || !expiresAtSecs) {
+      const tokenHash = stringParam(params, "token_hash");
+      const ownerUserId = stringParam(params, "owner_user_id");
+      const email = stringParam(params, "email");
+      const sessionId = stringParam(params, "session_id");
+      const expiresAtSecs = Number(params.expires_at_secs);
+      if (!tokenHash || !ownerUserId || !email || !sessionId || !expiresAtSecs) {
         throw new Error("refresh token fields are required");
       }
       await storeCodexClientRefreshToken({
         tokenHash,
         ownerUserId,
         email,
+        sessionId,
         expiresAt: new Date(expiresAtSecs * 1000),
       });
       return { ok: true };
     }
 
-    case "auth.consume_refresh_token": {
-      const tokenHash =
-        typeof params.token_hash === "string" ? params.token_hash.trim() : "";
+    case "auth.rotate_refresh_token": {
+      const tokenHash = stringParam(params, "token_hash");
+      const newTokenHash = stringParam(params, "new_token_hash");
+      const fallbackSessionId = stringParam(params, "fallback_session_id");
+      const expiresAtSecs = Number(params.expires_at_secs);
       if (!tokenHash) return { found: false };
-      const record = await consumeCodexClientRefreshToken(tokenHash);
+      if (!newTokenHash || !fallbackSessionId || !expiresAtSecs) {
+        throw new Error("refresh token rotation fields are required");
+      }
+      const record = await rotateCodexClientRefreshToken({
+        tokenHash,
+        newTokenHash,
+        fallbackSessionId,
+        expiresAt: new Date(expiresAtSecs * 1000),
+      });
       if (!record) return { found: false };
       return {
         found: true,
         email: record.email,
         owner_user_id: record.ownerUserId,
+        session_id: record.sessionId,
+      };
+    }
+
+    case "auth.verify_session": {
+      const sessionId = stringParam(params, "session_id");
+      const expiresAt = sessionId
+        ? await getCodexClientSessionExpiry(sessionId)
+        : null;
+      if (!expiresAt) return { valid: false };
+      return {
+        valid: true,
+        expires_at_secs: Math.floor(new Date(expiresAt).getTime() / 1000),
       };
     }
 
     case "auth.revoke_refresh_token": {
-      const tokenHash =
-        typeof params.token_hash === "string" ? params.token_hash.trim() : "";
-      const ownerUserId =
-        typeof params.owner_user_id === "string"
-          ? params.owner_user_id.trim()
-          : "";
-      await revokeCodexClientRefreshTokens({
-        tokenHash: tokenHash || null,
-        ownerUserId: ownerUserId || null,
+      const revokedSessionIds = await revokeCodexClientRefreshTokens({
+        tokenHash: stringParam(params, "token_hash") || null,
+        sessionId: stringParam(params, "session_id") || null,
       });
+      if (revokedSessionIds.length > 0) {
+        hooks.invalidateSessions(revokedSessionIds);
+      }
       return { ok: true };
     }
 
@@ -560,6 +592,11 @@ async function handleRpcMethod(
     default:
       throw new Error(`Method not found: ${method}`);
   }
+}
+
+function stringParam(params: Record<string, unknown>, key: string): string {
+  const value = params[key];
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function toIpcApiKey(apiKey: ApiKeyRecord) {

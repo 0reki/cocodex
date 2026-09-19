@@ -22,7 +22,8 @@ export {
   setPortalUserUpstreamAssignment,
 } from "../internal/portal-user-upstream.ts"
 export {
-  consumeCodexClientRefreshToken,
+  getCodexClientSessionExpiry,
   revokeCodexClientRefreshTokens,
+  rotateCodexClientRefreshToken,
   storeCodexClientRefreshToken,
 } from "../internal/codex-client-refresh.ts"

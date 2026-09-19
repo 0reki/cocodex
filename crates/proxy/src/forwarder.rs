@@ -122,10 +122,10 @@ impl BackendForwarder {
         apply_upstream_identity_headers(&mut forward_headers, &ctx);
 
         // Set Host header to upstream host
-        if let Some(host) = upstream_url.host_str() {
-            if let Ok(hv) = HeaderValue::from_str(host) {
-                forward_headers.insert(HOST, hv);
-            }
+        if let Some(host) = upstream_url.host_str()
+            && let Ok(hv) = HeaderValue::from_str(host)
+        {
+            forward_headers.insert(HOST, hv);
         }
 
         let stream = body.into_data_stream();
@@ -280,29 +280,29 @@ pub(crate) fn client_version_from_user_agent(user_agent: &str) -> Option<String>
 }
 
 pub(crate) fn apply_upstream_identity_headers(headers: &mut HeaderMap, ctx: &RequestContext) {
-    if let Some(token) = &ctx.upstream_token {
-        if let Ok(hv) = HeaderValue::from_str(&format!("Bearer {token}")) {
-            headers.insert(AUTHORIZATION, hv);
-        }
+    if let Some(token) = &ctx.upstream_token
+        && let Ok(hv) = HeaderValue::from_str(&format!("Bearer {token}"))
+    {
+        headers.insert(AUTHORIZATION, hv);
     }
-    if let Some(account_id) = &ctx.upstream_account_id {
-        if let Ok(hv) = HeaderValue::from_str(account_id) {
-            headers.insert(HeaderName::from_static("chatgpt-account-id"), hv);
-        }
+    if let Some(account_id) = &ctx.upstream_account_id
+        && let Ok(hv) = HeaderValue::from_str(account_id)
+    {
+        headers.insert(HeaderName::from_static("chatgpt-account-id"), hv);
     }
-    if let Some(user_agent) = &ctx.upstream_user_agent {
-        if let Ok(hv) = HeaderValue::from_str(user_agent) {
-            headers.insert(USER_AGENT, hv);
-        }
+    if let Some(user_agent) = &ctx.upstream_user_agent
+        && let Ok(hv) = HeaderValue::from_str(user_agent)
+    {
+        headers.insert(USER_AGENT, hv);
     }
     headers.insert(
         HeaderName::from_static("originator"),
         HeaderValue::from_static(DEFAULT_CODEX_ORIGINATOR),
     );
-    if let Some(version) = &ctx.upstream_client_version {
-        if let Ok(hv) = HeaderValue::from_str(version) {
-            headers.insert(HeaderName::from_static("version"), hv);
-        }
+    if let Some(version) = &ctx.upstream_client_version
+        && let Ok(hv) = HeaderValue::from_str(version)
+    {
+        headers.insert(HeaderName::from_static("version"), hv);
     }
 
     let installation_id = ctx.upstream_installation_id.as_deref();

@@ -75,7 +75,6 @@ impl UsageStats {
 
 #[derive(Debug, Default)]
 pub struct RequestObservation {
-    pub api_key_id: Option<String>,
     pub owner_user_id: Option<String>,
     pub model: Option<String>,
     pub is_sse: Option<bool>,
@@ -186,10 +185,10 @@ fn ingest_event_block(obs: &mut RequestObservation, block: &str) {
 }
 
 fn ingest_json(obs: &mut RequestObservation, value: &Value) {
-    if let Some(model) = string_field(value, &["model"]) {
-        if obs.model.as_deref() != Some(model) {
-            obs.model.get_or_insert_with(|| model.to_string());
-        }
+    if let Some(model) = string_field(value, &["model"])
+        && obs.model.as_deref() != Some(model)
+    {
+        obs.model.get_or_insert_with(|| model.to_string());
     }
     if let Some(response) = value.get("response") {
         ingest_json(obs, response);
@@ -249,10 +248,10 @@ fn extract_usage(usage: &Value) -> UsageStats {
 fn string_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
     let obj = value.as_object()?;
     for key in keys {
-        if let Some(Value::String(s)) = obj.get(*key) {
-            if !s.is_empty() {
-                return Some(s);
-            }
+        if let Some(Value::String(s)) = obj.get(*key)
+            && !s.is_empty()
+        {
+            return Some(s);
         }
     }
     None
@@ -270,10 +269,11 @@ fn number_map(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64
                 if let Some(v) = n.as_u64() {
                     return Some(v);
                 }
-                if let Some(v) = n.as_f64() {
-                    if v.is_finite() && v >= 0.0 {
-                        return Some(v as u64);
-                    }
+                if let Some(v) = n.as_f64()
+                    && v.is_finite()
+                    && v >= 0.0
+                {
+                    return Some(v as u64);
                 }
             }
             Some(Value::String(s)) => {

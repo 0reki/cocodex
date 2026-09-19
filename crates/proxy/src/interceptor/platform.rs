@@ -51,19 +51,18 @@ pub fn normalize_platform(raw: &str) -> Option<Platform> {
 /// Detects the client platform from request headers.
 /// Returns `None` when neither the explicit header nor User-Agent identifies a platform.
 pub fn detect_platform(headers: &HeaderMap) -> Option<Platform> {
-    if let Some(value) = headers.get(PLATFORM_HEADER).and_then(|v| v.to_str().ok()) {
-        if let Some(platform) = normalize_platform(value) {
-            return Some(platform);
-        }
+    if let Some(value) = headers.get(PLATFORM_HEADER).and_then(|v| v.to_str().ok())
+        && let Some(platform) = normalize_platform(value)
+    {
+        return Some(platform);
     }
 
     if let Some(user_agent) = headers
         .get(http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
+        && let Some(platform) = detect_platform_from_user_agent(user_agent)
     {
-        if let Some(platform) = detect_platform_from_user_agent(user_agent) {
-            return Some(platform);
-        }
+        return Some(platform);
     }
 
     None

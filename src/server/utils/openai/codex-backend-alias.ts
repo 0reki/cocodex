@@ -36,15 +36,3 @@ export function classifyCodexBackendForward(
   if (normalized === "/backend-api/codex/alpha/search") return "search";
   return "passthrough";
 }
-
-export function isPublicCodexClientPath(pathname: string): boolean {
-  return (
-    pathname === "/codex/device" ||
-    pathname.startsWith("/codex/device/") ||
-    pathname === "/oauth/authorize" ||
-    pathname === "/oauth/token" ||
-    pathname === "/oauth/revoke" ||
-    pathname.startsWith("/api/accounts/deviceauth/") ||
-    pathname.startsWith("/deviceauth/")
-  );
-}

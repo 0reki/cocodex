@@ -2,7 +2,8 @@ use cocodex_proxy::auth::jwt::{
     ACCESS_TTL_SECS, ClientJwt, ID_TTL_SECS, JwtError, chatgpt_user_id_for,
 };
 use cocodex_proxy::auth::session::{
-    CodexClientSessionStore, PollDeviceResult, create_pkce_pair, generate_user_code, verify_pkce,
+    CodexClientSessionStore, PollDeviceResult, create_pkce_pair, generate_user_code,
+    is_allowed_browser_redirect_uri, verify_pkce,
 };
 
 #[test]
@@ -52,7 +53,11 @@ async fn test_device_auth_flow() {
     assert!(verify_pkce(&code_verifier, &code_challenge));
 
     let tokens = store
-        .exchange_authorization_code(&auth_code, "/deviceauth/callback", &code_verifier)
+        .exchange_authorization_code(
+            &auth_code,
+            "https://gateway.example.com/deviceauth/callback",
+            &code_verifier,
+        )
         .await
         .expect("Exchange authorization code should succeed");
 
@@ -120,12 +125,14 @@ async fn test_browser_oauth_flow() {
     let (verifier, challenge) = create_pkce_pair();
 
     let redirect_uri = "http://127.0.0.1:14555/auth/callback";
-    let code = store.create_browser_authorization(
-        "user-456".to_string(),
-        "user@openai.com",
-        &challenge,
-        redirect_uri,
-    );
+    let code = store
+        .create_browser_authorization(
+            "user-456".to_string(),
+            "user@openai.com",
+            &challenge,
+            redirect_uri,
+        )
+        .expect("loopback callback should be accepted");
 
     let tokens = store
         .exchange_authorization_code(&code, redirect_uri, &verifier)
@@ -160,4 +167,81 @@ fn test_expired_access_token() {
         jwt.verify_access_token(&signed.access_token),
         Err(JwtError::Expired)
     ));
+}
+
+#[test]
+fn test_browser_redirect_uri_allow_list() {
+    for allowed in [
+        "http://localhost:1455/auth/callback",
+        "http://localhost:1457/auth/callback",
+        "http://127.0.0.1:14555/auth/callback",
+        "http://[::1]:1455/auth/callback",
+    ] {
+        assert!(is_allowed_browser_redirect_uri(allowed), "{allowed}");
+    }
+    for rejected in [
+        "https://evil.example.com/auth/callback",
+        "http://evil.example.com:1455/auth/callback",
+        "http://localhost.evil.com:1455/auth/callback",
+        "http://user@localhost:1455/auth/callback",
+        "http://localhost:1455/other",
+        "http://localhost/auth/callback",
+        "https://localhost:1455/auth/callback",
+        "/auth/callback",
+    ] {
+        assert!(!is_allowed_browser_redirect_uri(rejected), "{rejected}");
+    }
+
+    let store = CodexClientSessionStore::with_jwt(ClientJwt::from_secret("s"));
+    let (_, challenge) = create_pkce_pair();
+    assert!(
+        store
+            .create_browser_authorization(
+                "user-1".to_string(),
+                "u@openai.com",
+                &challenge,
+                "https://evil.example.com/auth/callback",
+            )
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn test_session_lifecycle_follows_refresh_token() {
+    let jwt = ClientJwt::from_secret("test-client-jwt-secret");
+    let store = CodexClientSessionStore::with_jwt(jwt.clone());
+    let (verifier, challenge) = create_pkce_pair();
+    let redirect_uri = "http://localhost:1455/auth/callback";
+    let code = store
+        .create_browser_authorization(
+            "user-7".to_string(),
+            "u@openai.com",
+            &challenge,
+            redirect_uri,
+        )
+        .unwrap();
+    let tokens = store
+        .exchange_authorization_code(&code, redirect_uri, &verifier)
+        .await
+        .unwrap();
+    let session_id = jwt
+        .verify_access_token(&tokens.access_token)
+        .unwrap()
+        .session_id;
+    assert!(store.is_session_live(&session_id));
+
+    // Rotation keeps the session and invalidates the old refresh token.
+    let refreshed = store.refresh(&tokens.refresh_token).await.unwrap();
+    let refreshed_session = jwt
+        .verify_access_token(&refreshed.access_token)
+        .unwrap()
+        .session_id;
+    assert_eq!(refreshed_session, session_id);
+    assert!(store.refresh(&tokens.refresh_token).await.is_none());
+    assert!(store.is_session_live(&session_id));
+
+    // Revoking with an access token ends the whole session.
+    store.revoke(&tokens.access_token).await;
+    assert!(!store.is_session_live(&session_id));
+    assert!(store.refresh(&refreshed.refresh_token).await.is_none());
 }

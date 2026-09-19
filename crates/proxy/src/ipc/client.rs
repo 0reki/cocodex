@@ -14,7 +14,9 @@ use super::owner_cache::OwnerAuthCache;
 use super::protocol::{
     ApiKeyRecord, JsonRpcRequest, JsonRpcResponse, ReportUsageParams, ResolveUpstreamAccountResult,
     StoredRefreshToken, VerifyApiKeyResult, VerifyOwnerResult, VerifyPortalTokenResult,
+    VerifySessionResult,
 };
+use super::session_cache::SessionCache;
 
 #[derive(Debug)]
 pub enum IpcClientError {
@@ -69,12 +71,29 @@ enum IpcCommand {
     },
 }
 
+/// Caches fed by IPC lookups. Node pushes invalidations over the socket, so
+/// all of them are dropped whenever the connection is (re)established or
+/// lost: any invalidation sent while disconnected would otherwise be missed.
+#[derive(Clone, Default)]
+pub(crate) struct IpcCaches {
+    auth: OwnerAuthCache,
+    account: UpstreamAccountCache,
+    session: SessionCache,
+}
+
+impl IpcCaches {
+    async fn clear_all(&self) {
+        self.auth.invalidate("").await;
+        self.account.invalidate("").await;
+        self.session.invalidate(&[]).await;
+    }
+}
+
 #[derive(Clone)]
 pub struct IpcClient {
     tx: mpsc::Sender<IpcCommand>,
     req_counter: Arc<AtomicU64>,
-    auth_cache: OwnerAuthCache,
-    account_cache: UpstreamAccountCache,
+    caches: IpcCaches,
 }
 
 impl IpcClient {
@@ -82,30 +101,27 @@ impl IpcClient {
         let socket_path = socket_path.as_ref().to_path_buf();
         let (tx, rx) = mpsc::channel(256);
         let req_counter = Arc::new(AtomicU64::new(1));
-        let auth_cache = OwnerAuthCache::default();
-        let account_cache = UpstreamAccountCache::default();
+        let caches = IpcCaches::default();
 
-        tokio::spawn(ipc_worker_loop(
-            socket_path,
-            rx,
-            auth_cache.clone(),
-            account_cache.clone(),
-        ));
+        tokio::spawn(ipc_worker_loop(socket_path, rx, caches.clone()));
 
         Self {
             tx,
             req_counter,
-            auth_cache,
-            account_cache,
+            caches,
         }
     }
 
     pub fn owner_auth_cache(&self) -> OwnerAuthCache {
-        self.auth_cache.clone()
+        self.caches.auth.clone()
     }
 
     pub fn upstream_account_cache(&self) -> UpstreamAccountCache {
-        self.account_cache.clone()
+        self.caches.account.clone()
+    }
+
+    pub fn session_cache(&self) -> SessionCache {
+        self.caches.session.clone()
     }
 
     async fn call(
@@ -243,6 +259,7 @@ impl IpcClient {
         token_hash: &str,
         owner_user_id: &str,
         email: &str,
+        session_id: &str,
         expires_at_secs: u64,
     ) -> Result<(), IpcClientError> {
         self.call(
@@ -251,6 +268,7 @@ impl IpcClient {
                 "token_hash": token_hash,
                 "owner_user_id": owner_user_id,
                 "email": email,
+                "session_id": session_id,
                 "expires_at_secs": expires_at_secs,
             }),
         )
@@ -258,14 +276,25 @@ impl IpcClient {
         Ok(())
     }
 
-    pub async fn consume_refresh_token(
+    /// Atomically consumes `token_hash` and stores `new_token_hash` in the
+    /// same session. `fallback_session_id` is used only for legacy rows that
+    /// predate session binding.
+    pub async fn rotate_refresh_token(
         &self,
         token_hash: &str,
+        new_token_hash: &str,
+        fallback_session_id: &str,
+        expires_at_secs: u64,
     ) -> Result<Option<StoredRefreshToken>, IpcClientError> {
         let res = self
             .call(
-                "auth.consume_refresh_token",
-                serde_json::json!({ "token_hash": token_hash }),
+                "auth.rotate_refresh_token",
+                serde_json::json!({
+                    "token_hash": token_hash,
+                    "new_token_hash": new_token_hash,
+                    "fallback_session_id": fallback_session_id,
+                    "expires_at_secs": expires_at_secs,
+                }),
             )
             .await?;
         if res.get("found").and_then(|value| value.as_bool()) != Some(true) {
@@ -275,16 +304,32 @@ impl IpcClient {
         Ok(Some(parsed))
     }
 
+    pub async fn verify_session(
+        &self,
+        session_id: &str,
+    ) -> Result<VerifySessionResult, IpcClientError> {
+        let res = self
+            .call(
+                "auth.verify_session",
+                serde_json::json!({ "session_id": session_id }),
+            )
+            .await?;
+        let parsed: VerifySessionResult = serde_json::from_value(res)?;
+        Ok(parsed)
+    }
+
+    /// Deletes the refresh token matching `token_hash` and/or every refresh
+    /// token of `session_id`. Node broadcasts the resulting invalidation.
     pub async fn revoke_refresh_token(
         &self,
         token_hash: Option<&str>,
-        owner_user_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<(), IpcClientError> {
         self.call(
             "auth.revoke_refresh_token",
             serde_json::json!({
                 "token_hash": token_hash,
-                "owner_user_id": owner_user_id,
+                "session_id": session_id,
             }),
         )
         .await?;
@@ -316,8 +361,7 @@ impl IpcClient {
 async fn ipc_worker_loop(
     socket_path: PathBuf,
     mut rx: mpsc::Receiver<IpcCommand>,
-    auth_cache: OwnerAuthCache,
-    account_cache: UpstreamAccountCache,
+    caches: IpcCaches,
 ) {
     while let Some(first_cmd) = rx.recv().await {
         // Attempt connection to Unix socket
@@ -335,11 +379,11 @@ async fn ipc_worker_loop(
         };
 
         info!("Connected to Node UDS at {:?}", socket_path);
-        if let Err(e) =
-            handle_connection(stream, first_cmd, &mut rx, &auth_cache, &account_cache).await
-        {
+        caches.clear_all().await;
+        if let Err(e) = handle_connection(stream, first_cmd, &mut rx, &caches).await {
             warn!("IPC connection broken: {}", e);
         }
+        caches.clear_all().await;
     }
 }
 
@@ -372,8 +416,7 @@ async fn handle_connection(
     stream: UnixStream,
     first_cmd: IpcCommand,
     rx: &mut mpsc::Receiver<IpcCommand>,
-    auth_cache: &OwnerAuthCache,
-    account_cache: &UpstreamAccountCache,
+    caches: &IpcCaches,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -391,9 +434,7 @@ async fn handle_connection(
             cmd_opt = rx.recv() => {
                 match cmd_opt {
                     Some(cmd) => {
-                        if let Err(e) = send_ipc_cmd(cmd, &mut writer, &mut pending).await {
-                            return Err(e);
-                        }
+                        send_ipc_cmd(cmd, &mut writer, &mut pending).await?;
                     }
                     None => return Ok(()),
                 }
@@ -405,8 +446,8 @@ async fn handle_connection(
                     return Err("Socket closed by remote".into());
                 }
                 let line = line_buf.trim();
-                if !line.is_empty() {
-                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+                if !line.is_empty()
+                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
                         let method = value.get("method").and_then(|method| method.as_str());
                         if method == Some("auth.invalidate") {
                             let owner_user_id = value
@@ -414,23 +455,32 @@ async fn handle_connection(
                                 .and_then(|params| params.get("owner_user_id"))
                                 .and_then(|id| id.as_str())
                                 .unwrap_or("");
-                            auth_cache.invalidate(owner_user_id).await;
+                            caches.auth.invalidate(owner_user_id).await;
                         } else if method == Some("upstream.invalidate") {
                             let platform = value
                                 .get("params")
                                 .and_then(|params| params.get("platform"))
                                 .and_then(|id| id.as_str())
                                 .unwrap_or("");
-                            account_cache.invalidate(platform).await;
-                        } else if let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value) {
-                            if let Some(id) = &resp.id {
-                                if let Some(responder) = pending.remove(id) {
+                            caches.account.invalidate(platform).await;
+                        } else if method == Some("auth.session_invalidate") {
+                            let session_ids: Vec<String> = value
+                                .get("params")
+                                .and_then(|params| params.get("session_ids"))
+                                .and_then(|ids| ids.as_array())
+                                .map(|ids| {
+                                    ids.iter()
+                                        .filter_map(|id| id.as_str().map(str::to_string))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            caches.session.invalidate(&session_ids).await;
+                        } else if let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value)
+                            && let Some(id) = &resp.id
+                                && let Some(responder) = pending.remove(id) {
                                     let _ = responder.send(Ok(resp));
                                 }
-                            }
-                        }
                     }
-                }
                 line_buf.clear();
             }
         }

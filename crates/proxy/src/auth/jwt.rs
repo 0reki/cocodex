@@ -9,7 +9,6 @@ pub const ACCESS_TTL_SECS: u64 = 10 * 24 * 60 * 60;
 pub const ID_TTL_SECS: u64 = 60 * 60;
 const ISSUER: &str = "https://auth.openai.com";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const DEV_FALLBACK_SECRET: &str = "cocodex-dev-client-jwt-secret";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JwtError {
@@ -93,6 +92,10 @@ pub fn now_secs() -> u64 {
         .as_secs()
 }
 
+pub fn new_session_id() -> String {
+    format!("authsess_{}", uuid::Uuid::new_v4().simple())
+}
+
 /// Gateway-facing ChatGPT account id for this portal user.
 /// Never the upstream `openai_accounts.account_id` — the interceptor swaps
 /// `ChatGPT-Account-ID` on the way out.
@@ -134,18 +137,18 @@ fn display_name_from_email(email: &str) -> String {
         .to_string()
 }
 
-fn client_jwt_secret_from_env() -> String {
-    std::env::var("CODEX_CLIENT_JWT_SECRET")
-        .ok()
+/// Signing secret for gateway-issued client JWTs. There is deliberately no
+/// built-in fallback: a guessable secret would let anyone mint tokens.
+pub fn client_jwt_secret_from_env() -> Result<String, String> {
+    ["CODEX_CLIENT_JWT_SECRET", "ADMIN_JWT_SECRET"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            std::env::var("ADMIN_JWT_SECRET")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
+        .find(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "CODEX_CLIENT_JWT_SECRET (or ADMIN_JWT_SECRET) must be set to sign client tokens"
+                .to_string()
         })
-        .unwrap_or_else(|| DEV_FALLBACK_SECRET.to_string())
 }
 
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
@@ -237,8 +240,8 @@ impl ClientJwt {
         }
     }
 
-    pub fn from_env() -> Self {
-        Self::from_secret(client_jwt_secret_from_env())
+    pub fn from_env() -> Result<Self, String> {
+        client_jwt_secret_from_env().map(Self::from_secret)
     }
 
     pub fn sign_session_tokens(&self, account_id: &str, email: &str) -> SignedCodexTokens {
@@ -251,11 +254,23 @@ impl ClientJwt {
         email: &str,
         now: u64,
     ) -> SignedCodexTokens {
+        self.sign_tokens_for_session(account_id, email, &new_session_id(), now)
+    }
+
+    /// Signs tokens bound to `session_id`. An access token is only honoured
+    /// while that session still holds an unexpired refresh token.
+    pub fn sign_tokens_for_session(
+        &self,
+        account_id: &str,
+        email: &str,
+        session_id: &str,
+        now: u64,
+    ) -> SignedCodexTokens {
         let account_id = gateway_account_id(account_id);
         let chatgpt_user_id = chatgpt_user_id_for(&account_id);
         let org_id = chatgpt_org_id_for(&account_id);
         let name = display_name_from_email(email);
-        let session_id = format!("authsess_{}", uuid::Uuid::new_v4().simple());
+        let session_id = session_id.to_string();
         let chatgpt_account_user_id = format!("{chatgpt_user_id}__{account_id}");
         let sub = format!("cocodex|{account_id}");
 
@@ -370,7 +385,10 @@ impl ClientJwt {
             .map_err(|_| JwtError::Invalid)?;
         let claims: CodexJwtClaims =
             serde_json::from_slice(&payload_json).map_err(|_| JwtError::Invalid)?;
-        if claims.openai_auth.chatgpt_account_id.trim().is_empty() || claims.sub.trim().is_empty() {
+        if claims.openai_auth.chatgpt_account_id.trim().is_empty()
+            || claims.sub.trim().is_empty()
+            || claims.session_id.trim().is_empty()
+        {
             return Err(JwtError::Invalid);
         }
         if claims.exp <= now_secs() {

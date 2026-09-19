@@ -39,9 +39,6 @@ import {
   recordUserUpstreamQuotaUsage,
   setPortalUserEnabledById,
   setPortalUserUpstreamAssignment,
-  storeCodexClientRefreshToken,
-  consumeCodexClientRefreshToken,
-  revokeCodexClientRefreshTokens,
   syncUpstreamQuotaWindow,
   updateApiKeyById,
   updateOpenAIAccountTokensById,
@@ -58,15 +55,10 @@ import {
   zstdDecompressBuffer,
 } from "./server/utils/index.ts";
 import {
-  sendWebSocketUpgradeErrorResponse,
-} from "./server/utils/index.ts";
-import {
   generateApiKeyValue,
-  isPublicCodexClientPath,
   loadBackendEnv,
   resolveOpenAIUpstreamAccountId,
 } from "./server/utils/index.ts";
-import { createCodexClientSessionStore } from "./server/services/auth/codex-client-session.ts";
 import {
   startNodeIpcServer,
   type IpcServerInstance,
@@ -75,8 +67,6 @@ import {
   registerAccountMaintenanceRoutes,
   registerAdminRoutes,
   registerPortalAuthRoutes,
-  registerCodexClientPortalRoutes,
-  registerCodexClientProtocolRoutes,
   registerPublicOpenAIRoutes,
   registerRequestLogRoutes,
   registerSetupRoutes,
@@ -193,27 +183,6 @@ const {
 });
 
 const app = express();
-const codexClientSessions = createCodexClientSessionStore({
-  storeRefreshToken: async ({ tokenHash, ownerUserId, email, expiresAtMs }) => {
-    await storeCodexClientRefreshToken({
-      tokenHash,
-      ownerUserId,
-      email,
-      expiresAt: new Date(expiresAtMs),
-    });
-  },
-  consumeRefreshToken: async (tokenHash) => {
-    const record = await consumeCodexClientRefreshToken(tokenHash);
-    if (!record) return null;
-    return { ownerUserId: record.ownerUserId, email: record.email };
-  },
-  revokeRefreshTokens: async (input) => {
-    await revokeCodexClientRefreshTokens({
-      tokenHash: input.tokenHash,
-      ownerUserId: input.ownerUserId,
-    });
-  },
-});
 const port = Number(process.env.PORT ?? 53141);
 const host = process.env.HOST?.trim() || "localhost";
 const JSON_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -311,13 +280,10 @@ app.use((req, res, next) => {
 
 registerSetupRoutes(app);
 registerPortalAuthRoutes(app);
-registerCodexClientProtocolRoutes(app, {
-  sessions: codexClientSessions,
-});
 
 app.use(async (req, res, next) => {
   try {
-    if (req.path === "/health" || isPublicCodexClientPath(req.path)) {
+    if (req.path === "/health") {
       next();
       return;
     }
@@ -394,12 +360,6 @@ registerAdminRoutes(app, {
   upsertOpenAIAccount,
   requestCodexDeviceCode,
   pollCodexDeviceAuth,
-});
-
-registerCodexClientPortalRoutes(app, {
-  sessions: codexClientSessions,
-  getPortalPrincipalFromLocals,
-  getPortalUserById,
 });
 
 registerUserRoutes(app, {
@@ -501,16 +461,6 @@ app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
 });
 
 const httpServer = createServer(app);
-
-httpServer.on("upgrade", (_request, socket) => {
-  sendWebSocketUpgradeErrorResponse(socket, 404, {
-    error: {
-      message: "Not found",
-      type: "invalid_request_error",
-      code: "not_found",
-    },
-  });
-});
 
 let ipcServerInstance: IpcServerInstance | null = null;
 

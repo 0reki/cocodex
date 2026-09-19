@@ -37,7 +37,7 @@ pub struct AppState {
 
 pub fn create_router(config: ProxyConfig, interceptor: Option<SharedInterceptor>) -> Router {
     let ipc_client = IpcClient::new(&config.ipc_socket_path);
-    let jwt = ClientJwt::from_env();
+    let jwt = ClientJwt::from_secret(&config.client_jwt_secret);
     let interceptor = interceptor
         .unwrap_or_else(|| Arc::new(CustomInterceptor::new(ipc_client.clone(), jwt.clone())));
     let forwarder = Arc::new(BackendForwarder::new(

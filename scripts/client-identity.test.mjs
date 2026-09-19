@@ -8,7 +8,6 @@ import {
   normalizeCodexClientPlatform,
 } from "../src/openai-api/internal/client-identity.ts";
 import { buildCodexTransportHeaders } from "../src/openai-api/internal/runtime-codex.ts";
-import { getCodexModels } from "../src/openai-api/internal/accounts.ts";
 import { getCodexUsage, getCodexDailyWorkspaceUsage } from "../src/openai-api/internal/usage.ts";
 import { refreshCodexTokens } from "../src/openai-api/internal/auth.ts";
 import { requestCodexDeviceCode, pollCodexDeviceAuth } from "../src/openai-api/internal/device-auth.ts";
@@ -138,7 +137,7 @@ test("proxy UA follows the forwarded version while credentials remain account-bo
   assert.equal(headers["user-agent"], buildCodexUserAgent("0.201.0"));
 });
 
-test("models, usage and all OAuth calls send Codex UA without leaking GitHub token", async (t) => {
+test("usage and all OAuth calls send Codex UA without leaking GitHub token", async (t) => {
   const previousVersion = process.env.CODEX_CLIENT_VERSION;
   const previousToken = process.env.CODEX_GITHUB_TOKEN;
   process.env.CODEX_CLIENT_VERSION = "0.200.0";
@@ -162,13 +161,12 @@ test("models, usage and all OAuth calls send Codex UA without leaking GitHub tok
     });
   });
   const options = { accessToken: "token", clientVersion: "0.200.0", userAgent: "legacy-ua" };
-  await getCodexModels(options);
   await getCodexUsage(options);
   await getCodexDailyWorkspaceUsage({ ...options, startDate: "2026-01-01", endDate: "2026-01-02" });
   await refreshCodexTokens({ refreshToken: "refresh", userAgent: "legacy-ua" });
   await requestCodexDeviceCode();
   await pollCodexDeviceAuth({ deviceAuthId: "device", userCode: "code" });
-  assert.equal(calls.length, 7);
+  assert.equal(calls.length, 6);
   for (const { url, headers } of calls) {
     assert.equal(headers.get("user-agent"), buildCodexUserAgent("0.200.0"), url);
     assert.ok(!url.includes("github.com"));

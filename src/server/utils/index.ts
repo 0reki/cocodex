@@ -25,10 +25,6 @@ export {
   zstdDecompressBuffer,
 } from "./network/streaming.ts";
 export {
-  applyUpstreamResponseHeaders,
-  getForwardRequestHeaders,
-} from "./network/proxy.ts";
-export {
   resolveOpenAIUpstreamAccountId,
   type UpstreamSourceAccountRecord,
 } from "./openai/upstream-account-utils.ts";
@@ -36,17 +32,5 @@ export {
   classifyCodexBackendForward,
   isCodexBackendApiPath,
   isCodexResponsesPath,
-  isPublicCodexClientPath,
   type CodexBackendForwardKind,
 } from "./openai/codex-backend-alias.ts";
-export {
-  WS_READY_STATE_CONNECTING,
-  WS_READY_STATE_OPEN,
-  WsServerCtor,
-  normalizeWsCloseCode,
-  normalizeWsCloseReason,
-  parseUpgradePathname,
-  sendWebSocketUpgradeErrorResponse,
-  wsRawDataToText,
-} from "./network/ws.ts";
-export type { WsSocket } from "./network/ws.ts";

@@ -29,6 +29,7 @@ test("End-to-End: Rust Proxy + Node UDS IPC authentication integration", async (
         NODE_BACKEND_URL: "http://127.0.0.1:53198",
         COCODEX_IPC_SOCKET_PATH: socketPath,
         PUBLIC_APP_URL: "http://localhost:53332",
+        CODEX_CLIENT_JWT_SECRET: "test-client-jwt-secret",
         RUST_LOG: "info",
       },
       stdio: ["ignore", "pipe", "pipe"],
