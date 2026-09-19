@@ -89,8 +89,6 @@ pub fn build(
         .route("/wham", any(handle_backend_api))
         .route("/api/codex/{*path}", any(handle_backend_api))
         .route("/api/codex", any(handle_backend_api))
-        .route("/v1/{*path}", any(handle_backend_api))
-        .route("/v1", any(handle_backend_api))
         .fallback(handle_not_found)
         .layer(
             CorsLayer::new()

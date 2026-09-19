@@ -56,7 +56,7 @@ Session 立即失效。
 
 ## 网关
 
-Codex 的三种 base URL 写法都可以：`/backend-api/*`、`/api/codex/*`、`/v1/*`，
+Codex 的两种 base URL 写法都可以：`/backend-api/*`、`/api/codex/*`，
 另支持 `WS /backend-api/codex/responses`。每个请求：
 
 1. 按 `X-Cocodex-Platform` 或 User-Agent 识别客户端系统（windows / linux / darwin），识别不出拒绝

@@ -95,32 +95,6 @@ async fn test_interceptor_short_circuit_on_backend_api() {
 }
 
 #[tokio::test]
-async fn test_openai_v1_base_url_is_handled_as_backend_api() {
-    let interceptor = Arc::new(TestInterceptor {
-        intercepted: AtomicBool::new(false),
-    });
-
-    let config = common::config(common::offline_settings(), "https://chatgpt.com");
-
-    let app = create_router(config, Some(interceptor.clone()));
-
-    let request = Request::builder()
-        .uri("/v1/responses")
-        .method("POST")
-        .body(Body::empty())
-        .unwrap();
-
-    let response = app.oneshot(request).await.unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get("x-custom-intercepted").unwrap(),
-        "true"
-    );
-    assert!(interceptor.intercepted.load(Ordering::SeqCst));
-}
-
-#[tokio::test]
 async fn test_backend_api_requires_access_token() {
     let config = common::config(common::offline_settings(), "https://chatgpt.com");
 
@@ -178,22 +152,7 @@ async fn test_path_normalization() {
         normalize_upstream_path("/wham/accounts/check"),
         "/backend-api/wham/accounts/check"
     );
-    assert_eq!(
-        normalize_upstream_path("/v1/responses"),
-        "/backend-api/codex/responses"
-    );
-    assert_eq!(
-        normalize_upstream_path("/v1/realtime"),
-        "/backend-api/codex/realtime"
-    );
-    assert_eq!(
-        normalize_upstream_path("/v1/live"),
-        "/backend-api/codex/live"
-    );
-    assert_eq!(
-        normalize_upstream_path("/v1/models"),
-        "/backend-api/codex/models"
-    );
+    assert_eq!(normalize_upstream_path("/v1/responses"), "/v1/responses");
 }
 
 #[tokio::test]
@@ -202,10 +161,9 @@ async fn test_unknown_paths_are_not_found() {
         common::config(common::offline_settings(), "https://chatgpt.com"),
         None,
     );
-    let request = Request::builder()
-        .uri("/nothing-here")
-        .body(Body::empty())
-        .unwrap();
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    for uri in ["/nothing-here", "/v1", "/v1/responses"] {
+        let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
 }

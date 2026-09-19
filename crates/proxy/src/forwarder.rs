@@ -45,8 +45,8 @@ impl BackendForwarder {
         let mut ctx = RequestContext::new(&req);
 
         // Any WebSocket upgrade on a Codex/ChatGPT route: Responses
-        // (`…/codex/responses`), Realtime (`/v1/realtime`, `/v1/live`, or
-        // the ChatGPT-style `/backend-api/codex` websocket), and WHAM.
+        // (`…/codex/responses`), Realtime (`…/codex/realtime`, `…/codex/live`,
+        // or the ChatGPT-style `/backend-api/codex` websocket), and WHAM.
         let is_upgrade = ws_opt.is_some()
             && req
                 .headers()

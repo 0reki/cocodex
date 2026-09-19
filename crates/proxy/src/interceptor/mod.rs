@@ -74,12 +74,10 @@ impl RequestContext {
 
 /// Normalizes client paths to the canonical ChatGPT upstream path format (`/backend-api/...`).
 ///
-/// Codex can be pointed at this gateway in three ways:
+/// Codex can be pointed at this gateway in two ways:
 /// 1. `chatgpt_base_url` = `{gateway}/backend-api` (ChatGPT path style) →
 ///    `/backend-api/...` and `/wham/...`
 /// 2. `chatgpt_base_url` = `{gateway}` (Codex API path style) → `/api/codex/...`
-/// 3. `openai_base_url` = `{gateway}/v1` (OpenAI API path style) → `/v1/...`,
-///    rewritten to `/backend-api/codex/...` for ChatGPT upstream
 pub fn normalize_upstream_path(raw_path: &str) -> String {
     if raw_path.starts_with("/backend-api/") || raw_path == "/backend-api" {
         raw_path.to_string()
@@ -95,10 +93,6 @@ pub fn normalize_upstream_path(raw_path: &str) -> String {
             format!("/backend-api/codex/{stripped}")
         }
     } else if raw_path == "/api/codex" {
-        "/backend-api/codex".to_string()
-    } else if let Some(stripped) = raw_path.strip_prefix("/v1/") {
-        format!("/backend-api/codex/{stripped}")
-    } else if raw_path == "/v1" {
         "/backend-api/codex".to_string()
     } else {
         raw_path.to_string()
