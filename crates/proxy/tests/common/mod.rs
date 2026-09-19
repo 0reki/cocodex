@@ -41,7 +41,7 @@ impl TestDb {
             database_url: Some(self.url.clone()),
             admin_jwt_secret: Some(TEST_SECRET.to_string()),
             client_jwt_secret: None,
-            config_path: "/nonexistent/config.json".into(),
+            config_path: scratch_dir().join("config.json"),
         }
     }
 
@@ -62,6 +62,91 @@ pub fn offline_settings() -> Settings {
         database_url: None,
         admin_jwt_secret: Some(TEST_SECRET.to_string()),
         client_jwt_secret: None,
-        config_path: "/nonexistent/config.json".into(),
+        config_path: scratch_dir().join("config.json"),
+    }
+}
+
+/// A fresh directory for per-test state such as the settlement log.
+pub fn scratch_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("cocodex-test-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Gateway configuration pointing upstream calls at `origin`.
+pub fn config(settings: Settings, origin: &str) -> cocodex_proxy::config::ProxyConfig {
+    cocodex_proxy::config::ProxyConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        upstream_chatgpt_origin: origin.to_string(),
+        upstream_auth_origin: origin.to_string(),
+        public_app_url: "http://localhost:53332".to_string(),
+        settings,
+    }
+}
+
+/// Pins the impersonated Codex version so tests never ask GitHub.
+pub fn pin_codex_version() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: set once, before any test reads the environment variable.
+    ONCE.call_once(|| unsafe { std::env::set_var("CODEX_CLIENT_VERSION", "0.154.0") });
+}
+
+impl TestDb {
+    pub async fn insert_account(
+        &self,
+        email: &str,
+        account_id: &str,
+        platform: &str,
+        token: &str,
+    ) -> String {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            INSERT INTO openai_accounts (
+              email, account_id, status, platform, id_token, access_token, refresh_token
+            )
+            VALUES ($1, $2, 'active', $3, 'id-token', $4, $5)
+            RETURNING id::text
+            "#,
+        )
+        .bind(email)
+        .bind(account_id)
+        .bind(platform)
+        .bind(token)
+        .bind(format!("refresh-{token}"))
+        .fetch_one(&self.pool)
+        .await
+        .unwrap()
+    }
+
+    pub async fn assign(&self, owner_user_id: &str, account_id: &str) {
+        sqlx::query(
+            "INSERT INTO portal_user_upstream_assignments (owner_user_id, account_id) VALUES ($1::uuid, $2)",
+        )
+        .bind(owner_user_id)
+        .bind(account_id)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+    }
+
+    /// A Codex client bearer token with a live session for the user.
+    pub async fn client_bearer(&self, user_id: &str) -> String {
+        let jwt = cocodex_proxy::auth::jwt::ClientJwt::from_secret(TEST_SECRET);
+        let tokens = jwt.sign_session_tokens(user_id, "user@openai.com");
+        let session_id = jwt
+            .verify_access_token(&tokens.access_token)
+            .unwrap()
+            .session_id;
+        cocodex_proxy::db::client_sessions::store(
+            &self.pool,
+            &format!("hash-{session_id}"),
+            user_id,
+            "user@openai.com",
+            &session_id,
+            cocodex_proxy::auth::jwt::now_secs() + 86_400,
+        )
+        .await
+        .unwrap();
+        format!("Bearer {}", tokens.access_token)
     }
 }

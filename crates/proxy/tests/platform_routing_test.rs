@@ -6,11 +6,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
-use cocodex_proxy::auth::jwt::ClientJwt;
-use cocodex_proxy::config::ProxyConfig;
 use cocodex_proxy::create_router;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 const WINDOWS_UA: &str = "codex_cli_rs/0.154.0 (Windows 10.0.22631; x86_64) WindowsTerminal";
@@ -18,209 +15,158 @@ const LINUX_UA: &str = "codex_cli_rs/0.154.0 (Debian 12; x86_64) unknown";
 const DARWIN_UA: &str = "codex_cli_rs/0.154.0 (Mac OS 14.5.0; arm64) Apple_Terminal";
 
 #[derive(Clone, Default)]
-struct CapturedUpstreamRequests {
+struct Captured {
     headers: Arc<Mutex<Vec<HeaderMap>>>,
 }
 
-#[tokio::test]
-async fn test_platform_account_routing_end_to_end() {
-    let db = common::test_db().await;
-    let socket_path = std::env::temp_dir().join(format!(
-        "cocodex-platform-routing-{}.sock",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&socket_path);
-
-    // 1. Mock upstream ChatGPT server capturing forwarded headers.
-    let captured = CapturedUpstreamRequests::default();
-    let captured_for_handler = captured.clone();
-    let upstream_app = Router::new()
+async fn mock_upstream() -> (String, Captured) {
+    let captured = Captured::default();
+    let app = Router::new()
         .fallback(axum::routing::any(
-            move |State(state): State<CapturedUpstreamRequests>, headers: HeaderMap| {
-                state.headers.lock().unwrap().push(headers);
-                async { "upstream-ok" }
+            |State(state): State<Captured>, uri: axum::http::Uri, headers: HeaderMap| async move {
+                // Only gateway traffic; background quota syncs hit /wham/usage.
+                if uri.path() == "/backend-api/codex/models" {
+                    state.headers.lock().unwrap().push(headers);
+                }
+                "upstream-ok"
             },
         ))
-        .with_state(captured_for_handler);
-    let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let upstream_port = upstream_listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        axum::serve(upstream_listener, upstream_app).await.unwrap();
-    });
+        .with_state(captured.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (origin, captured)
+}
 
-    // 2. Mock Node UDS backend that resolves platform-tagged accounts.
-    let uds_listener = UnixListener::bind(&socket_path).unwrap();
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = uds_listener.accept().await else {
-                continue;
-            };
-            tokio::spawn(async move {
-                let (reader, mut writer) = stream.into_split();
-                let mut lines = BufReader::new(reader).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
-                        continue;
-                    };
-                    let Some(method) = request["method"].as_str() else {
-                        continue;
-                    };
-                    let result = if method == "upstream.resolve_account" {
-                        let platform = request["params"]["platform"].as_str().unwrap_or("");
-                        let (account_id, token, user_agent) = match platform {
-                            "windows" => ("windows-account", "windows-token", WINDOWS_UA),
-                            "linux" => ("linux-account", "linux-token", LINUX_UA),
-                            "darwin" => ("darwin-account", "darwin-token", DARWIN_UA),
-                            _ => ("all-account", "all-token", LINUX_UA),
-                        };
-                        serde_json::json!({
-                            "account_id": account_id,
-                            "access_token": token,
-                            "platform": platform,
-                            "user_agent": user_agent,
-                        })
-                    } else {
-                        serde_json::json!({})
-                    };
-                    let response = serde_json::json!({
-                        "id": request["id"],
-                        "result": result,
-                        "error": null,
-                    });
-                    if writer
-                        .write_all(format!("{response}\n").as_bytes())
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            });
-        }
-    });
-
-    // 3. Build the proxy router with the default platform-aware interceptor.
-    let config = ProxyConfig {
-        bind_addr: "127.0.0.1:53141".parse().unwrap(),
-        node_backend_url: "http://127.0.0.1:53142".to_string(),
-        upstream_chatgpt_origin: format!("http://127.0.0.1:{upstream_port}"),
-        ipc_socket_path: socket_path.to_string_lossy().to_string(),
-        public_app_url: "http://localhost:53332".to_string(),
-        settings: db.settings(),
-    };
-    let app = create_router(config, None);
-
-    // A portal user with a live client session.
-    let user_id = db.create_user("user-1").await;
-    let jwt = ClientJwt::from_secret(common::TEST_SECRET);
-    let client_tokens = jwt.sign_session_tokens(&user_id, "user-1@openai.com");
-    let session_id = jwt
-        .verify_access_token(&client_tokens.access_token)
-        .unwrap()
-        .session_id;
-    cocodex_proxy::db::client_sessions::store(
-        &db.pool,
-        "refresh-hash",
-        &user_id,
-        "user-1@openai.com",
-        &session_id,
-        cocodex_proxy::auth::jwt::now_secs() + 86_400,
-    )
-    .await
-    .unwrap();
-    let bearer = format!("Bearer {}", client_tokens.access_token);
-
-    // 4. A Windows-UA request must be routed to the Windows account with an
-    //    aligned upstream User-Agent.
-    let request = Request::builder()
+fn get(bearer: &str, user_agent: &str) -> axum::http::request::Builder {
+    Request::builder()
         .uri("/backend-api/codex/models")
         .method("GET")
-        .header("user-agent", WINDOWS_UA)
-        .header("authorization", &bearer)
+        .header("user-agent", user_agent)
+        .header("authorization", bearer)
+}
+
+/// One ChatGPT account logged in once per platform: each client platform
+/// must reach its own login with that platform's identity.
+#[tokio::test]
+async fn routes_each_platform_to_its_login_of_the_assigned_account() {
+    common::pin_codex_version();
+    let db = common::test_db().await;
+    let (origin, captured) = mock_upstream().await;
+    for platform in ["windows", "linux", "darwin"] {
+        db.insert_account(
+            &format!("{platform}@x"),
+            "acct-1",
+            platform,
+            &format!("{platform}-token"),
+        )
+        .await;
+    }
+    let user = db.create_user("user-1").await;
+    db.assign(&user, "acct-1").await;
+    let bearer = db.client_bearer(&user).await;
+    let app = create_router(common::config(db.settings(), &origin), None);
+
+    let request = get(&bearer, WINDOWS_UA)
         .header("originator", "codex_vscode")
         .header("version", "0.1.0-client")
         .header("session-id", "sess-keep")
         .header("x-codex-installation-id", "install-leak")
         .body(Body::empty())
         .unwrap();
-    let response = app.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
 
-    // 5. A Linux-UA request must be routed to the Linux account.
-    let request = Request::builder()
-        .uri("/backend-api/codex/models")
-        .method("GET")
-        .header("user-agent", LINUX_UA)
-        .header("authorization", &bearer)
-        .body(Body::empty())
-        .unwrap();
-    let response = app.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let request = get(&bearer, LINUX_UA).body(Body::empty()).unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
 
     // Unknown User-Agents are rejected instead of falling back to linux.
-    let request = Request::builder()
-        .uri("/backend-api/codex/models")
-        .method("GET")
-        .header("user-agent", "Apifox/1.0.0")
-        .header("authorization", &bearer)
-        .body(Body::empty())
-        .unwrap();
-    let response = app.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let request = get(&bearer, "Apifox/1.0.0").body(Body::empty()).unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
 
-    // 6. The explicit X-Cocodex-Platform header overrides the User-Agent and
-    //    must not leak to the upstream.
-    let request = Request::builder()
-        .uri("/backend-api/codex/models")
-        .method("GET")
-        .header("user-agent", "Apifox/1.0.0")
+    // The explicit header overrides the User-Agent and never leaks upstream.
+    let request = get(&bearer, "Apifox/1.0.0")
         .header("x-cocodex-platform", "darwin")
-        .header("authorization", &bearer)
         .body(Body::empty())
         .unwrap();
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
 
-    // 7. Verify upstream headers per platform.
     let headers = captured.headers.lock().unwrap();
     assert_eq!(headers.len(), 3);
+    assert_eq!(headers[0]["authorization"], "Bearer windows-token");
+    assert_eq!(headers[0]["user-agent"], WINDOWS_UA);
+    assert_eq!(headers[0]["originator"], "codex_cli_rs");
+    assert_eq!(headers[0]["version"], "0.154.0");
+    assert_eq!(headers[0]["session-id"], "sess-keep");
+    assert_eq!(headers[0]["chatgpt-account-id"], "acct-1");
+    assert_eq!(
+        headers[0]["x-codex-installation-id"],
+        cocodex_proxy::forwarder::gateway_installation_id("acct-1", "windows").as_str()
+    );
+    assert_eq!(headers[1]["authorization"], "Bearer linux-token");
+    assert_eq!(headers[1]["user-agent"], LINUX_UA);
+    assert_eq!(headers[2]["authorization"], "Bearer darwin-token");
+    assert_eq!(headers[2]["user-agent"], DARWIN_UA);
+    assert!(headers[2].get("x-cocodex-platform").is_none());
+}
 
-    assert_eq!(
-        headers[0].get("authorization").unwrap(),
-        "Bearer windows-token"
-    );
-    assert_eq!(headers[0].get("user-agent").unwrap(), WINDOWS_UA);
-    assert_eq!(headers[0].get("originator").unwrap(), "codex_cli_rs");
-    assert_eq!(headers[0].get("version").unwrap(), "0.154.0");
-    assert_eq!(headers[0].get("session-id").unwrap(), "sess-keep");
-    assert_eq!(
-        headers[0].get("x-codex-installation-id").unwrap(),
-        cocodex_proxy::forwarder::gateway_installation_id("windows-account", "windows").as_str()
-    );
-    assert_eq!(
-        headers[0].get("chatgpt-account-id").unwrap(),
-        "windows-account"
-    );
+#[tokio::test]
+async fn generic_login_serves_platforms_without_their_own() {
+    common::pin_codex_version();
+    let db = common::test_db().await;
+    let (origin, captured) = mock_upstream().await;
+    db.insert_account("all@x", "acct-2", "all", "generic-token")
+        .await;
+    let user = db.create_user("user-2").await;
+    db.assign(&user, "acct-2").await;
+    let bearer = db.client_bearer(&user).await;
+    let app = create_router(common::config(db.settings(), &origin), None);
 
-    assert_eq!(
-        headers[1].get("authorization").unwrap(),
-        "Bearer linux-token"
-    );
-    assert_eq!(headers[1].get("user-agent").unwrap(), LINUX_UA);
-    assert_eq!(
-        headers[1].get("chatgpt-account-id").unwrap(),
-        "linux-account"
-    );
+    let request = get(&bearer, DARWIN_UA).body(Body::empty()).unwrap();
+    assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+    let headers = captured.headers.lock().unwrap();
+    assert_eq!(headers[0]["authorization"], "Bearer generic-token");
+    // A generic login presents the client's own platform.
+    assert_eq!(headers[0]["user-agent"], DARWIN_UA);
+}
 
-    assert_eq!(
-        headers[2].get("authorization").unwrap(),
-        "Bearer darwin-token"
-    );
-    assert_eq!(headers[2].get("user-agent").unwrap(), DARWIN_UA);
-    assert!(
-        headers[2].get("x-cocodex-platform").is_none(),
-        "internal platform header must not leak upstream"
-    );
+#[tokio::test]
+async fn unassigned_users_and_missing_platforms_are_refused() {
+    common::pin_codex_version();
+    let db = common::test_db().await;
+    let (origin, captured) = mock_upstream().await;
+    db.insert_account("win@x", "acct-3", "windows", "win-token")
+        .await;
+    let assigned = db.create_user("assigned").await;
+    db.assign(&assigned, "acct-3").await;
+    let unassigned = db.create_user("unassigned").await;
+    let app = create_router(common::config(db.settings(), &origin), None);
 
-    let _ = std::fs::remove_file(&socket_path);
+    let bearer = db.client_bearer(&unassigned).await;
+    let response = app
+        .clone()
+        .oneshot(get(&bearer, WINDOWS_UA).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // acct-3 has no linux (or generic) login.
+    let bearer = db.client_bearer(&assigned).await;
+    let response = app
+        .oneshot(get(&bearer, LINUX_UA).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(captured.headers.lock().unwrap().is_empty());
 }

@@ -11,6 +11,9 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use url::Url;
 
+/// Largest request body accepted for forwarding (image edits carry images).
+const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+
 /// Forwarder for `/backend-api/*` requests to upstream ChatGPT.
 #[derive(Clone)]
 pub struct BackendForwarder {
@@ -84,6 +87,9 @@ impl BackendForwarder {
         // token swap, UA normalization) into the upstream handshake context.
         if is_upgrade {
             ctx.client_headers = req.headers().clone();
+            if let Ok(mut obs) = ctx.observation.lock() {
+                obs.websocket = true;
+            }
             info!(request_id = %ctx.request_id, "Upgrading connection to WebSocket");
             return handle_ws_upgrade(
                 ws_opt.unwrap(),
@@ -98,7 +104,30 @@ impl BackendForwarder {
         self.forward_http(ctx, req).await
     }
 
-    async fn forward_http(&self, ctx: RequestContext, req: Request<Body>) -> Response {
+    async fn send_upstream(
+        &self,
+        ctx: &RequestContext,
+        method: &http::Method,
+        url: &Url,
+        headers: &HeaderMap,
+        body: &bytes::Bytes,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let mut forward_headers = copy_upstream_request_headers(headers);
+        apply_upstream_identity_headers(&mut forward_headers, ctx);
+        if let Some(host) = url.host_str()
+            && let Ok(hv) = HeaderValue::from_str(host)
+        {
+            forward_headers.insert(HOST, hv);
+        }
+        self.client
+            .request(method.clone(), url.clone())
+            .headers(forward_headers)
+            .body(body.clone())
+            .send()
+            .await
+    }
+
+    async fn forward_http(&self, mut ctx: RequestContext, req: Request<Body>) -> Response {
         let query = req
             .uri()
             .query()
@@ -117,19 +146,21 @@ impl BackendForwarder {
             }
         };
 
+        // Buffered so the request can be replayed after a token refresh.
         let (parts, body) = req.into_parts();
-        let mut forward_headers = copy_upstream_request_headers(&parts.headers);
-        apply_upstream_identity_headers(&mut forward_headers, &ctx);
-
-        // Set Host header to upstream host
-        if let Some(host) = upstream_url.host_str()
-            && let Ok(hv) = HeaderValue::from_str(host)
-        {
-            forward_headers.insert(HOST, hv);
-        }
-
-        let stream = body.into_data_stream();
-        let reqwest_body = reqwest::Body::wrap_stream(stream);
+        let body = match axum::body::to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
+            Ok(body) => body,
+            Err(e) => {
+                self.interceptor
+                    .on_request_finish(&ctx, Some(413), Some(&e.to_string()))
+                    .await;
+                return crate::interceptor::custom::auth_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    "Request payload too large",
+                );
+            }
+        };
 
         debug!(
             request_id = %ctx.request_id,
@@ -137,13 +168,33 @@ impl BackendForwarder {
             "Forwarding request to upstream ChatGPT"
         );
 
-        let upstream_res = self
-            .client
-            .request(parts.method.clone(), upstream_url)
-            .headers(forward_headers)
-            .body(reqwest_body)
-            .send()
+        let mut upstream_res = self
+            .send_upstream(&ctx, &parts.method, &upstream_url, &parts.headers, &body)
             .await;
+        let rejected = |res: &Result<reqwest::Response, reqwest::Error>| {
+            res.as_ref().is_ok_and(|resp| resp.status().as_u16() == 401)
+        };
+        if rejected(&upstream_res) && ctx.upstream_token.is_some() {
+            if self.interceptor.on_upstream_unauthorized(&mut ctx).await {
+                info!(request_id = %ctx.request_id, "retrying with refreshed upstream token");
+                upstream_res = self
+                    .send_upstream(&ctx, &parts.method, &upstream_url, &parts.headers, &body)
+                    .await;
+            }
+            if rejected(&upstream_res) {
+                // Not the client's credentials: a 401 would make Codex
+                // discard its own (valid) gateway session.
+                let message = "Upstream rejected the gateway's credentials";
+                self.interceptor
+                    .on_request_finish(&ctx, Some(502), Some(message))
+                    .await;
+                return crate::interceptor::custom::auth_error(
+                    StatusCode::BAD_GATEWAY,
+                    "upstream_unauthorized",
+                    message,
+                );
+            }
+        }
 
         let upstream_resp = match upstream_res {
             Ok(resp) => resp,
@@ -177,6 +228,14 @@ impl BackendForwarder {
         });
         let finish_guard_chunk = Arc::clone(&finish_guard);
 
+        let completion_ctx = ctx.clone();
+        let end_marker = futures_util::stream::once(async move {
+            if let Ok(mut obs) = completion_ctx.observation.lock() {
+                obs.upstream_complete = true;
+            }
+            None
+        })
+        .filter_map(|item: Option<Result<bytes::Bytes, std::io::Error>>| async move { item });
         let byte_stream = upstream_resp.bytes_stream().map(move |item| {
             let _keep_guard = &finish_guard_chunk;
             match item {
@@ -191,7 +250,7 @@ impl BackendForwarder {
             }
         });
 
-        let client_body = Body::from_stream(byte_stream);
+        let client_body = Body::from_stream(byte_stream.chain(end_marker));
         let mut response = Response::new(client_body);
         *response.status_mut() = status;
         *response.headers_mut() = client_resp_headers;

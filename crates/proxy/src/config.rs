@@ -5,37 +5,29 @@ use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "cocodex-proxy",
-    about = "High-performance Codex subscription proxy"
+    name = "cocodex",
+    about = "Codex subscription gateway and console backend"
 )]
 pub struct ProxyArgs {
     /// Host to bind on
     #[arg(long, env = "HOST", default_value = "0.0.0.0")]
     pub host: String,
 
-    /// Port to bind on
-    #[arg(long, env = "PROXY_PORT", default_value = "53141")]
-    pub port: u16,
-
-    /// Upstream Node.js management server URL
-    #[arg(
-        long,
-        env = "NODE_BACKEND_URL",
-        default_value = "http://127.0.0.1:53142"
-    )]
-    pub node_backend_url: String,
+    /// Port to bind on (`PROXY_PORT` is accepted as a legacy name)
+    #[arg(long, env = "PORT")]
+    pub port: Option<u16>,
 
     /// Target ChatGPT upstream origin
     #[arg(long, env = "CHATGPT_ORIGIN", default_value = "https://chatgpt.com")]
     pub upstream_chatgpt_origin: String,
 
-    /// Unix Domain Socket path for IPC with Node.js backend
+    /// OpenAI auth origin used for upstream logins and token refresh
     #[arg(
         long,
-        env = "COCODEX_IPC_SOCKET_PATH",
-        default_value = "./data/cocodex-ipc.sock"
+        env = "OPENAI_AUTH_ORIGIN",
+        default_value = "https://auth.openai.com"
     )]
-    pub ipc_socket_path: String,
+    pub upstream_auth_origin: String,
 
     /// Public frontend application URL for OAuth redirects
     #[arg(long, env = "PUBLIC_APP_URL", default_value = "http://localhost:53332")]
@@ -65,41 +57,47 @@ pub struct ProxyArgs {
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
     pub bind_addr: SocketAddr,
-    pub node_backend_url: String,
     pub upstream_chatgpt_origin: String,
-    pub ipc_socket_path: String,
+    pub upstream_auth_origin: String,
     pub public_app_url: String,
     pub settings: Settings,
 }
 
 impl ProxyConfig {
     pub fn from_args(args: ProxyArgs) -> Result<Self, String> {
-        let addr_str = format!("{}:{}", args.host, args.port);
+        let port = match args.port {
+            Some(port) => port,
+            None => match std::env::var("PROXY_PORT") {
+                Ok(value) => value
+                    .trim()
+                    .parse()
+                    .map_err(|e| format!("Invalid PROXY_PORT '{value}': {e}"))?,
+                Err(_) => 53141,
+            },
+        };
+        let addr_str = format!("{}:{port}", args.host);
         let bind_addr: SocketAddr = addr_str
             .parse()
             .map_err(|e| format!("Invalid bind address '{addr_str}': {e}"))?;
 
-        let node_backend_url = args.node_backend_url.trim_end_matches('/').to_string();
-        let upstream_chatgpt_origin = args
-            .upstream_chatgpt_origin
-            .trim_end_matches('/')
-            .to_string();
-        let ipc_socket_path = args.ipc_socket_path;
-        let public_app_url = args.public_app_url.trim_end_matches('/').to_string();
-        let settings = Settings {
-            database_url: args.database_url,
-            admin_jwt_secret: args.admin_jwt_secret,
-            client_jwt_secret: args.client_jwt_secret,
-            config_path: args.config_path,
-        };
+        // Fail at startup rather than on the first request.
+        crate::billing::pricing::Pricing::from_env()?;
+        crate::upstream::identity::VersionResolver::from_env(reqwest::Client::new())?;
 
         Ok(Self {
             bind_addr,
-            node_backend_url,
-            upstream_chatgpt_origin,
-            ipc_socket_path,
-            public_app_url,
-            settings,
+            upstream_chatgpt_origin: args
+                .upstream_chatgpt_origin
+                .trim_end_matches('/')
+                .to_string(),
+            upstream_auth_origin: args.upstream_auth_origin.trim_end_matches('/').to_string(),
+            public_app_url: args.public_app_url.trim_end_matches('/').to_string(),
+            settings: Settings {
+                database_url: args.database_url,
+                admin_jwt_secret: args.admin_jwt_secret,
+                client_jwt_secret: args.client_jwt_secret,
+                config_path: args.config_path,
+            },
         })
     }
 }

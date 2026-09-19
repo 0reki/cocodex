@@ -37,8 +37,7 @@ pub async fn store(
           owner_user_id = EXCLUDED.owner_user_id,
           email = EXCLUDED.email,
           session_id = EXCLUDED.session_id,
-          expires_at = EXCLUDED.expires_at,
-          api_key_id = NULL
+          expires_at = EXCLUDED.expires_at
         "#,
     )
     .bind(token_hash)
@@ -141,4 +140,18 @@ pub async fn revoke(
     sessions.sort();
     sessions.dedup();
     Ok(sessions)
+}
+
+/// Deletes every refresh token of a user and returns their sessions.
+pub async fn revoke_owner(pool: &PgPool, owner_user_id: &str) -> Result<Vec<String>, sqlx::Error> {
+    let Ok(owner) = Uuid::parse_str(owner_user_id.trim()) else {
+        return Ok(Vec::new());
+    };
+    let deleted: Vec<Option<String>> = sqlx::query_scalar(
+        "DELETE FROM codex_client_refresh_tokens WHERE owner_user_id = $1 RETURNING session_id",
+    )
+    .bind(owner)
+    .fetch_all(pool)
+    .await?;
+    Ok(deleted.into_iter().flatten().collect())
 }

@@ -1,4 +1,6 @@
 pub mod jwt;
+pub mod owner_cache;
+pub mod password;
 pub mod portal;
 pub mod routes;
 pub mod session;

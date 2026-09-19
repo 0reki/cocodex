@@ -462,6 +462,22 @@ impl CodexClientSessionStore {
         }
     }
 
+    /// Signs every Codex client of a user out.
+    pub async fn revoke_owner(&self, owner_user_id: &str) -> Result<(), sqlx::Error> {
+        let Some(pool) = &self.db else {
+            let owner = gateway_account_id(owner_user_id);
+            self.inner
+                .write()
+                .unwrap()
+                .refresh_sessions
+                .retain(|_, session| session.owner_user_id != owner);
+            return Ok(());
+        };
+        let revoked = db::client_sessions::revoke_owner(pool, owner_user_id).await?;
+        self.live_sessions.invalidate_many(&revoked).await;
+        Ok(())
+    }
+
     /// Whether `session_id` still holds an unexpired refresh token. Live
     /// sessions are cached until revoked or expired, so the database is hit
     /// once per session rather than once per request.

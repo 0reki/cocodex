@@ -1,6 +1,5 @@
 use clap::Parser;
 use cocodex_proxy::config::{ProxyArgs, ProxyConfig};
-use cocodex_proxy::create_router;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -22,7 +21,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "cocodex_proxy=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "cocodex=info,cocodex_proxy=info,tower_http=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -32,12 +31,11 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(
         bind_addr = %config.bind_addr,
-        node_backend_url = %config.node_backend_url,
         upstream_chatgpt_origin = %config.upstream_chatgpt_origin,
-        "Starting cocodex-proxy server"
+        "Starting cocodex server"
     );
 
-    let app = create_router(config.clone(), None);
+    let (app, runtime) = cocodex_proxy::build(config.clone(), None);
 
     let listener = TcpListener::bind(config.bind_addr).await?;
     info!("Listening on http://{}", config.bind_addr);
@@ -46,11 +44,31 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    info!("cocodex-proxy shut down gracefully");
+    info!("flushing pending settlements");
+    runtime.shutdown().await;
+    info!("cocodex shut down gracefully");
     Ok(())
 }
 
+/// Ctrl-C, or SIGTERM from docker/systemd.
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
     info!("Shutdown signal received, draining connections...");
 }

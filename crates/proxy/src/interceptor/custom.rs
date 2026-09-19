@@ -1,10 +1,11 @@
-use super::observe::{BackendKind, classify_backend_kind};
+use super::observe::{BackendKind, ResponseObservation, Terminal, classify_backend_kind};
 use super::platform::{PLATFORM_HEADER, detect_platform};
 use super::{Interceptor, RequestAction, RequestContext, WsAction};
 use crate::auth::jwt::JwtError;
-use crate::ipc::protocol::{ReportUsageParams, ResolveUpstreamAccountResult};
-use crate::ipc::{IpcClient, UpstreamAccountCache};
-use crate::runtime::{NotReady, OwnerStatus, Runtime};
+use crate::billing::pricing;
+use crate::billing::usd::Usd;
+use crate::db::settlements::Settlement;
+use crate::runtime::{NotReady, OwnerStatus, Ready, Runtime};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::StatusCode;
@@ -15,38 +16,345 @@ use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, info, warn};
 
-/// Default interceptor: verify the Codex-shaped client JWT and its session,
-/// check the portal user, route to a platform-isolated upstream account,
-/// then settle usage/logs over IPC.
-pub struct CustomInterceptor {
-    ipc: IpcClient,
-    runtime: Arc<Runtime>,
-    account_cache: UpstreamAccountCache,
+const META_PLATFORM: &str = "platform";
+const META_OWNER: &str = "owner_user_id";
+const META_ACCOUNT: &str = "account_id";
+const META_ROW: &str = "upstream_row_id";
+
+/// Why a request (or a WebSocket turn) is refused before reaching upstream.
+struct Rejection {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
 }
 
-impl CustomInterceptor {
-    pub fn new(ipc: IpcClient, runtime: Arc<Runtime>) -> Self {
-        let account_cache = ipc.upstream_account_cache();
+impl Rejection {
+    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
-            ipc,
-            runtime,
-            account_cache,
+            status,
+            code,
+            message: message.into(),
         }
     }
 
-    async fn resolve_platform_account(
-        &self,
-        platform: &str,
-    ) -> Result<ResolveUpstreamAccountResult, crate::ipc::IpcClientError> {
-        if let Some(cached) = self.account_cache.get(platform).await {
-            return Ok(cached);
+    fn response(&self) -> Response {
+        auth_error(self.status, self.code, &self.message)
+    }
+
+    /// The Codex Responses WebSocket error event.
+    fn ws_event(&self) -> WsMessage {
+        WsMessage::Text(
+            serde_json::json!({
+                "type": "error",
+                "status": self.status.as_u16(),
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": self.code,
+                    "message": self.message,
+                }
+            })
+            .to_string()
+            .into(),
+        )
+    }
+}
+
+/// Default interceptor: verify the Codex client token and its session,
+/// check the user, route to the user's upstream account for the client's
+/// platform, then settle each response.
+pub struct CustomInterceptor {
+    runtime: Arc<Runtime>,
+}
+
+impl CustomInterceptor {
+    pub fn new(runtime: Arc<Runtime>) -> Self {
+        Self { runtime }
+    }
+
+    async fn owner_rejection(&self, ready: &Ready, owner: &str) -> Option<Rejection> {
+        match ready.verify_owner(owner).await {
+            Ok(OwnerStatus::Active(_)) => None,
+            Ok(OwnerStatus::Unknown) => Some(Rejection::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Invalid access token",
+            )),
+            Ok(OwnerStatus::Disabled(_)) => Some(Rejection::new(
+                StatusCode::FORBIDDEN,
+                "user_inactive",
+                "User is disabled",
+            )),
+            Ok(OwnerStatus::QuotaExceeded(_)) => Some(Rejection::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "insufficient_quota",
+                "User quota exceeded",
+            )),
+            Err(error) => {
+                warn!(%error, "portal user lookup failed");
+                Some(Rejection::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "database_unavailable",
+                    "Failed to verify access token",
+                ))
+            }
+        }
+    }
+
+    async fn quota_rejection(ready: &Ready, account_id: &str, owner: &str) -> Option<Rejection> {
+        let decision = ready.quota.check(account_id, owner).await;
+        (!decision.allowed).then(|| {
+            Rejection::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "upstream_user_quota_exceeded",
+                format!(
+                    "Your share of the upstream account's weekly quota is used up ({:.1}% of {}%)",
+                    decision.allocated_percent,
+                    crate::quota::USER_QUOTA_PERCENT
+                ),
+            )
+        })
+    }
+
+    /// Checks an authenticated request and picks its upstream login.
+    async fn admit(&self, ctx: &mut RequestContext, platform: &str) -> Result<(), Rejection> {
+        let token = ctx.client_token.clone().ok_or_else(|| {
+            Rejection::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Missing Authorization bearer token",
+            )
+        })?;
+        let ready = self.runtime.ready().await.map_err(|error| {
+            warn!(request_id = %ctx.request_id, %error, "gateway not ready");
+            match error {
+                NotReady::SetupRequired => Rejection::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "setup_required",
+                    "Gateway setup has not been completed",
+                ),
+                NotReady::Database(_) => Rejection::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "database_unavailable",
+                    "Failed to verify access token",
+                ),
+            }
+        })?;
+        let claims = ready
+            .sessions
+            .jwt()
+            .verify_access_token(&token)
+            .map_err(|error| {
+                let message = match error {
+                    JwtError::Expired => "Access token has expired",
+                    JwtError::Invalid => "Invalid access token",
+                };
+                Rejection::new(StatusCode::UNAUTHORIZED, "invalid_token", message)
+            })?;
+        match ready.sessions.is_session_live(&claims.session_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(Rejection::new(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    "Access token has been revoked",
+                ));
+            }
+            Err(error) => {
+                warn!(request_id = %ctx.request_id, %error, "session lookup failed");
+                return Err(Rejection::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "database_unavailable",
+                    "Failed to verify access token",
+                ));
+            }
         }
 
-        let account = self.ipc.resolve_upstream_account(platform).await?;
-        self.account_cache
-            .remember(platform.to_string(), account.clone())
-            .await;
-        Ok(account)
+        let owner = claims.openai_auth.chatgpt_account_id.clone();
+        ctx.metadata.insert(META_OWNER.into(), owner.clone());
+        if let Ok(mut obs) = ctx.observation.lock() {
+            obs.owner_user_id = Some(owner.clone());
+        }
+        if let Some(rejection) = self.owner_rejection(&ready, &owner).await {
+            return Err(rejection);
+        }
+
+        let account_id = match ready.accounts.assigned_account(&owner).await {
+            Ok(Some(account_id)) => account_id,
+            Ok(None) => {
+                return Err(Rejection::new(
+                    StatusCode::FORBIDDEN,
+                    "upstream_account_unassigned",
+                    "尚未分配上游账号",
+                ));
+            }
+            Err(error) => {
+                warn!(%error, "assignment lookup failed");
+                return Err(Rejection::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "database_unavailable",
+                    "Failed to resolve upstream account",
+                ));
+            }
+        };
+        ctx.metadata.insert(META_ACCOUNT.into(), account_id.clone());
+
+        if classify_backend_kind(&ctx.target_path).billable()
+            && let Some(rejection) = Self::quota_rejection(&ready, &account_id, &owner).await
+        {
+            return Err(rejection);
+        }
+
+        let row = match ready.accounts.resolve(&account_id, platform).await {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                return Err(Rejection::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "upstream_account_unavailable",
+                    format!("No upstream login for platform '{platform}'"),
+                ));
+            }
+            Err(error) => {
+                warn!(%error, "upstream account lookup failed");
+                return Err(Rejection::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "database_unavailable",
+                    "Failed to resolve upstream account",
+                ));
+            }
+        };
+        // A login made for one OS keeps that OS's identity; a generic
+        // login presents the client's own OS.
+        let identity_platform = if row.platform() == "all" {
+            platform
+        } else {
+            row.platform()
+        };
+        let user_agent = ready.accounts.client.user_agent(identity_platform);
+        info!(
+            request_id = %ctx.request_id,
+            platform,
+            email = %row.email,
+            "routing request to upstream login"
+        );
+        ctx.metadata.insert(META_ROW.into(), row.id.clone());
+        ctx.upstream_token = Some(row.access_token.clone());
+        ctx.upstream_account_id = Some(row.account_id.clone());
+        ctx.upstream_client_version = crate::forwarder::client_version_from_user_agent(&user_agent);
+        ctx.upstream_user_agent = Some(user_agent);
+        ctx.upstream_installation_id = Some(crate::forwarder::gateway_installation_id(
+            &row.account_id,
+            identity_platform,
+        ));
+        Ok(())
+    }
+
+    /// Writes one response to the log, the user's spend and the quota share.
+    fn settle(
+        &self,
+        ready: &Arc<Ready>,
+        ctx: &RequestContext,
+        response: ResponseObservation,
+        status: u16,
+        transport_error: Option<&str>,
+        client_left: bool,
+    ) {
+        let Some(owner) = ctx.metadata.get(META_OWNER).cloned() else {
+            return;
+        };
+        let kind = classify_backend_kind(&ctx.target_path);
+        let model = response
+            .model
+            .clone()
+            .or_else(|| default_model_for_kind(kind))
+            .unwrap_or_else(|| "codex-chatgpt".to_string());
+        let tokens_info = response
+            .usage
+            .as_ref()
+            .map(|u| u.tokens_info.clone())
+            .unwrap_or_default();
+        let cost = pricing::apply_service_tier(
+            ready.pricing.estimate(Some(&model), &tokens_info),
+            response.service_tier.as_deref(),
+            Some(&model),
+        );
+        let charge = if kind.billable() {
+            cost.unwrap_or_default()
+        } else {
+            Usd::ZERO
+        };
+        let status = response.status.unwrap_or(status);
+        let success = (200..300).contains(&status);
+        let (is_final, end_reason) = match response.terminal {
+            Some(Terminal::Completed) => (true, Some("completed")),
+            Some(Terminal::Incomplete) => (true, Some("incomplete")),
+            Some(Terminal::Failed) => (false, Some("failed")),
+            Some(Terminal::Cancelled) => (false, Some("cancelled")),
+            None if !success => (false, None),
+            None if client_left => (false, Some("client_aborted")),
+            None if transport_error.is_some() => (false, Some("upstream_error")),
+            None => (false, None),
+        };
+        let started_at = chrono::Utc::now()
+            - chrono::Duration::from_std(response.started_at.elapsed()).unwrap_or_default();
+        let settlement_id = uuid::Uuid::new_v4().to_string();
+        let settlement = Settlement {
+            settlement_id: settlement_id.clone(),
+            intent_id: Some(ctx.request_id.clone()),
+            owner_user_id: Some(owner.clone()),
+            api_key_id: None,
+            charge,
+            is_final: Some(is_final),
+            stream_end_reason: end_reason.map(str::to_string),
+            path: ctx.target_path.clone(),
+            model_id: Some(model),
+            service_tier: response.service_tier.clone(),
+            status_code: Some(status as i64),
+            ttfb_ms: response.ttfb_ms.map(|v| v as i64),
+            latency_ms: Some(response.started_at.elapsed().as_millis() as i64),
+            tokens_info: Some(serde_json::Value::Object(tokens_info)),
+            total_tokens: response
+                .usage
+                .as_ref()
+                .and_then(|u| u.total_tokens)
+                .map(|v| v as i64),
+            cost,
+            error_code: response.error_code.clone(),
+            error_message: response
+                .error_message
+                .clone()
+                .or_else(|| transport_error.map(str::to_string)),
+            request_time: crate::db::iso(started_at),
+        };
+        let ready = ready.clone();
+        let account_id = ctx.metadata.get(META_ACCOUNT).cloned();
+        tokio::spawn(async move {
+            if let Err(error) = ready.settlements.enqueue(settlement).await {
+                warn!(%error, "failed to queue settlement");
+            }
+            if charge.0 > 0
+                && let Some(account_id) = account_id
+            {
+                ready
+                    .quota
+                    .record(&settlement_id, &account_id, &owner, charge)
+                    .await;
+            }
+        });
+    }
+
+    async fn settle_finished(&self, ctx: &RequestContext) {
+        let finished = match ctx.observation.lock() {
+            Ok(mut obs) => std::mem::take(&mut obs.finished),
+            Err(_) => return,
+        };
+        if finished.is_empty() {
+            return;
+        }
+        if let Ok(ready) = self.runtime.ready().await {
+            for response in finished {
+                self.settle(&ready, ctx, response, 200, None, false);
+            }
+        }
     }
 }
 
@@ -59,14 +367,13 @@ impl Interceptor for CustomInterceptor {
     ) -> Result<RequestAction, Box<dyn std::error::Error + Send + Sync>> {
         let Some(platform) = detect_platform(req.headers()) else {
             return Ok(RequestAction::ShortCircuit(auth_error(
-                axum::http::StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
                 "invalid_token",
                 "Invalid access token",
             )));
         };
         ctx.metadata
-            .insert("platform".to_string(), platform.as_str().to_string());
-
+            .insert(META_PLATFORM.to_string(), platform.as_str().to_string());
         debug!(
             request_id = %ctx.request_id,
             method = %ctx.method,
@@ -75,145 +382,16 @@ impl Interceptor for CustomInterceptor {
             "CustomInterceptor: on_request hook"
         );
 
-        let Some(client_token) = ctx.client_token.clone() else {
-            return Ok(RequestAction::ShortCircuit(auth_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_token",
-                "Missing Authorization bearer token",
-            )));
-        };
-
-        let ready = match self.runtime.ready().await {
-            Ok(ready) => ready,
-            Err(error) => {
-                warn!(request_id = %ctx.request_id, %error, "gateway not ready");
-                return Ok(RequestAction::ShortCircuit(not_ready_error(&error)));
+        if let Err(rejection) = self.admit(ctx, platform.as_str()).await {
+            if let Ok(mut obs) = ctx.observation.lock() {
+                obs.record_error(rejection.code, &rejection.message);
             }
-        };
-
-        let claims = match ready.sessions.jwt().verify_access_token(&client_token) {
-            Ok(claims) => claims,
-            Err(JwtError::Expired) => {
-                return Ok(RequestAction::ShortCircuit(auth_error(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid_token",
-                    "Access token has expired",
-                )));
-            }
-            Err(JwtError::Invalid) => {
-                return Ok(RequestAction::ShortCircuit(auth_error(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid_token",
-                    "Invalid access token",
-                )));
-            }
-        };
-
-        match ready.sessions.is_session_live(&claims.session_id).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return Ok(RequestAction::ShortCircuit(auth_error(
-                    StatusCode::UNAUTHORIZED,
-                    "invalid_token",
-                    "Access token has been revoked",
-                )));
-            }
-            Err(error) => {
-                warn!(request_id = %ctx.request_id, %error, "session lookup failed");
-                return Ok(RequestAction::ShortCircuit(database_error()));
-            }
+            return Ok(RequestAction::ShortCircuit(rejection.response()));
         }
-
-        let owner_user_id = claims.openai_auth.chatgpt_account_id.clone();
-        if let Ok(mut obs) = ctx.observation.lock() {
-            obs.owner_user_id = Some(owner_user_id.clone());
-        }
-        ctx.metadata
-            .insert("owner_user_id".into(), owner_user_id.clone());
-
-        let rejection = match ready.verify_owner(&owner_user_id).await {
-            Ok(OwnerStatus::Active(_)) => None,
-            Ok(OwnerStatus::Unknown) => Some((
-                StatusCode::UNAUTHORIZED,
-                "invalid_token",
-                "Invalid access token",
-            )),
-            Ok(OwnerStatus::Disabled(_)) => {
-                Some((StatusCode::FORBIDDEN, "user_inactive", "User is disabled"))
-            }
-            Ok(OwnerStatus::QuotaExceeded(_)) => Some((
-                StatusCode::TOO_MANY_REQUESTS,
-                "insufficient_quota",
-                "User quota exceeded",
-            )),
-            Err(error) => {
-                warn!(request_id = %ctx.request_id, %error, "portal user lookup failed");
-                return Ok(RequestAction::ShortCircuit(database_error()));
-            }
-        };
-        if let Some((status, code, message)) = rejection {
-            return Ok(RequestAction::ShortCircuit(auth_error(
-                status, code, message,
-            )));
-        }
-
-        let account = match self.resolve_platform_account(platform.as_str()).await {
-            Ok(account) => account,
-            Err(crate::ipc::IpcClientError::Rpc { message, .. }) => {
-                warn!(
-                    request_id = %ctx.request_id,
-                    platform = platform.as_str(),
-                    error = %message,
-                    "No upstream account configured for platform"
-                );
-                return Ok(RequestAction::ShortCircuit(
-                    (
-                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                        format!(
-                            "No upstream account configured for platform '{}': {message}",
-                            platform.as_str()
-                        ),
-                    )
-                        .into_response(),
-                ));
-            }
-            Err(error) => {
-                warn!(
-                    request_id = %ctx.request_id,
-                    platform = platform.as_str(),
-                    error = %error,
-                    "Failed to resolve platform upstream account"
-                );
-                return Ok(RequestAction::ShortCircuit(auth_error(
-                    axum::http::StatusCode::BAD_GATEWAY,
-                    "upstream_error",
-                    "Failed to resolve upstream account",
-                )));
-            }
-        };
-
-        info!(
-            request_id = %ctx.request_id,
-            platform = platform.as_str(),
-            account_id = %account.account_id,
-            "Routing request to platform-isolated upstream account"
-        );
-
-        ctx.upstream_token = Some(account.access_token.clone());
-        ctx.upstream_account_id = Some(account.account_id.clone());
-        ctx.upstream_user_agent = Some(account.user_agent.clone());
-        ctx.upstream_client_version =
-            crate::forwarder::client_version_from_user_agent(&account.user_agent);
-        ctx.upstream_installation_id = Some(crate::forwarder::gateway_installation_id(
-            &account.account_id,
-            platform.as_str(),
-        ));
 
         let (mut parts, body) = req.into_parts();
         parts.headers.remove(PLATFORM_HEADER);
-        let req = Request::from_parts(parts, body);
-
-        Ok(RequestAction::Forward(req))
+        Ok(RequestAction::Forward(Request::from_parts(parts, body)))
     }
 
     async fn on_response(
@@ -239,7 +417,7 @@ impl Interceptor for CustomInterceptor {
                 .and_then(|v| v.to_str().ok())
                 && !model.is_empty()
             {
-                obs.model.get_or_insert_with(|| model.to_string());
+                obs.current.model.get_or_insert_with(|| model.to_string());
             }
         }
         Ok(resp)
@@ -247,7 +425,7 @@ impl Interceptor for CustomInterceptor {
 
     fn on_response_chunk(&self, ctx: &RequestContext, chunk: &[u8]) {
         if let Ok(mut obs) = ctx.observation.lock() {
-            obs.ingest_chunk(chunk, ctx.started_at.elapsed().as_millis() as u64);
+            obs.ingest_chunk(chunk);
         }
     }
 
@@ -256,15 +434,46 @@ impl Interceptor for CustomInterceptor {
         ctx: &RequestContext,
         msg: WsMessage,
     ) -> Result<WsAction, Box<dyn std::error::Error + Send + Sync>> {
-        if let WsMessage::Text(text) = &msg
-            && let Ok(mut obs) = ctx.observation.lock()
-            && let Ok(value) = serde_json::from_str::<serde_json::Value>(text)
-            && obs.model.is_none()
-            && let Some(model) = value.get("model").and_then(|v| v.as_str())
-        {
-            obs.model = Some(model.to_string());
+        let WsMessage::Text(text) = &msg else {
+            return Ok(WsAction::Forward(msg));
+        };
+        let starts_response = match ctx.observation.lock() {
+            Ok(mut obs) => obs.ingest_client_text(text).is_some_and(|value| {
+                value.get("type").and_then(|t| t.as_str()) == Some("response.create")
+            }),
+            Err(_) => false,
+        };
+        if !starts_response {
+            return Ok(WsAction::Forward(msg));
         }
-        Ok(WsAction::Forward(msg))
+        // Every turn re-checks the user: a long-lived socket must not
+        // outlive a disable, a spent quota or an exhausted share.
+        let (Some(owner), Ok(ready)) = (ctx.metadata.get(META_OWNER), self.runtime.ready().await)
+        else {
+            return Ok(WsAction::Forward(msg));
+        };
+        let mut rejection = self.owner_rejection(&ready, owner).await;
+        if rejection.is_none()
+            && classify_backend_kind(&ctx.target_path).billable()
+            && let Some(account_id) = ctx.metadata.get(META_ACCOUNT)
+        {
+            rejection = Self::quota_rejection(&ready, account_id, owner).await;
+        }
+        let Some(rejection) = rejection else {
+            return Ok(WsAction::Forward(msg));
+        };
+        if let Ok(mut obs) = ctx.observation.lock() {
+            obs.record_error(rejection.code, &rejection.message);
+            obs.current.status = Some(rejection.status.as_u16());
+            obs.current.terminal = Some(Terminal::Failed);
+            let refused = std::mem::replace(
+                &mut obs.current,
+                ResponseObservation::new(std::time::Instant::now()),
+            );
+            obs.finished.push(refused);
+        }
+        self.settle_finished(ctx).await;
+        Ok(WsAction::Reply(rejection.ws_event()))
     }
 
     async fn on_ws_upstream_message(
@@ -277,7 +486,31 @@ impl Interceptor for CustomInterceptor {
         {
             obs.ingest_text(text);
         }
+        self.settle_finished(ctx).await;
         Ok(WsAction::Forward(msg))
+    }
+
+    async fn on_upstream_unauthorized(&self, ctx: &mut RequestContext) -> bool {
+        let (Some(row_id), Some(token)) = (
+            ctx.metadata.get(META_ROW).cloned(),
+            ctx.upstream_token.clone(),
+        ) else {
+            return false;
+        };
+        let Ok(ready) = self.runtime.ready().await else {
+            return false;
+        };
+        match ready.accounts.refresh(&row_id, &token).await {
+            Ok(row) if row.access_token != token => {
+                ctx.upstream_token = Some(row.access_token);
+                true
+            }
+            Ok(_) => false,
+            Err(error) => {
+                warn!(request_id = %ctx.request_id, %error, "upstream token refresh failed");
+                false
+            }
+        }
     }
 
     async fn on_request_finish(
@@ -286,31 +519,17 @@ impl Interceptor for CustomInterceptor {
         status_code: Option<u16>,
         error: Option<&str>,
     ) {
-        // Only an upstream 401 means the cached upstream token went stale;
-        // our own client-auth rejections short-circuit before a token is set.
-        if status_code == Some(401)
-            && ctx.upstream_token.is_some()
-            && let Some(platform) = ctx.metadata.get("platform")
-        {
-            self.account_cache.invalidate(platform).await;
-        }
-
-        let elapsed = ctx.started_at.elapsed();
         info!(
             request_id = %ctx.request_id,
             path = %ctx.path,
-            platform = ctx
-                .metadata
-                .get("platform")
-                .map(String::as_str)
-                .unwrap_or(""),
+            platform = ctx.metadata.get(META_PLATFORM).map(String::as_str).unwrap_or(""),
             status = ?status_code,
-            duration_ms = elapsed.as_millis(),
+            duration_ms = ctx.started_at.elapsed().as_millis(),
             error = ?error,
             "Request finished"
         );
 
-        let snapshot = {
+        let (responses, websocket, client_left) = {
             let Ok(mut obs) = ctx.observation.lock() else {
                 return;
             };
@@ -318,72 +537,34 @@ impl Interceptor for CustomInterceptor {
                 return;
             }
             obs.settled = true;
-            obs.finish_json_body();
-            if obs.error_message.is_none()
-                && let Some(error) = error
-            {
-                obs.error_message = Some(error.to_string());
+            obs.finish_body();
+            let websocket = obs.websocket;
+            let client_left = !websocket && !obs.upstream_complete && ctx.upstream_token.is_some();
+            let mut responses = obs.take_all();
+            if responses.is_empty() && !websocket {
+                // Rejected before reaching upstream, or an empty body.
+                responses.push(std::mem::replace(
+                    &mut obs.current,
+                    ResponseObservation::new(ctx.started_at),
+                ));
             }
-            FinishSnapshot {
-                owner_user_id: obs.owner_user_id.clone(),
-                model: obs.model.clone(),
-                usage: obs.usage.clone(),
-                ttfb_ms: obs.ttfb_ms,
-                error_code: obs.error_code.clone(),
-                error_message: obs.error_message.clone(),
-            }
+            (responses, websocket, client_left)
         };
-
-        let Some(owner_user_id) = snapshot.owner_user_id else {
+        if !ctx.metadata.contains_key(META_OWNER) || responses.is_empty() {
+            return;
+        }
+        let Ok(ready) = self.runtime.ready().await else {
             return;
         };
-
-        let kind = classify_backend_kind(&ctx.target_path);
-        let usage = snapshot.usage.unwrap_or_default();
-        let model = snapshot
-            .model
-            .or_else(|| default_model_for_kind(kind))
-            .unwrap_or_else(|| "codex-chatgpt".to_string());
-        let params = ReportUsageParams {
-            owner_user_id: Some(owner_user_id),
-            model,
-            total_tokens: usage.total_tokens,
-            prompt_tokens: usage.input_tokens,
-            completion_tokens: usage.output_tokens,
-            latency_ms: Some(elapsed.as_millis() as u64),
-            ttfb_ms: snapshot.ttfb_ms,
-            settlement_id: Some(ctx.request_id.clone()),
-            path: Some(ctx.target_path.clone()),
-            status_code: status_code.map(u32::from),
-            tokens_info: Some(usage.to_tokens_info()),
-            error_code: snapshot.error_code,
-            error_message: snapshot.error_message,
-            billable: Some(kind.billable()),
-            is_final: Some(true),
-            stream_end_reason: Some(
-                error
-                    .map(|_| "error".to_string())
-                    .unwrap_or_else(|| "stop".to_string()),
-            ),
+        let status = if websocket {
+            200
+        } else {
+            status_code.unwrap_or(502)
         };
-
-        if let Err(err) = self.ipc.report_usage(params).await {
-            warn!(
-                request_id = %ctx.request_id,
-                error = %err,
-                "Failed to report usage over IPC"
-            );
+        for response in responses {
+            self.settle(&ready, ctx, response, status, error, client_left);
         }
     }
-}
-
-struct FinishSnapshot {
-    owner_user_id: Option<String>,
-    model: Option<String>,
-    usage: Option<super::observe::UsageStats>,
-    ttfb_ms: Option<u64>,
-    error_code: Option<String>,
-    error_message: Option<String>,
 }
 
 fn default_model_for_kind(kind: BackendKind) -> Option<String> {
@@ -394,26 +575,7 @@ fn default_model_for_kind(kind: BackendKind) -> Option<String> {
     }
 }
 
-fn not_ready_error(error: &NotReady) -> Response {
-    match error {
-        NotReady::SetupRequired => auth_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "setup_required",
-            "Gateway setup has not been completed",
-        ),
-        NotReady::Database(_) => database_error(),
-    }
-}
-
-fn database_error() -> Response {
-    auth_error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "database_unavailable",
-        "Failed to verify access token",
-    )
-}
-
-fn auth_error(status: StatusCode, code: &str, message: &str) -> Response {
+pub(crate) fn auth_error(status: StatusCode, code: &str, message: &str) -> Response {
     let body = serde_json::json!({
         "error": {
             "message": message,

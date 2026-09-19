@@ -83,15 +83,40 @@ CREATE TRIGGER trg_set_updated_at_on_openai_accounts
   FOR EACH ROW
   EXECUTE FUNCTION set_updated_at();
 
+-- Users are assigned a ChatGPT account (`openai_accounts.account_id`), not a
+-- single row: one ChatGPT account is logged in once per client platform.
 CREATE TABLE IF NOT EXISTS portal_user_upstream_assignments (
   owner_user_id UUID PRIMARY KEY REFERENCES portal_users(id) ON DELETE CASCADE,
-  source_account_id UUID NOT NULL REFERENCES openai_accounts(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL,
   created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_portal_user_upstream_assignments_source
-  ON portal_user_upstream_assignments (source_account_id);
+ALTER TABLE portal_user_upstream_assignments
+  ADD COLUMN IF NOT EXISTS account_id TEXT;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'portal_user_upstream_assignments'
+      AND column_name = 'source_account_id'
+  ) THEN
+    UPDATE portal_user_upstream_assignments AS assignments
+    SET account_id = accounts.account_id
+    FROM openai_accounts AS accounts
+    WHERE accounts.id = assignments.source_account_id
+      AND assignments.account_id IS NULL;
+    DELETE FROM portal_user_upstream_assignments WHERE account_id IS NULL;
+    ALTER TABLE portal_user_upstream_assignments DROP COLUMN source_account_id;
+  END IF;
+END
+$$;
+ALTER TABLE portal_user_upstream_assignments
+  ALTER COLUMN account_id SET NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_portal_user_upstream_assignments_account
+  ON portal_user_upstream_assignments (account_id);
 
 DROP TRIGGER IF EXISTS trg_set_updated_at_on_portal_user_upstream_assignments
   ON portal_user_upstream_assignments;
@@ -100,196 +125,107 @@ CREATE TRIGGER trg_set_updated_at_on_portal_user_upstream_assignments
   FOR EACH ROW
   EXECUTE FUNCTION set_updated_at();
 
-CREATE TABLE IF NOT EXISTS upstream_quota_windows (
-  source_account_id UUID NOT NULL REFERENCES openai_accounts(id) ON DELETE CASCADE,
-  quota_pool TEXT NOT NULL,
+-- Weekly upstream quota per ChatGPT account. Each assigned user may consume
+-- at most a fixed share of `used_percent`, split by recorded usage.
+CREATE TABLE IF NOT EXISTS upstream_account_quota_windows (
+  account_id TEXT PRIMARY KEY,
   reset_at BIGINT NOT NULL,
   used_percent NUMERIC(12, 8) NOT NULL,
-  carry_in_percent NUMERIC(12, 8) NOT NULL DEFAULT 0,
-  carry_in_user_id UUID REFERENCES portal_users(id) ON DELETE SET NULL,
-  sync_required BOOLEAN NOT NULL DEFAULT false,
-  initialized_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
-  PRIMARY KEY (source_account_id, quota_pool),
-  CHECK (quota_pool IN ('standard', 'spark'))
-);
-
-ALTER TABLE upstream_quota_windows
-  ADD COLUMN IF NOT EXISTS quota_pool TEXT NOT NULL DEFAULT 'standard';
-ALTER TABLE upstream_quota_windows ALTER COLUMN quota_pool DROP DEFAULT;
-ALTER TABLE upstream_quota_windows
-  ADD COLUMN IF NOT EXISTS reset_at BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE upstream_quota_windows ALTER COLUMN reset_at DROP DEFAULT;
-ALTER TABLE upstream_quota_windows
-  ADD COLUMN IF NOT EXISTS used_percent NUMERIC(12, 8) NOT NULL DEFAULT 0;
-ALTER TABLE upstream_quota_windows ALTER COLUMN used_percent DROP DEFAULT;
-ALTER TABLE upstream_quota_windows
-  ADD COLUMN IF NOT EXISTS carry_in_percent NUMERIC(12, 8) NOT NULL DEFAULT 0;
-ALTER TABLE upstream_quota_windows
-  ADD COLUMN IF NOT EXISTS carry_in_user_id UUID
-    REFERENCES portal_users(id) ON DELETE SET NULL;
-ALTER TABLE upstream_quota_windows
-  ADD COLUMN IF NOT EXISTS sync_required BOOLEAN NOT NULL DEFAULT true;
-ALTER TABLE upstream_quota_windows ALTER COLUMN sync_required SET DEFAULT false;
-ALTER TABLE upstream_quota_windows
-  ADD COLUMN IF NOT EXISTS initialized_at TIMESTAMPTZ(6) NOT NULL DEFAULT now();
-ALTER TABLE upstream_quota_windows
-  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now();
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'upstream_quota_windows'::regclass
-      AND contype = 'p'
-      AND pg_get_constraintdef(oid) =
-        'PRIMARY KEY (source_account_id, quota_pool)'
-  ) THEN
-    ALTER TABLE upstream_quota_windows
-      DROP CONSTRAINT upstream_quota_windows_pkey;
-    ALTER TABLE upstream_quota_windows
-      ADD PRIMARY KEY (source_account_id, quota_pool);
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'upstream_quota_windows'::regclass
-      AND conname = 'upstream_quota_windows_quota_pool_check'
-  ) THEN
-    ALTER TABLE upstream_quota_windows
-      ADD CONSTRAINT upstream_quota_windows_quota_pool_check
-      CHECK (quota_pool IN ('standard', 'spark'));
-  END IF;
-END
-$$;
-
-CREATE TABLE IF NOT EXISTS upstream_user_window_usage (
-  source_account_id UUID NOT NULL REFERENCES openai_accounts(id) ON DELETE CASCADE,
-  quota_pool TEXT NOT NULL,
-  reset_at BIGINT NOT NULL,
-  owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
-  usage_amount NUMERIC(20, 8) NOT NULL DEFAULT 0,
-  updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
-  PRIMARY KEY (source_account_id, quota_pool, reset_at, owner_user_id),
-  CHECK (quota_pool IN ('standard', 'spark'))
-);
-
-ALTER TABLE upstream_user_window_usage
-  ADD COLUMN IF NOT EXISTS quota_pool TEXT NOT NULL DEFAULT 'standard';
-ALTER TABLE upstream_user_window_usage ALTER COLUMN quota_pool DROP DEFAULT;
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'upstream_user_window_usage'::regclass
-      AND contype = 'p'
-      AND pg_get_constraintdef(oid) =
-        'PRIMARY KEY (source_account_id, quota_pool, reset_at, owner_user_id)'
-  ) THEN
-    ALTER TABLE upstream_user_window_usage
-      DROP CONSTRAINT upstream_user_window_usage_pkey;
-    ALTER TABLE upstream_user_window_usage
-      ADD PRIMARY KEY (
-        source_account_id, quota_pool, reset_at, owner_user_id
-      );
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'upstream_user_window_usage'::regclass
-      AND conname = 'upstream_user_window_usage_quota_pool_check'
-  ) THEN
-    ALTER TABLE upstream_user_window_usage
-      ADD CONSTRAINT upstream_user_window_usage_quota_pool_check
-      CHECK (quota_pool IN ('standard', 'spark'));
-  END IF;
-END
-$$;
-
-CREATE TABLE IF NOT EXISTS upstream_quota_settlements (
-  settlement_id TEXT NOT NULL,
-  source_account_id UUID NOT NULL REFERENCES openai_accounts(id) ON DELETE CASCADE,
-  quota_pool TEXT NOT NULL,
-  reset_at BIGINT NOT NULL,
-  owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
-  usage_amount NUMERIC(20, 8) NOT NULL,
-  created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
-  PRIMARY KEY (settlement_id, quota_pool),
-  CHECK (quota_pool IN ('standard', 'spark'))
-);
-
-ALTER TABLE upstream_quota_settlements
-  ADD COLUMN IF NOT EXISTS quota_pool TEXT NOT NULL DEFAULT 'standard';
-ALTER TABLE upstream_quota_settlements ALTER COLUMN quota_pool DROP DEFAULT;
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'upstream_quota_settlements'::regclass
-      AND contype = 'p'
-      AND pg_get_constraintdef(oid) =
-        'PRIMARY KEY (settlement_id, quota_pool)'
-  ) THEN
-    ALTER TABLE upstream_quota_settlements
-      DROP CONSTRAINT upstream_quota_settlements_pkey;
-    ALTER TABLE upstream_quota_settlements
-      ADD PRIMARY KEY (settlement_id, quota_pool);
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_constraint
-    WHERE conrelid = 'upstream_quota_settlements'::regclass
-      AND conname = 'upstream_quota_settlements_quota_pool_check'
-  ) THEN
-    ALTER TABLE upstream_quota_settlements
-      ADD CONSTRAINT upstream_quota_settlements_quota_pool_check
-      CHECK (quota_pool IN ('standard', 'spark'));
-  END IF;
-END
-$$;
-
-DROP INDEX IF EXISTS idx_upstream_quota_settlements_window;
-CREATE INDEX IF NOT EXISTS idx_upstream_quota_settlements_window
-  ON upstream_quota_settlements (source_account_id, quota_pool, reset_at);
-
-CREATE TABLE IF NOT EXISTS api_keys (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  api_key TEXT NOT NULL UNIQUE,
-  quota NUMERIC(20, 8),
-  used NUMERIC(20, 8) NOT NULL DEFAULT 0,
-  expires_at TIMESTAMPTZ(6),
-  revoked_at TIMESTAMPTZ(6),
+  synced_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
   created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_api_keys_owner_user_id
-  ON api_keys (owner_user_id);
-CREATE INDEX IF NOT EXISTS idx_api_keys_expires_at
-  ON api_keys (expires_at);
+CREATE TABLE IF NOT EXISTS upstream_account_user_usage (
+  account_id TEXT NOT NULL,
+  reset_at BIGINT NOT NULL,
+  owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+  usage_amount NUMERIC(20, 8) NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, reset_at, owner_user_id)
+);
 
-DROP TRIGGER IF EXISTS trg_set_updated_at_on_api_keys ON api_keys;
-CREATE TRIGGER trg_set_updated_at_on_api_keys
-  BEFORE UPDATE ON api_keys
-  FOR EACH ROW
-  EXECUTE FUNCTION set_updated_at();
+CREATE TABLE IF NOT EXISTS upstream_account_quota_settlements (
+  settlement_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  reset_at BIGINT NOT NULL,
+  owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+  usage_amount NUMERIC(20, 8) NOT NULL,
+  created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_upstream_account_quota_settlements_created
+  ON upstream_account_quota_settlements (created_at);
+
+-- Carry the per-row quota tables over to per-account ones, dropping the
+-- spark pool and the carry-in bookkeeping.
+DO $$
+BEGIN
+  IF to_regclass(current_schema() || '.upstream_quota_windows') IS NOT NULL THEN
+    INSERT INTO upstream_account_quota_windows (account_id, reset_at, used_percent)
+    SELECT DISTINCT ON (accounts.account_id)
+      accounts.account_id, windows.reset_at, windows.used_percent
+    FROM upstream_quota_windows AS windows
+    JOIN openai_accounts AS accounts ON accounts.id = windows.source_account_id
+    WHERE windows.quota_pool = 'standard'
+    ORDER BY accounts.account_id, windows.reset_at DESC, windows.used_percent DESC
+    ON CONFLICT (account_id) DO NOTHING;
+  END IF;
+  IF to_regclass(current_schema() || '.upstream_user_window_usage') IS NOT NULL THEN
+    INSERT INTO upstream_account_user_usage (
+      account_id, reset_at, owner_user_id, usage_amount
+    )
+    SELECT accounts.account_id, usage.reset_at, usage.owner_user_id,
+      SUM(usage.usage_amount)
+    FROM upstream_user_window_usage AS usage
+    JOIN openai_accounts AS accounts ON accounts.id = usage.source_account_id
+    WHERE usage.quota_pool = 'standard'
+    GROUP BY 1, 2, 3
+    ON CONFLICT (account_id, reset_at, owner_user_id) DO NOTHING;
+  END IF;
+END
+$$;
+DROP TABLE IF EXISTS upstream_quota_settlements;
+DROP TABLE IF EXISTS upstream_user_window_usage;
+DROP TABLE IF EXISTS upstream_quota_windows;
+
+-- API keys are gone. Keep any quota they carried before dropping them.
+DO $$
+BEGIN
+  IF to_regclass(current_schema() || '.api_keys') IS NOT NULL THEN
+    UPDATE portal_users users
+    SET
+      quota = keys.quota,
+      used = COALESCE(keys.used, 0)
+    FROM (
+      SELECT DISTINCT ON (owner_user_id)
+        owner_user_id,
+        quota,
+        used
+      FROM api_keys
+      WHERE revoked_at IS NULL
+      ORDER BY
+        owner_user_id,
+        CASE WHEN name = 'Codex client' THEN 0 ELSE 1 END,
+        updated_at DESC
+    ) keys
+    WHERE keys.owner_user_id = users.id
+      AND users.quota IS NULL
+      AND COALESCE(users.used, 0) = 0;
+  END IF;
+END
+$$;
+DROP TABLE IF EXISTS model_response_log_hourly_rollups;
+DROP TABLE IF EXISTS api_keys CASCADE;
 
 CREATE TABLE IF NOT EXISTS codex_client_refresh_tokens (
   token_hash TEXT PRIMARY KEY,
-  api_key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL,
   owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
   email TEXT NOT NULL,
   expires_at TIMESTAMPTZ(6) NOT NULL,
   created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
 );
-
-ALTER TABLE codex_client_refresh_tokens
-  ALTER COLUMN api_key_id DROP NOT NULL;
 
 -- Access tokens are bound to a session and only honoured while the session
 -- still holds an unexpired refresh token.
@@ -300,8 +236,7 @@ CREATE INDEX IF NOT EXISTS idx_codex_client_refresh_tokens_session
 
 CREATE INDEX IF NOT EXISTS idx_codex_client_refresh_tokens_owner
   ON codex_client_refresh_tokens (owner_user_id);
-CREATE INDEX IF NOT EXISTS idx_codex_client_refresh_tokens_api_key
-  ON codex_client_refresh_tokens (api_key_id);
+ALTER TABLE codex_client_refresh_tokens DROP COLUMN IF EXISTS api_key_id;
 CREATE INDEX IF NOT EXISTS idx_codex_client_refresh_tokens_expires
   ON codex_client_refresh_tokens (expires_at);
 
@@ -320,7 +255,8 @@ CREATE TABLE IF NOT EXISTS model_response_logs (
   stream_end_reason TEXT,
   path TEXT NOT NULL,
   model_id TEXT,
-  key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL,
+  -- API keys are gone; the column only keeps history from that era.
+  key_id UUID,
   owner_user_id UUID REFERENCES portal_users(id) ON DELETE SET NULL,
   service_tier TEXT,
   status_code INTEGER,
@@ -338,8 +274,7 @@ CREATE TABLE IF NOT EXISTS model_response_logs (
 
 CREATE INDEX IF NOT EXISTS idx_model_response_logs_request_time
   ON model_response_logs (request_time DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_model_response_logs_key_request_time
-  ON model_response_logs (key_id, request_time DESC, id DESC);
+DROP INDEX IF EXISTS idx_model_response_logs_key_request_time;
 CREATE INDEX IF NOT EXISTS idx_model_response_logs_owner_request_time
   ON model_response_logs (owner_user_id, request_time DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_model_response_logs_model_id
@@ -352,43 +287,46 @@ CREATE TRIGGER trg_set_updated_at_on_model_response_logs
   FOR EACH ROW
   EXECUTE FUNCTION set_updated_at();
 
-CREATE TABLE IF NOT EXISTS model_response_log_hourly_rollups (
+
+DROP TRIGGER IF EXISTS trg_upsert_model_response_log_hourly_rollup
+  ON model_response_logs;
+DROP FUNCTION IF EXISTS upsert_model_response_log_hourly_rollup();
+
+-- Hourly usage per portal user and model, maintained by settlement batches.
+CREATE TABLE IF NOT EXISTS model_response_log_owner_hourly_rollups (
   hour_bucket TIMESTAMPTZ(6) NOT NULL,
-  key_id UUID NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+  owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
   model_id TEXT NOT NULL,
   request_count BIGINT NOT NULL DEFAULT 0,
   total_tokens BIGINT NOT NULL DEFAULT 0,
   total_cost NUMERIC(20, 8) NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
-  PRIMARY KEY (hour_bucket, key_id, model_id)
+  PRIMARY KEY (hour_bucket, owner_user_id, model_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_model_response_log_rollups_key_hour
-  ON model_response_log_hourly_rollups (key_id, hour_bucket DESC);
-CREATE INDEX IF NOT EXISTS idx_model_response_log_rollups_model_hour
-  ON model_response_log_hourly_rollups (model_id, hour_bucket DESC);
+CREATE INDEX IF NOT EXISTS idx_model_response_log_owner_rollups_owner_hour
+  ON model_response_log_owner_hourly_rollups (owner_user_id, hour_bucket DESC);
+CREATE INDEX IF NOT EXISTS idx_model_response_log_owner_rollups_model_hour
+  ON model_response_log_owner_hourly_rollups (model_id, hour_bucket DESC);
 
-DROP TRIGGER IF EXISTS trg_upsert_model_response_log_hourly_rollup
-  ON model_response_logs;
-DROP FUNCTION IF EXISTS upsert_model_response_log_hourly_rollup();
-
-UPDATE portal_users users
-SET
-  quota = keys.quota,
-  used = COALESCE(keys.used, 0)
-FROM (
-  SELECT DISTINCT ON (owner_user_id)
-    owner_user_id,
-    quota,
-    used
-  FROM api_keys
-  WHERE revoked_at IS NULL
-  ORDER BY
-    owner_user_id,
-    CASE WHEN name = 'Codex client' THEN 0 ELSE 1 END,
-    updated_at DESC
-) keys
-WHERE keys.owner_user_id = users.id
-  AND users.quota IS NULL
-  AND COALESCE(users.used, 0) = 0;
+-- One-time backfill from existing logs; later rows come from settlements.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM model_response_log_owner_hourly_rollups) THEN
+    INSERT INTO model_response_log_owner_hourly_rollups (
+      hour_bucket, owner_user_id, model_id, request_count, total_tokens, total_cost
+    )
+    SELECT
+      date_trunc('hour', request_time),
+      owner_user_id,
+      COALESCE(NULLIF(BTRIM(model_id), ''), 'unknown'),
+      COUNT(*),
+      SUM(COALESCE(total_tokens, 0)),
+      SUM(COALESCE(cost, 0))
+    FROM model_response_logs
+    WHERE owner_user_id IS NOT NULL
+    GROUP BY 1, 2, 3;
+  END IF;
+END
+$$;

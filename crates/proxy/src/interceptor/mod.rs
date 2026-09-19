@@ -133,6 +133,8 @@ pub enum WsAction {
     Forward(WsMessage),
     /// Drop this message (do not forward).
     Drop,
+    /// Do not forward; answer the sender with this message instead.
+    Reply(WsMessage),
 }
 
 /// Core trait for intercepting and customizing proxy behavior.
@@ -169,6 +171,12 @@ pub trait Interceptor: Send + Sync {
         ctx: &RequestContext,
         msg: WsMessage,
     ) -> Result<WsAction, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Upstream rejected the credentials the request was sent with. Return
+    /// `true` after replacing them in `ctx` to have the request retried once.
+    async fn on_upstream_unauthorized(&self, _ctx: &mut RequestContext) -> bool {
+        false
+    }
 
     /// Hook executed when request completes or connection closes.
     async fn on_request_finish(

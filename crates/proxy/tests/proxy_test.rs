@@ -1,16 +1,12 @@
 mod common;
 
-use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
-use axum::routing::get;
-use cocodex_proxy::config::ProxyConfig;
 use cocodex_proxy::create_router;
 use cocodex_proxy::interceptor::{Interceptor, RequestAction, RequestContext, WsAction};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tower::ServiceExt;
 
@@ -75,14 +71,7 @@ async fn test_interceptor_short_circuit_on_backend_api() {
         intercepted: AtomicBool::new(false),
     });
 
-    let config = ProxyConfig {
-        bind_addr: "127.0.0.1:53141".parse().unwrap(),
-        node_backend_url: "http://127.0.0.1:53142".to_string(),
-        upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
-        ipc_socket_path: "./data/test-ipc.sock".to_string(),
-        public_app_url: "http://localhost:53332".to_string(),
-        settings: common::offline_settings(),
-    };
+    let config = common::config(common::offline_settings(), "https://chatgpt.com");
 
     let app = create_router(config, Some(interceptor.clone()));
 
@@ -111,14 +100,7 @@ async fn test_openai_v1_base_url_is_handled_as_backend_api() {
         intercepted: AtomicBool::new(false),
     });
 
-    let config = ProxyConfig {
-        bind_addr: "127.0.0.1:53141".parse().unwrap(),
-        node_backend_url: "http://127.0.0.1:53142".to_string(),
-        upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
-        ipc_socket_path: "./data/test-ipc.sock".to_string(),
-        public_app_url: "http://localhost:53332".to_string(),
-        settings: common::offline_settings(),
-    };
+    let config = common::config(common::offline_settings(), "https://chatgpt.com");
 
     let app = create_router(config, Some(interceptor.clone()));
 
@@ -140,14 +122,7 @@ async fn test_openai_v1_base_url_is_handled_as_backend_api() {
 
 #[tokio::test]
 async fn test_backend_api_requires_access_token() {
-    let config = ProxyConfig {
-        bind_addr: "127.0.0.1:53141".parse().unwrap(),
-        node_backend_url: "http://127.0.0.1:53142".to_string(),
-        upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
-        ipc_socket_path: "./data/test-ipc.sock".to_string(),
-        public_app_url: "http://localhost:53332".to_string(),
-        settings: common::offline_settings(),
-    };
+    let config = common::config(common::offline_settings(), "https://chatgpt.com");
 
     let app = create_router(config, None);
     let request = Request::builder()
@@ -157,52 +132,6 @@ async fn test_backend_api_requires_access_token() {
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn test_fallback_reverse_proxies_to_node_backend() {
-    // 1. Spawn a mock Node.js server
-    let mock_node = Router::new().route(
-        "/api/users",
-        get(|| async {
-            Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"users":[]}"#))
-                .unwrap()
-        }),
-    );
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mock_port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        axum::serve(listener, mock_node).await.unwrap();
-    });
-
-    // 2. Configure proxy pointing to mock Node.js server
-    let config = ProxyConfig {
-        bind_addr: "127.0.0.1:53141".parse().unwrap(),
-        node_backend_url: format!("http://127.0.0.1:{mock_port}"),
-        upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
-        ipc_socket_path: "./data/test-ipc.sock".to_string(),
-        public_app_url: "http://localhost:53332".to_string(),
-        settings: common::offline_settings(),
-    };
-
-    let app = create_router(config, None);
-
-    // 3. Send request to /api/users through proxy
-    let request = Request::builder()
-        .uri("/api/users")
-        .method("GET")
-        .body(Body::empty())
-        .unwrap();
-
-    let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = to_bytes(response.into_body(), 1024).await.unwrap();
-    assert_eq!(&body_bytes[..], br#"{"users":[]}"#);
 }
 
 #[tokio::test]
@@ -268,45 +197,15 @@ async fn test_path_normalization() {
 }
 
 #[tokio::test]
-async fn test_codex_client_device_routes_fallback_to_node() {
-    // Mock Node.js server handling device approval
-    let mock_node = Router::new().route(
-        "/api/admin/info",
-        axum::routing::post(|| async {
-            Response::builder()
-                .status(StatusCode::OK)
-                .body(Body::from(r#"{"status":"admin-ok"}"#))
-                .unwrap()
-        }),
+async fn test_unknown_paths_are_not_found() {
+    let app = create_router(
+        common::config(common::offline_settings(), "https://chatgpt.com"),
+        None,
     );
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mock_port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        axum::serve(listener, mock_node).await.unwrap();
-    });
-
-    let config = ProxyConfig {
-        bind_addr: "127.0.0.1:53141".parse().unwrap(),
-        node_backend_url: format!("http://127.0.0.1:{mock_port}"),
-        upstream_chatgpt_origin: "https://chatgpt.com".to_string(),
-        ipc_socket_path: "./data/test-ipc.sock".to_string(),
-        public_app_url: "http://localhost:53332".to_string(),
-        settings: common::offline_settings(),
-    };
-
-    let app = create_router(config, None);
-
-    // Ensure /api/admin/... falls through to Node.js and is NOT intercepted as an upstream codex request
     let request = Request::builder()
-        .uri("/api/admin/info")
-        .method("POST")
+        .uri("/nothing-here")
         .body(Body::empty())
         .unwrap();
-
     let response = app.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    let body_bytes = to_bytes(response.into_body(), 1024).await.unwrap();
-    assert_eq!(&body_bytes[..], br#"{"status":"admin-ok"}"#);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

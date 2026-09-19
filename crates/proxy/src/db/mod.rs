@@ -1,7 +1,13 @@
 //! Postgres access. The schema lives in `sql/init.sql` and is applied on
 //! startup, exactly as the Node backend did.
 
+pub mod accounts;
+pub mod assignments;
 pub mod client_sessions;
+pub mod invitations;
+pub mod logs;
+pub mod quota;
+pub mod settlements;
 pub mod users;
 
 use std::str::FromStr;
@@ -11,7 +17,13 @@ use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{PgConnection, PgPool};
 
-const INIT_SCHEMA_SQL: &str = include_str!("../../../../sql/init.sql");
+/// Timestamps as JavaScript's `toISOString()` renders them, which is what
+/// the console has always received.
+pub fn iso(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+pub(crate) const INIT_SCHEMA_SQL: &str = include_str!("../../../../sql/init.sql");
 /// Shared with the Node backend so both never run the schema concurrently.
 const SCHEMA_INIT_LOCK_KEY: i64 = 8_453_201_114_257;
 

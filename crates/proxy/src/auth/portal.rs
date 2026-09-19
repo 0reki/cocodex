@@ -55,3 +55,41 @@ pub fn verify_portal_token(
     };
     (claims.typ == kind && !claims.sub.is_empty() && claims.exp > now_secs()).then_some(claims)
 }
+
+impl PortalTokenKind {
+    fn ttl_secs(self) -> u64 {
+        let (name, fallback) = match self {
+            PortalTokenKind::Access => ("ADMIN_ACCESS_TOKEN_TTL_SECONDS", 10 * 24 * 60 * 60),
+            PortalTokenKind::Refresh => ("ADMIN_REFRESH_TOKEN_TTL_SECONDS", 30 * 24 * 60 * 60),
+        };
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| value.floor() as u64)
+            .unwrap_or(fallback)
+    }
+}
+
+pub struct IssuedPortalToken {
+    pub token: String,
+    pub expires_at: u64,
+}
+
+pub fn issue_portal_token(
+    secret: &[u8],
+    user_id: &str,
+    kind: PortalTokenKind,
+) -> IssuedPortalToken {
+    let iat = now_secs();
+    let claims = PortalClaims {
+        sub: user_id.to_string(),
+        typ: kind,
+        iat,
+        exp: iat + kind.ttl_secs(),
+    };
+    IssuedPortalToken {
+        token: super::jwt::encode_jwt(secret, &claims),
+        expires_at: claims.exp,
+    }
+}

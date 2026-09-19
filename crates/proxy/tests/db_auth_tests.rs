@@ -5,10 +5,8 @@ use axum::http::{Request, StatusCode};
 use cocodex_proxy::auth::jwt::{ClientJwt, now_secs};
 use cocodex_proxy::auth::portal::{PortalTokenKind, verify_portal_token};
 use cocodex_proxy::auth::session::{CodexClientSessionStore, create_pkce_pair};
-use cocodex_proxy::config::ProxyConfig;
 use cocodex_proxy::create_router;
-use cocodex_proxy::ipc::OwnerAuthCache;
-use cocodex_proxy::runtime::{OwnerStatus, Runtime};
+use cocodex_proxy::runtime::OwnerStatus;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -95,7 +93,8 @@ async fn db_sessions_rotate_and_revoke() {
 async fn owner_status_follows_user_row() {
     let db = common::test_db().await;
     let user_id = db.create_user("bob").await;
-    let runtime = Runtime::new(db.settings(), OwnerAuthCache::default());
+    let (_, runtime) =
+        cocodex_proxy::build(common::config(db.settings(), "http://127.0.0.1:9"), None);
     let ready = runtime.ready().await.unwrap();
 
     assert!(matches!(
@@ -139,17 +138,7 @@ async fn owner_status_follows_user_row() {
 async fn browser_authorize_uses_portal_token() {
     let db = common::test_db().await;
     let user_id = db.create_user("dave").await;
-    let app = create_router(
-        ProxyConfig {
-            bind_addr: "127.0.0.1:0".parse().unwrap(),
-            node_backend_url: "http://127.0.0.1:9".to_string(),
-            upstream_chatgpt_origin: "http://127.0.0.1:9".to_string(),
-            ipc_socket_path: "/nonexistent.sock".to_string(),
-            public_app_url: "http://localhost:53332".to_string(),
-            settings: db.settings(),
-        },
-        None,
-    );
+    let app = create_router(common::config(db.settings(), "http://127.0.0.1:9"), None);
     let (_, challenge) = create_pkce_pair();
     let body = serde_json::json!({
         "redirectUri": "http://localhost:1455/auth/callback",
