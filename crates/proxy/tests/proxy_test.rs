@@ -1,13 +1,13 @@
-use axum::body::{to_bytes, Body};
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
-use axum::Router;
 use cocodex_proxy::config::ProxyConfig;
 use cocodex_proxy::create_router;
 use cocodex_proxy::interceptor::{Interceptor, RequestAction, RequestContext, WsAction};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tower::ServiceExt;
@@ -303,4 +303,3 @@ async fn test_codex_client_device_routes_fallback_to_node() {
     let body_bytes = to_bytes(response.into_body(), 1024).await.unwrap();
     assert_eq!(&body_bytes[..], br#"{"status":"admin-ok"}"#);
 }
-

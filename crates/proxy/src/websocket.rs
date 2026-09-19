@@ -5,8 +5,8 @@ use futures_util::{SinkExt, StreamExt};
 use http::header::HOST;
 use std::sync::Arc;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as TungsteniteWsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::{debug, info, warn};
 use url::Url;
 

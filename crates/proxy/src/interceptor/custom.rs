@@ -1,14 +1,12 @@
-use super::observe::{classify_backend_kind, BackendKind};
-use super::platform::{detect_platform, PLATFORM_HEADER};
+use super::observe::{BackendKind, classify_backend_kind};
+use super::platform::{PLATFORM_HEADER, detect_platform};
 use super::{Interceptor, RequestAction, RequestContext, WsAction};
 use crate::auth::jwt::{ClientJwt, JwtError};
-use crate::ipc::protocol::{
-    ReportUsageParams, ResolveUpstreamAccountResult, VerifyOwnerResult,
-};
+use crate::ipc::protocol::{ReportUsageParams, ResolveUpstreamAccountResult, VerifyOwnerResult};
 use crate::ipc::{IpcClient, OwnerAuthCache, UpstreamAccountCache};
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::http::header::{HeaderValue, CONTENT_TYPE};
+use axum::http::header::{CONTENT_TYPE, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use http::Request;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -147,7 +145,9 @@ impl Interceptor for CustomInterceptor {
         }
         if !verified.valid || verified.user.is_none() {
             let (status, code, message) = map_verify_error(verified.error.as_deref());
-            return Ok(RequestAction::ShortCircuit(auth_error(status, code, message)));
+            return Ok(RequestAction::ShortCircuit(auth_error(
+                status, code, message,
+            )));
         }
 
         let account = match self.resolve_platform_account(platform.as_str()).await {
@@ -215,7 +215,10 @@ impl Interceptor for CustomInterceptor {
         resp: Response,
     ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
         if let Ok(mut obs) = ctx.observation.lock() {
-            if let Some(content_type) = resp.headers().get(CONTENT_TYPE).and_then(|v| v.to_str().ok())
+            if let Some(content_type) = resp
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
             {
                 if content_type.contains("text/event-stream") {
                     obs.is_sse = Some(true);

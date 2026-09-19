@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -370,8 +370,7 @@ impl ClientJwt {
             .map_err(|_| JwtError::Invalid)?;
         let claims: CodexJwtClaims =
             serde_json::from_slice(&payload_json).map_err(|_| JwtError::Invalid)?;
-        if claims.openai_auth.chatgpt_account_id.trim().is_empty() || claims.sub.trim().is_empty()
-        {
+        if claims.openai_auth.chatgpt_account_id.trim().is_empty() || claims.sub.trim().is_empty() {
             return Err(JwtError::Invalid);
         }
         if claims.exp <= now_secs() {

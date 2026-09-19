@@ -57,7 +57,10 @@ pub fn detect_platform(headers: &HeaderMap) -> Option<Platform> {
         }
     }
 
-    if let Some(user_agent) = headers.get(http::header::USER_AGENT).and_then(|v| v.to_str().ok()) {
+    if let Some(user_agent) = headers
+        .get(http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+    {
         if let Some(platform) = detect_platform_from_user_agent(user_agent) {
             return Some(platform);
         }
@@ -68,7 +71,8 @@ pub fn detect_platform(headers: &HeaderMap) -> Option<Platform> {
 
 /// Matches a Codex CLI / IDE User-Agent string to its originating OS.
 pub fn detect_platform_from_user_agent(user_agent: &str) -> Option<Platform> {
-    let token = extract_codex_os_token(user_agent).unwrap_or_else(|| user_agent.to_ascii_lowercase());
+    let token =
+        extract_codex_os_token(user_agent).unwrap_or_else(|| user_agent.to_ascii_lowercase());
     classify_os_token(&token)
 }
 
@@ -263,9 +267,7 @@ mod tests {
             Some(Platform::Darwin)
         );
         assert_eq!(
-            detect_platform_from_user_agent(
-                "codex_vscode/0.4.0 (Mac OS 15.1.0; arm64) unknown"
-            ),
+            detect_platform_from_user_agent("codex_vscode/0.4.0 (Mac OS 15.1.0; arm64) unknown"),
             Some(Platform::Darwin)
         );
         assert_eq!(

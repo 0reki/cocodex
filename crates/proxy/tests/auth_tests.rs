@@ -1,8 +1,8 @@
 use cocodex_proxy::auth::jwt::{
-    chatgpt_user_id_for, ClientJwt, JwtError, ACCESS_TTL_SECS, ID_TTL_SECS,
+    ACCESS_TTL_SECS, ClientJwt, ID_TTL_SECS, JwtError, chatgpt_user_id_for,
 };
 use cocodex_proxy::auth::session::{
-    create_pkce_pair, generate_user_code, verify_pkce, CodexClientSessionStore, PollDeviceResult,
+    CodexClientSessionStore, PollDeviceResult, create_pkce_pair, generate_user_code, verify_pkce,
 };
 
 #[test]
@@ -39,16 +39,15 @@ async fn test_device_auth_flow() {
     );
     assert!(approve_res.is_ok());
 
-    let (auth_code, code_challenge, code_verifier) = match store
-        .poll_device_token(&device_resp.device_auth_id, &device_resp.user_code)
-    {
-        PollDeviceResult::Complete {
-            authorization_code,
-            code_challenge,
-            code_verifier,
-        } => (authorization_code, code_challenge, code_verifier),
-        other => panic!("Expected Complete, got {:?}", other),
-    };
+    let (auth_code, code_challenge, code_verifier) =
+        match store.poll_device_token(&device_resp.device_auth_id, &device_resp.user_code) {
+            PollDeviceResult::Complete {
+                authorization_code,
+                code_challenge,
+                code_verifier,
+            } => (authorization_code, code_challenge, code_verifier),
+            other => panic!("Expected Complete, got {:?}", other),
+        };
 
     assert!(verify_pkce(&code_verifier, &code_challenge));
 

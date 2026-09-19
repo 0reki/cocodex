@@ -7,4 +7,3 @@ pub use account_cache::UpstreamAccountCache;
 pub use client::{IpcClient, IpcClientError};
 pub use owner_cache::OwnerAuthCache;
 pub use protocol::*;
-

@@ -1,9 +1,9 @@
 use std::sync::{Arc, Mutex};
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
-use axum::Router;
 use cocodex_proxy::auth::jwt::ClientJwt;
 use cocodex_proxy::config::ProxyConfig;
 use cocodex_proxy::create_router;
@@ -216,4 +216,3 @@ async fn test_platform_account_routing_end_to_end() {
 
     let _ = std::fs::remove_file(&socket_path);
 }
-

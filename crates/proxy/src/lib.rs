@@ -6,16 +6,16 @@ pub mod ipc;
 pub mod reverse_proxy;
 pub mod websocket;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::http::Request;
 use axum::response::Response;
 use axum::routing::any;
-use axum::Router;
 use config::ProxyConfig;
 use forwarder::BackendForwarder;
-use interceptor::custom::CustomInterceptor;
 use interceptor::SharedInterceptor;
+use interceptor::custom::CustomInterceptor;
 use reverse_proxy::NodeReverseProxy;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -38,9 +38,8 @@ pub struct AppState {
 pub fn create_router(config: ProxyConfig, interceptor: Option<SharedInterceptor>) -> Router {
     let ipc_client = IpcClient::new(&config.ipc_socket_path);
     let jwt = ClientJwt::from_env();
-    let interceptor = interceptor.unwrap_or_else(|| {
-        Arc::new(CustomInterceptor::new(ipc_client.clone(), jwt.clone()))
-    });
+    let interceptor = interceptor
+        .unwrap_or_else(|| Arc::new(CustomInterceptor::new(ipc_client.clone(), jwt.clone())));
     let forwarder = Arc::new(BackendForwarder::new(
         config.upstream_chatgpt_origin.clone(),
         interceptor,
@@ -61,38 +60,14 @@ pub fn create_router(config: ProxyConfig, interceptor: Option<SharedInterceptor>
 
     Router::new()
         .merge(auth::routes::create_auth_router())
-        .route(
-            "/backend-api/{*path}",
-            any(handle_backend_api),
-        )
-        .route(
-            "/backend-api",
-            any(handle_backend_api),
-        )
-        .route(
-            "/wham/{*path}",
-            any(handle_backend_api),
-        )
-        .route(
-            "/wham",
-            any(handle_backend_api),
-        )
-        .route(
-            "/api/codex/{*path}",
-            any(handle_backend_api),
-        )
-        .route(
-            "/api/codex",
-            any(handle_backend_api),
-        )
-        .route(
-            "/v1/{*path}",
-            any(handle_backend_api),
-        )
-        .route(
-            "/v1",
-            any(handle_backend_api),
-        )
+        .route("/backend-api/{*path}", any(handle_backend_api))
+        .route("/backend-api", any(handle_backend_api))
+        .route("/wham/{*path}", any(handle_backend_api))
+        .route("/wham", any(handle_backend_api))
+        .route("/api/codex/{*path}", any(handle_backend_api))
+        .route("/api/codex", any(handle_backend_api))
+        .route("/v1/{*path}", any(handle_backend_api))
+        .route("/v1", any(handle_backend_api))
         .fallback(handle_fallback)
         .layer(
             CorsLayer::new()

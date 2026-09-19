@@ -2,7 +2,10 @@ use clap::Parser;
 use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "cocodex-proxy", about = "High-performance Codex subscription proxy")]
+#[command(
+    name = "cocodex-proxy",
+    about = "High-performance Codex subscription proxy"
+)]
 pub struct ProxyArgs {
     /// Host to bind on
     #[arg(long, env = "HOST", default_value = "0.0.0.0")]
@@ -21,11 +24,7 @@ pub struct ProxyArgs {
     pub node_backend_url: String,
 
     /// Target ChatGPT upstream origin
-    #[arg(
-        long,
-        env = "CHATGPT_ORIGIN",
-        default_value = "https://chatgpt.com"
-    )]
+    #[arg(long, env = "CHATGPT_ORIGIN", default_value = "https://chatgpt.com")]
     pub upstream_chatgpt_origin: String,
 
     /// Unix Domain Socket path for IPC with Node.js backend
@@ -37,11 +36,7 @@ pub struct ProxyArgs {
     pub ipc_socket_path: String,
 
     /// Public frontend application URL for OAuth redirects
-    #[arg(
-        long,
-        env = "PUBLIC_APP_URL",
-        default_value = "http://localhost:53332"
-    )]
+    #[arg(long, env = "PUBLIC_APP_URL", default_value = "http://localhost:53332")]
     pub public_app_url: String,
 }
 
@@ -78,4 +73,3 @@ impl ProxyConfig {
         })
     }
 }
-

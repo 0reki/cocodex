@@ -40,7 +40,10 @@ impl RequestContext {
         let client_token = client_headers
             .get(http::header::AUTHORIZATION)
             .and_then(|h| h.to_str().ok())
-            .and_then(|val| val.strip_prefix("Bearer ").or_else(|| val.strip_prefix("bearer ")))
+            .and_then(|val| {
+                val.strip_prefix("Bearer ")
+                    .or_else(|| val.strip_prefix("bearer "))
+            })
             .map(|s| s.trim().to_string());
 
         let uri = req.uri().clone();
@@ -177,4 +180,3 @@ pub trait Interceptor: Send + Sync {
 }
 
 pub type SharedInterceptor = Arc<dyn Interceptor>;
-

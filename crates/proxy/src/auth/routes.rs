@@ -11,7 +11,10 @@ use crate::AppState;
 
 pub fn create_auth_router() -> Router<AppState> {
     Router::new()
-        .route("/api/accounts/deviceauth/usercode", post(handle_device_usercode))
+        .route(
+            "/api/accounts/deviceauth/usercode",
+            post(handle_device_usercode),
+        )
         .route("/deviceauth/usercode", post(handle_device_usercode))
         .route("/api/accounts/deviceauth/token", post(handle_device_token))
         .route("/deviceauth/token", post(handle_device_token))
@@ -20,8 +23,14 @@ pub fn create_auth_router() -> Router<AppState> {
         .route("/oauth/token", post(handle_oauth_token))
         .route("/oauth/revoke", post(handle_oauth_revoke))
         .route("/deviceauth/callback", get(handle_deviceauth_callback))
-        .route("/api/codex-client/authorize", post(handle_codex_client_authorize))
-        .route("/api/codex-client/device/approve", post(handle_codex_client_device_approve))
+        .route(
+            "/api/codex-client/authorize",
+            post(handle_codex_client_authorize),
+        )
+        .route(
+            "/api/codex-client/device/approve",
+            post(handle_codex_client_device_approve),
+        )
 }
 
 fn frontend_login_redirect(public_app_url: &str, next_path: &str) -> String {
@@ -39,12 +48,18 @@ fn urlencoding_encode(s: &str) -> String {
 }
 
 fn extract_portal_token(headers: &HeaderMap) -> Option<String> {
-    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+    if let Some(auth) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
         if let Some(token) = auth.strip_prefix("Bearer ") {
             return Some(token.trim().to_string());
         }
     }
-    if let Some(cookie) = headers.get(axum::http::header::COOKIE).and_then(|v| v.to_str().ok()) {
+    if let Some(cookie) = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+    {
         for part in cookie.split(';') {
             let part = part.trim();
             if let Some((name, val)) = part.split_once('=') {
@@ -78,7 +93,10 @@ async fn handle_device_token(
     let device_auth_id = payload.device_auth_id.unwrap_or_default();
     let user_code = payload.user_code.unwrap_or_default();
 
-    match state.sessions.poll_device_token(&device_auth_id, &user_code) {
+    match state
+        .sessions
+        .poll_device_token(&device_auth_id, &user_code)
+    {
         PollDeviceResult::Complete {
             authorization_code,
             code_challenge,
@@ -103,10 +121,7 @@ async fn handle_device_token(
 }
 
 // 3. GET /oauth/authorize
-async fn handle_oauth_authorize(
-    State(state): State<AppState>,
-    uri: axum::http::Uri,
-) -> Redirect {
+async fn handle_oauth_authorize(State(state): State<AppState>, uri: axum::http::Uri) -> Redirect {
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
     let next = format!("/oauth/complete{query}");
     let dest = frontend_login_redirect(&state.public_app_url, &next);
@@ -181,7 +196,7 @@ async fn handle_oauth_token(
                     StatusCode::BAD_REQUEST,
                     Json(json!({ "error": "invalid_request" })),
                 )
-                    .into_response()
+                    .into_response();
             }
         }
     };
@@ -229,10 +244,7 @@ async fn handle_oauth_revoke(
     State(state): State<AppState>,
     Json(payload): Json<OAuthRevokeReq>,
 ) -> Response {
-    let token = payload
-        .token
-        .or(payload.refresh_token)
-        .unwrap_or_default();
+    let token = payload.token.or(payload.refresh_token).unwrap_or_default();
     state.sessions.revoke(&token).await;
     Json(json!({ "revoked": true })).into_response()
 }
@@ -268,7 +280,7 @@ async fn handle_codex_client_authorize(
                     }
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -284,7 +296,7 @@ async fn handle_codex_client_authorize(
                     }
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -300,7 +312,7 @@ async fn handle_codex_client_authorize(
                     }
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -317,7 +329,7 @@ async fn handle_codex_client_authorize(
                     }
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -333,7 +345,7 @@ async fn handle_codex_client_authorize(
                     }
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -358,7 +370,7 @@ async fn handle_codex_client_authorize(
                     }
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -398,7 +410,7 @@ async fn handle_codex_client_device_approve(
                     }
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -414,7 +426,7 @@ async fn handle_codex_client_device_approve(
                     }
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -431,7 +443,7 @@ async fn handle_codex_client_device_approve(
                     }
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -447,7 +459,7 @@ async fn handle_codex_client_device_approve(
                     }
                 })),
             )
-                .into_response()
+                .into_response();
         }
     };
 

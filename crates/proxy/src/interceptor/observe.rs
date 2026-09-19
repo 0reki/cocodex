@@ -52,7 +52,10 @@ impl UsageStats {
             map.insert("total_tokens".into(), self.total_tokens.into());
         }
         if self.cached_input_tokens > 0 {
-            map.insert("cached_input_tokens".into(), self.cached_input_tokens.into());
+            map.insert(
+                "cached_input_tokens".into(),
+                self.cached_input_tokens.into(),
+            );
         }
         if self.cache_write_input_tokens > 0 {
             map.insert(
@@ -105,7 +108,8 @@ impl RequestObservation {
         self.is_sse = Some(false);
         if self.json_buf.len() < JSON_BUFFER_LIMIT {
             let remaining = JSON_BUFFER_LIMIT.saturating_sub(self.json_buf.len());
-            self.json_buf.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            self.json_buf
+                .extend_from_slice(&chunk[..chunk.len().min(remaining)]);
         }
     }
 
@@ -154,7 +158,10 @@ impl RequestObservation {
 }
 
 fn looks_like_sse(chunk: &[u8]) -> bool {
-    let start = chunk.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(0);
+    let start = chunk
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(0);
     let rest = &chunk[start..];
     rest.starts_with(b"event:") || rest.starts_with(b"data:") || rest.starts_with(b"id:")
 }
@@ -193,12 +200,14 @@ fn ingest_json(obs: &mut RequestObservation, value: &Value) {
     if obs.error_code.is_none() {
         if let Some(error) = value.get("error") {
             obs.error_code = string_field(error, &["code", "type"]).map(ToString::to_string);
-            obs.error_message = string_field(error, &["message", "detail"]).map(ToString::to_string);
+            obs.error_message =
+                string_field(error, &["message", "detail"]).map(ToString::to_string);
         } else if let Some(code) = string_field(value, &["code"]) {
             let ty = string_field(value, &["type"]).unwrap_or("");
             if ty.contains("error") || value.get("message").is_some() {
                 obs.error_code = Some(code.to_string());
-                obs.error_message = string_field(value, &["message", "detail"]).map(ToString::to_string);
+                obs.error_message =
+                    string_field(value, &["message", "detail"]).map(ToString::to_string);
             }
         }
     }
@@ -206,16 +215,21 @@ fn ingest_json(obs: &mut RequestObservation, value: &Value) {
 
 fn extract_usage(usage: &Value) -> UsageStats {
     let input = number_field(usage, &["input_tokens", "inputTokens", "prompt_tokens"]);
-    let output = number_field(usage, &["output_tokens", "outputTokens", "completion_tokens"]);
+    let output = number_field(
+        usage,
+        &["output_tokens", "outputTokens", "completion_tokens"],
+    );
     let details = usage.get("input_tokens_details").and_then(Value::as_object);
-    let output_details = usage.get("output_tokens_details").and_then(Value::as_object);
-    let cached = number_field(usage, &["cached_input_tokens", "cachedInputTokens"]).or_else(|| {
-        details.and_then(|d| number_map(d, &["cached_tokens", "cachedTokens"]))
-    });
-    let cache_write = number_field(usage, &["cache_write_input_tokens", "cacheWriteInputTokens"])
-        .or_else(|| {
-            details.and_then(|d| number_map(d, &["cache_write_tokens", "cacheWriteTokens"]))
-        });
+    let output_details = usage
+        .get("output_tokens_details")
+        .and_then(Value::as_object);
+    let cached = number_field(usage, &["cached_input_tokens", "cachedInputTokens"])
+        .or_else(|| details.and_then(|d| number_map(d, &["cached_tokens", "cachedTokens"])));
+    let cache_write = number_field(
+        usage,
+        &["cache_write_input_tokens", "cacheWriteInputTokens"],
+    )
+    .or_else(|| details.and_then(|d| number_map(d, &["cache_write_tokens", "cacheWriteTokens"])));
     let reasoning = number_field(usage, &["reasoning_output_tokens", "reasoningOutputTokens"])
         .or_else(|| {
             output_details.and_then(|d| number_map(d, &["reasoning_tokens", "reasoningTokens"]))

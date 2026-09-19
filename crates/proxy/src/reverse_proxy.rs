@@ -1,5 +1,5 @@
 use axum::body::Body;
-use axum::http::header::{HeaderValue, HOST};
+use axum::http::header::{HOST, HeaderValue};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use reqwest::Client;
@@ -27,7 +27,11 @@ impl NodeReverseProxy {
 
     pub async fn handle_request(&self, req: Request<Body>) -> Response {
         let path = req.uri().path();
-        let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+        let query = req
+            .uri()
+            .query()
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default();
         let target_url_str = format!("{}{path}{query}", self.node_backend_url);
 
         let target_url = match Url::parse(&target_url_str) {
@@ -50,7 +54,10 @@ impl NodeReverseProxy {
         }
 
         if let Some(host) = target_url.host_str() {
-            let port_str = target_url.port().map(|p| format!(":{p}")).unwrap_or_default();
+            let port_str = target_url
+                .port()
+                .map(|p| format!(":{p}"))
+                .unwrap_or_default();
             let host_header = format!("{host}{port_str}");
             if let Ok(hv) = HeaderValue::from_str(&host_header) {
                 forward_headers.insert(HOST, hv);
@@ -116,4 +123,3 @@ fn is_hop_by_hop_header(name: &str) -> bool {
             | "trailer"
     )
 }
-

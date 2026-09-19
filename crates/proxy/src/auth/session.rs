@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
-use super::jwt::{gateway_account_id, now_secs, ClientJwt, ACCESS_TTL_SECS};
+use super::jwt::{ACCESS_TTL_SECS, ClientJwt, gateway_account_id, now_secs};
 use crate::ipc::IpcClient;
 
 const DEVICE_TTL_SECS: u64 = 15 * 60;
@@ -330,7 +330,8 @@ impl CodexClientSessionStore {
             session
         };
 
-        self.issue_tokens(&session.owner_user_id, &session.email).await
+        self.issue_tokens(&session.owner_user_id, &session.email)
+            .await
     }
 
     pub async fn refresh(&self, refresh_token: &str) -> Option<IssuedCodexClientTokens> {
@@ -339,7 +340,8 @@ impl CodexClientSessionStore {
             return None;
         }
         let session = self.consume_refresh_session(token).await?;
-        self.issue_tokens(&session.owner_user_id, &session.email).await
+        self.issue_tokens(&session.owner_user_id, &session.email)
+            .await
     }
 
     pub async fn revoke(&self, token: &str) {
@@ -368,15 +370,18 @@ impl CodexClientSessionStore {
         state.refresh_sessions.remove(normalized);
         if let Ok(claims) = self.jwt.verify_access_token(normalized) {
             let owner = claims.openai_auth.chatgpt_account_id;
-            state.refresh_sessions.retain(|_, session| {
-                gateway_account_id(&session.owner_user_id) != owner
-            });
+            state
+                .refresh_sessions
+                .retain(|_, session| gateway_account_id(&session.owner_user_id) != owner);
         }
     }
 
     async fn consume_refresh_session(&self, refresh_token: &str) -> Option<RefreshSession> {
         if let Some(ipc) = &self.ipc {
-            match ipc.consume_refresh_token(&hash_refresh_token(refresh_token)).await {
+            match ipc
+                .consume_refresh_token(&hash_refresh_token(refresh_token))
+                .await
+            {
                 Ok(Some(record)) => {
                     return Some(RefreshSession {
                         refresh_token: refresh_token.to_string(),

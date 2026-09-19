@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -12,9 +12,8 @@ use tracing::{debug, info, warn};
 use super::account_cache::UpstreamAccountCache;
 use super::owner_cache::OwnerAuthCache;
 use super::protocol::{
-    ApiKeyRecord, JsonRpcRequest, JsonRpcResponse, ReportUsageParams,
-    ResolveUpstreamAccountResult, StoredRefreshToken, VerifyApiKeyResult, VerifyOwnerResult,
-    VerifyPortalTokenResult,
+    ApiKeyRecord, JsonRpcRequest, JsonRpcResponse, ReportUsageParams, ResolveUpstreamAccountResult,
+    StoredRefreshToken, VerifyApiKeyResult, VerifyOwnerResult, VerifyPortalTokenResult,
 };
 
 #[derive(Debug)]
@@ -59,7 +58,6 @@ impl From<serde_json::Error> for IpcClientError {
         Self::Json(e)
     }
 }
-
 
 enum IpcCommand {
     Call {
@@ -110,7 +108,11 @@ impl IpcClient {
         self.account_cache.clone()
     }
 
-    async fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, IpcClientError> {
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, IpcClientError> {
         let id = self.req_counter.fetch_add(1, Ordering::Relaxed).to_string();
         let request = JsonRpcRequest {
             id: Some(id),
@@ -166,9 +168,15 @@ impl IpcClient {
         Ok(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
     }
 
-    pub async fn verify_api_key(&self, api_key: &str) -> Result<VerifyApiKeyResult, IpcClientError> {
+    pub async fn verify_api_key(
+        &self,
+        api_key: &str,
+    ) -> Result<VerifyApiKeyResult, IpcClientError> {
         let res = self
-            .call("auth.verify_api_key", serde_json::json!({ "api_key": api_key }))
+            .call(
+                "auth.verify_api_key",
+                serde_json::json!({ "api_key": api_key }),
+            )
             .await?;
         let parsed: VerifyApiKeyResult = serde_json::from_value(res)?;
         Ok(parsed)
@@ -188,17 +196,29 @@ impl IpcClient {
         Ok(parsed)
     }
 
-    pub async fn resolve_user_api_key(&self, user_id: &str) -> Result<ApiKeyRecord, IpcClientError> {
+    pub async fn resolve_user_api_key(
+        &self,
+        user_id: &str,
+    ) -> Result<ApiKeyRecord, IpcClientError> {
         let res = self
-            .call("auth.resolve_user_api_key", serde_json::json!({ "user_id": user_id }))
+            .call(
+                "auth.resolve_user_api_key",
+                serde_json::json!({ "user_id": user_id }),
+            )
             .await?;
         let parsed: ApiKeyRecord = serde_json::from_value(res)?;
         Ok(parsed)
     }
 
-    pub async fn verify_portal_token(&self, token: &str) -> Result<VerifyPortalTokenResult, IpcClientError> {
+    pub async fn verify_portal_token(
+        &self,
+        token: &str,
+    ) -> Result<VerifyPortalTokenResult, IpcClientError> {
         let res = self
-            .call("auth.verify_portal_token", serde_json::json!({ "token": token }))
+            .call(
+                "auth.verify_portal_token",
+                serde_json::json!({ "token": token }),
+            )
             .await?;
         let parsed: VerifyPortalTokenResult = serde_json::from_value(res)?;
         Ok(parsed)

@@ -2,7 +2,7 @@ use crate::interceptor::{RequestAction, RequestContext, SharedInterceptor};
 use crate::websocket::handle_ws_upgrade;
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::http::header::{HeaderName, HeaderValue, AUTHORIZATION, HOST, USER_AGENT};
+use axum::http::header::{AUTHORIZATION, HOST, HeaderName, HeaderValue, USER_AGENT};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
@@ -99,7 +99,11 @@ impl BackendForwarder {
     }
 
     async fn forward_http(&self, ctx: RequestContext, req: Request<Body>) -> Response {
-        let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+        let query = req
+            .uri()
+            .query()
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default();
         let upstream_url_str = format!("{}{}{query}", self.upstream_origin, ctx.target_path);
 
         let upstream_url = match Url::parse(&upstream_url_str) {
@@ -109,11 +113,7 @@ impl BackendForwarder {
                 self.interceptor
                     .on_request_finish(&ctx, Some(500), Some(&e.to_string()))
                     .await;
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Invalid upstream URL",
-                )
-                    .into_response();
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Invalid upstream URL").into_response();
             }
         };
 
@@ -491,7 +491,10 @@ mod tests {
         );
         assert_eq!(forwarded.get("originator").unwrap(), "codex_cli_rs");
         assert_eq!(forwarded.get("version").unwrap(), "0.154.0");
-        assert_eq!(forwarded.get("chatgpt-account-id").unwrap(), "upstream-account");
+        assert_eq!(
+            forwarded.get("chatgpt-account-id").unwrap(),
+            "upstream-account"
+        );
         assert_eq!(forwarded.get("session-id").unwrap(), "sess-keep");
         assert_eq!(forwarded.get("thread-id").unwrap(), "thread-keep");
         assert_eq!(
