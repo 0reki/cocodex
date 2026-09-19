@@ -21,9 +21,9 @@ pub enum BackendKind {
 
 impl BackendKind {
     /// Kinds whose cost is charged to the user and counted against the
-    /// upstream quota share.
+    /// upstream quota share. Images and Search are logged but free.
     pub fn billable(self) -> bool {
-        matches!(self, Self::Responses | Self::Images)
+        matches!(self, Self::Responses)
     }
 }
 
@@ -328,6 +328,7 @@ mod tests {
             BackendKind::Search
         );
         assert!(classify_backend_kind("/backend-api/codex/responses").billable());
+        assert!(!classify_backend_kind("/backend-api/codex/images/generations").billable());
         assert!(!classify_backend_kind("/backend-api/codex/models").billable());
     }
 

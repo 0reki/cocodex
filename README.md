@@ -82,8 +82,9 @@ WebSocket 的每一轮 `response.create` 都单独检查、单独结算。上游
 
 费用按内置价格（美元 / 百万 Token，可用 `OPENAI_MODEL_PRICING_JSON` 按 slug 覆盖）
 计算，`service_tier: "priority"` 对 GPT-6 Astra、GPT-5.6 系列、GPT-5.5 按 2.5 倍、
-GPT-5.4 按 2 倍计费；Images 和图片工具按 GPT-Image-2 的 text / image Token 计费。
-Search 与其他请求只记日志不计费。
+GPT-5.4 按 2 倍计费；Responses 中图片工具的用量按 GPT-Image-2 的 text / image Token
+计入该次请求。只有 Responses 计费并计入上游额度；Images、Search 与其他请求只记日志，
+不扣费也不计入额度。
 
 | 计费项 | Input | Cached input | Output |
 | --- | ---: | ---: | ---: |
