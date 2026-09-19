@@ -3,7 +3,6 @@ import {
   CircleUserRound,
   Gauge,
   Hexagon,
-  KeyRound,
   LogOut,
   Monitor,
   Wallet,
@@ -85,7 +84,6 @@ const navItems: NavItem[] = [
     icon: Wallet,
     section: "workspace",
   },
-  { href: "/keys", label: "API Keys", icon: KeyRound, section: "workspace" },
   {
     href: "/users",
     label: "用户管理",

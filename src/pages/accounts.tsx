@@ -1,9 +1,8 @@
 import { Spinner } from "@/ui/components/spinner";
-import { ArrowUpRight, Check, EllipsisVertical } from "lucide-react";
+import { ArrowUpRight, EllipsisVertical } from "lucide-react";
 import {
   useCallback,
   useEffect,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -15,14 +14,17 @@ import {
   LoadingState,
   Modal,
   StatusPill,
-  Tooltip,
 } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { useResource } from "@/hooks/use-resource";
 import { jsonBody } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { formatDate, formatUsd, shortId } from "@/lib/format";
-import type { OpenAIAccount, OpenAIAccountsResponse } from "@/types/api";
+import type {
+  OpenAIAccount,
+  OpenAIAccountsResponse,
+  UpstreamPlatform,
+} from "@/types/api";
 import { Button } from "@/ui/components/button";
 import { Checkbox } from "@/ui/components/checkbox";
 import {
@@ -80,18 +82,32 @@ type TestResult = {
   error?: string;
 };
 
-type DeviceAuthStart = {
-  deviceAuthId: string;
-  userCode: string;
-  verificationUrl: string;
-  intervalSeconds: number;
-  expiresAt: string;
+const LOGIN_PLATFORMS: { value: UpstreamPlatform; label: string }[] = [
+  { value: "windows", label: "Windows" },
+  { value: "linux", label: "Linux" },
+  { value: "darwin", label: "macOS" },
+];
+
+function platformLabel(platform: UpstreamPlatform): string {
+  return (
+    { windows: "Windows", linux: "Linux", darwin: "macOS", all: "通用" }[
+      platform
+    ] ?? platform
+  );
+}
+
+type OAuthStart = {
+  authorizeUrl: string;
+  codeVerifier: string;
+  state: string;
+  redirectUri: string;
 };
 
-type DeviceAuthPoll =
-  { status: "pending" } | { status: "complete"; account: OpenAIAccount };
-
-function AccountDeviceAuth({
+// Logs an upstream account in with the same browser OAuth flow the Codex CLI
+// uses: open the authorization URL, sign in, then paste back the redirect the
+// browser lands on. The login is bound to the chosen platform, since each OS
+// is a separate upstream login.
+function AccountOAuthLogin({
   onClose,
   onSaved,
 }: {
@@ -99,132 +115,96 @@ function AccountDeviceAuth({
   onSaved: () => void;
 }) {
   const { api } = useAuth();
-  const started = useRef(false);
-  const [flow, setFlow] = useState<DeviceAuthStart | null>(null);
+  const [platform, setPlatform] = useState<UpstreamPlatform>("windows");
+  const [flow, setFlow] = useState<OAuthStart | null>(null);
+  const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [starting, setStarting] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const start = useCallback(async () => {
-    setStarting(true);
+    setBusy(true);
     setError(null);
-    setCopied(false);
     try {
-      const next = await api<DeviceAuthStart>(
-        "/api/openai-accounts/device-auth/start",
-        {
-          method: "POST",
-        },
-      );
+      const next = await api<OAuthStart>("/api/openai-accounts/oauth/start", {
+        method: "POST",
+        ...jsonBody({ platform }),
+      });
       setFlow(next);
+      window.open(next.authorizeUrl, "_blank", "noopener,noreferrer");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "无法启动设备码登录");
+      setError(cause instanceof Error ? cause.message : "无法启动 OAuth 登录");
     } finally {
-      setStarting(false);
+      setBusy(false);
     }
-  }, [api]);
+  }, [api, platform]);
 
-  useEffect(() => {
-    if (started.current) return;
-    started.current = true;
-    void start();
-  }, [start]);
-
-  useEffect(() => {
-    if (!flow) return;
-    let disposed = false;
-    let timer: number | undefined;
-
-    const poll = async () => {
-      if (Date.now() >= new Date(flow.expiresAt).getTime()) {
-        if (!disposed) {
-          setFlow(null);
-          setError("设备码已过期，请重新开始");
-        }
-        return;
-      }
-      try {
-        const result = await api<DeviceAuthPoll>(
-          "/api/openai-accounts/device-auth/poll",
-          {
-            method: "POST",
-            ...jsonBody({
-              deviceAuthId: flow.deviceAuthId,
-              userCode: flow.userCode,
-            }),
-          },
-        );
-        if (disposed) return;
-        if (result.status === "complete") {
-          onSaved();
-          return;
-        }
-        timer = window.setTimeout(
-          () => void poll(),
-          Math.max(1, flow.intervalSeconds) * 1000,
-        );
-      } catch (cause) {
-        if (disposed) return;
-        setFlow(null);
-        setError(cause instanceof Error ? cause.message : "设备码登录失败");
-      }
-    };
-
-    void poll();
-    return () => {
-      disposed = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [api, flow, onSaved]);
+  const finish = useCallback(async () => {
+    if (!flow || !code.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api("/api/openai-accounts/oauth/exchange", {
+        method: "POST",
+        ...jsonBody({
+          code: code.trim(),
+          codeVerifier: flow.codeVerifier,
+          state: flow.state,
+          redirectUri: flow.redirectUri,
+          platform,
+        }),
+      });
+      onSaved();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "OAuth 登录失败");
+    } finally {
+      setBusy(false);
+    }
+  }, [api, code, flow, onSaved, platform]);
 
   if (flow) {
     return (
       <div className="grid gap-4">
+        {error ? <InlineNotice tone="error">{error}</InlineNotice> : null}
         <p className="text-sm text-muted-foreground">
-          前往{" "}
-          <a
-            href={flow.verificationUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-0.5 font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
-          >
-            此处
-            <ArrowUpRight className="size-3.5" />
-          </a>{" "}
-          ，使用下面的一次性代码授权登录。
+          已在新标签页打开 OpenAI 授权页（平台：{platformLabel(platform)}）。登录后浏览器会跳转到
+          {" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-xs">
+            {flow.redirectUri}
+          </code>{" "}
+          （页面打不开是正常的），把地址栏里的完整链接或其中的 code 粘贴到下面。
         </p>
-        <Tooltip
-          content={copied ? "已复制" : "点击复制设备码"}
-          className="justify-self-center"
+        <a
+          href={flow.authorizeUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-0.5 text-sm font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
         >
-          <Button
-            type="button"
-            variant="ghost"
-            className="h-auto cursor-pointer px-4 py-2 font-mono text-xl font-semibold tracking-widest"
-            onClick={() => {
-              void navigator.clipboard.writeText(flow.userCode).then(() => {
-                setCopied(true);
-                window.setTimeout(() => setCopied(false), 1600);
-              });
-            }}
-            aria-label="复制设备码"
-          >
-            <span>{flow.userCode}</span>
-            {copied ? (
-              <span className="flex items-center gap-1 font-sans text-xs font-medium tracking-normal text-emerald-600 dark:text-emerald-400">
-                <Check className="size-3.5" />
-                已复制
-              </span>
-            ) : null}
-          </Button>
-        </Tooltip>
+          重新打开授权页
+          <ArrowUpRight className="size-3.5" />
+        </a>
+        <Input
+          value={code}
+          onChange={(event) => setCode(event.target.value)}
+          placeholder="粘贴回调链接或 code"
+          aria-label="回调链接或 code"
+        />
         <footer className="flex justify-end gap-2 pt-4">
           <Button variant="outline" type="button" onClick={onClose}>
             取消
           </Button>
-          <Button type="button" disabled>
-            <Spinner />
-            等待授权
+          <Button
+            type="button"
+            disabled={busy || !code.trim()}
+            onClick={() => void finish()}
+          >
+            {busy ? (
+              <>
+                <Spinner />
+                <span className="sr-only">处理中</span>
+              </>
+            ) : (
+              "完成登录"
+            )}
           </Button>
         </footer>
       </div>
@@ -235,20 +215,38 @@ function AccountDeviceAuth({
     <div className="grid gap-4">
       {error ? <InlineNotice tone="error">{error}</InlineNotice> : null}
       <p className="text-sm text-muted-foreground">
-        使用 OpenAI 设备码添加账号，无需手动填写 Token。
+        走与 Codex 一致的浏览器 OAuth 登录添加账号。请先选择该账号服务的系统平台。
       </p>
+      <label className="grid gap-1.5 text-sm">
+        <span className="text-muted-foreground">平台</span>
+        <Select
+          value={platform}
+          onValueChange={(value) => setPlatform(value as UpstreamPlatform)}
+        >
+          <SelectTrigger aria-label="平台">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {LOGIN_PLATFORMS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </label>
       <footer className="flex justify-end gap-2 pt-4">
         <Button variant="outline" type="button" onClick={onClose}>
           取消
         </Button>
-        <Button type="button" disabled={starting} onClick={() => void start()}>
-          {starting ? (
+        <Button type="button" disabled={busy} onClick={() => void start()}>
+          {busy ? (
             <>
               <Spinner />
               <span className="sr-only">处理中</span>
             </>
           ) : (
-            "继续"
+            "打开授权页"
           )}
         </Button>
       </footer>
@@ -533,6 +531,7 @@ export function AccountsPage() {
                     </TableHead>
                     <TableHead>账号</TableHead>
                     <TableHead>Account ID</TableHead>
+                    <TableHead>平台</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead>更新时间</TableHead>
                     <TableHead className="text-right">操作</TableHead>
@@ -562,6 +561,9 @@ export function AccountsPage() {
                         <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
                           {shortId(item.accountId)}
                         </code>
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">
+                        {platformLabel(item.platform)}
                       </TableCell>
                       <TableCell>
                         <StatusPill value={item.status} />
@@ -658,7 +660,7 @@ export function AccountsPage() {
 
       {adding ? (
         <Modal wide title="添加 OpenAI 账号" onClose={() => setAdding(false)}>
-          <AccountDeviceAuth
+          <AccountOAuthLogin
             onClose={() => setAdding(false)}
             onSaved={() => {
               setAdding(false);

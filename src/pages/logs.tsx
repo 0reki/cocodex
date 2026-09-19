@@ -18,11 +18,7 @@ import {
 } from "@/components/ui";
 import { useResource } from "@/hooks/use-resource";
 import { useAuth } from "@/lib/auth";
-import type {
-  ApiKeysResponse,
-  RequestLog,
-  RequestLogsResponse,
-} from "@/types/api";
+import type { RequestLog, RequestLogsResponse } from "@/types/api";
 import { Badge } from "@/ui/components/badge";
 import { Button } from "@/ui/components/button";
 import { Calendar } from "@/ui/components/calendar";
@@ -50,7 +46,6 @@ import {
 
 type Filters = {
   modelId: string;
-  keyId: string;
   status: string;
   dateFrom: string;
   dateTo: string;
@@ -58,7 +53,6 @@ type Filters = {
 
 const emptyFilters: Filters = {
   modelId: "",
-  keyId: "",
   status: "",
   dateFrom: "",
   dateTo: "",
@@ -173,7 +167,16 @@ function getTokens(tokensInfo: Record<string, unknown> | null) {
   };
 }
 
+function formatTurnStateLen(value: number | null) {
+  return value === null ? "—" : value.toLocaleString();
+}
+
 function ModelLabel({ log }: { log: RequestLog }) {
+  // The model that served the turn, with the requested one shown when it
+  // differs (the upstream may resolve a request to another model).
+  const used = log.usedModel ?? log.modelId ?? "—";
+  const requested = log.requestedModel;
+  const showRequested = requested && requested !== used;
   return (
     <span className="inline-flex items-center gap-1.5 align-middle leading-none">
       {log.serviceTier === "priority" ? (
@@ -186,7 +189,12 @@ function ModelLabel({ log }: { log: RequestLog }) {
           </span>
         </Tooltip>
       ) : null}
-      <span className="leading-none">{log.modelId ?? "—"}</span>
+      <span className="leading-none">{used}</span>
+      {showRequested ? (
+        <span className="text-muted-foreground leading-none">
+          （请求 {requested}）
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -219,6 +227,11 @@ function LogDetails({ log }: { log: RequestLog }) {
       <DetailField label="模型">
         <ModelLabel log={log} />
       </DetailField>
+      <DetailField label="请求模型">{log.requestedModel ?? "—"}</DetailField>
+      <DetailField label="使用模型">{log.usedModel ?? "—"}</DetailField>
+      <DetailField label="上游状态长度">
+        {formatTurnStateLen(log.turnStateLen)}
+      </DetailField>
       <DetailField label="状态">
         <Badge variant={status.variant} className={status.className}>
           {status.label}
@@ -228,7 +241,6 @@ function LogDetails({ log }: { log: RequestLog }) {
       <DetailField label="TTFB">{formatMs(log.ttfbMs)}</DetailField>
       <DetailField label="延迟">{formatMs(log.latencyMs)}</DetailField>
       <DetailField label="费用">{formatCost(log.cost)}</DetailField>
-      <DetailField label="API Key ID">{log.keyId ?? "—"}</DetailField>
       <DetailField label="Intent ID">{log.intentId ?? "—"}</DetailField>
       <DetailField label="最终请求">
         {log.isFinal === null ? "—" : log.isFinal ? "是" : "否"}
@@ -263,13 +275,7 @@ export function LogsPage() {
     });
     return api<RequestLogsResponse>(`/api/request-logs?${params}`, { signal });
   }, [api, cursor, filters]);
-  const loadKeys = useCallback(
-    (signal: AbortSignal) =>
-      api<ApiKeysResponse>("/api/api-keys", { signal }),
-    [api],
-  );
   const logs = useResource(loadLogs);
-  const keys = useResource(loadKeys);
   const dateRange: DateRange | undefined = filters.dateFrom
     ? {
         from: parseDate(filters.dateFrom),
@@ -307,7 +313,7 @@ export function LogsPage() {
         <h1 className="text-2xl font-bold">请求日志</h1>
       </section>
 
-      <div className="grid gap-2 sm:grid-cols-2 sm:items-center xl:grid-cols-[minmax(12rem,1fr)_minmax(12rem,1fr)_9rem_16rem]">
+      <div className="grid gap-2 sm:grid-cols-2 sm:items-center xl:grid-cols-[minmax(12rem,1fr)_9rem_16rem]">
         <Input
           value={filters.modelId}
           onChange={(event) => updateFilter("modelId", event.target.value)}
@@ -315,26 +321,6 @@ export function LogsPage() {
           aria-label="模型"
           className="w-full"
         />
-        <div>
-          <Select
-            value={filters.keyId || "all"}
-            onValueChange={(value) =>
-              updateFilter("keyId", value === "all" ? "" : value)
-            }
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue placeholder="API Key" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部</SelectItem>
-              {keys.data?.items.map((key) => (
-                <SelectItem key={key.id} value={key.id}>
-                  {key.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
         <div>
           <Select
             value={filters.status || "all"}
@@ -411,6 +397,7 @@ export function LogsPage() {
                     输入 / 缓存 / 输出
                   </TableHead>
                   <TableHead className="px-3 py-2">费用</TableHead>
+                  <TableHead className="px-3 py-2">上游状态</TableHead>
                   <TableHead className="px-3 py-2">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -449,6 +436,9 @@ export function LogsPage() {
                           {formatCost(log.cost)}
                         </TableCell>
                         <TableCell className="px-3 py-2 text-xs">
+                          {formatTurnStateLen(log.turnStateLen)}
+                        </TableCell>
+                        <TableCell className="px-3 py-2 text-xs">
                           <Tooltip content="查看详情" side="left">
                             <Button
                               type="button"
@@ -466,7 +456,7 @@ export function LogsPage() {
                   })
                 ) : (
                   <TableRow>
-                    <TableCell colSpan={8} className="p-0">
+                    <TableCell colSpan={9} className="p-0">
                       <EmptyState className="min-h-32" />
                     </TableCell>
                   </TableRow>

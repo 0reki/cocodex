@@ -22,11 +22,14 @@ export type AuthResponse = {
   accessToken: TokenEnvelope;
 };
 
+export type UpstreamPlatform = "windows" | "linux" | "darwin" | "all";
+
 export type OpenAIAccount = {
   id: string;
   email: string;
   accountId: string;
   status: "active" | "inactive" | "disabled";
+  platform: UpstreamPlatform;
   createdAt: string;
   updatedAt: string;
 };
@@ -39,24 +42,6 @@ export type OpenAIAccountsResponse = {
   totalPages: number;
 };
 
-export type ApiKey = {
-  id: string;
-  ownerUserId: string | null;
-  name: string;
-  apiKey: string;
-  quota: number | null;
-  used: number;
-  expiresAt: string | null;
-  revokedAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ApiKeysResponse = {
-  items: ApiKey[];
-  count: number;
-};
-
 export type RequestLog = {
   id: string;
   intentId: string | null;
@@ -64,6 +49,9 @@ export type RequestLog = {
   streamEndReason: string | null;
   path: string;
   modelId: string | null;
+  requestedModel: string | null;
+  usedModel: string | null;
+  turnStateLen: number | null;
   keyId: string | null;
   serviceTier: string | null;
   statusCode: number | null;

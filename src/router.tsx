@@ -114,6 +114,22 @@ export const router = createBrowserRouter([
         Component: ProtectedRoute,
         children: [
           {
+            // Codex client browser login: consent, then hand back to the CLI.
+            path: "/oauth/complete",
+            lazy: async () => {
+              const module = await import("@/pages/codex-authorize");
+              return { Component: module.CodexAuthorizePage };
+            },
+          },
+          {
+            // Codex client device-code login: approve the CLI's user code.
+            path: "/codex/device",
+            lazy: async () => {
+              const module = await import("@/pages/codex-device");
+              return { Component: module.CodexDevicePage };
+            },
+          },
+          {
             lazy: async () => {
               const module = await import("@/components/app-shell");
               return { Component: module.AppShell };
@@ -125,13 +141,6 @@ export const router = createBrowserRouter([
                 lazy: async () => {
                   const module = await import("@/pages/dashboard");
                   return { Component: module.DashboardPage };
-                },
-              },
-              {
-                path: "/keys",
-                lazy: async () => {
-                  const module = await import("@/pages/api-keys");
-                  return { Component: module.ApiKeysPage };
                 },
               },
               {
