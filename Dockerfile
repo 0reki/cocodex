@@ -2,6 +2,7 @@ FROM rust:1-bookworm AS builder
 
 WORKDIR /app
 COPY sql ./sql
+COPY scripts ./scripts
 COPY crates/proxy/Cargo.toml crates/proxy/Cargo.lock ./crates/proxy/
 COPY crates/proxy/src ./crates/proxy/src
 RUN cargo build --release --locked --manifest-path crates/proxy/Cargo.toml

@@ -5,6 +5,7 @@
 
 pub mod accounts;
 pub mod health;
+pub mod install;
 pub mod logs;
 pub mod portal_auth;
 pub mod setup;
@@ -247,6 +248,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     let public = Router::new()
         .merge(health::routes())
         .merge(setup::routes())
+        .merge(install::routes())
         .merge(portal_auth::routes());
     let signed_in = Router::new()
         .merge(logs::routes())

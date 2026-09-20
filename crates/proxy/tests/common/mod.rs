@@ -80,6 +80,7 @@ pub fn config(settings: Settings, origin: &str) -> cocodex_proxy::config::ProxyC
         upstream_chatgpt_origin: origin.to_string(),
         upstream_auth_origin: origin.to_string(),
         public_app_url: "http://localhost:53332".to_string(),
+        public_gateway_url: None,
         settings,
     }
 }

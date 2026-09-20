@@ -33,6 +33,11 @@ pub struct ProxyArgs {
     #[arg(long, env = "PUBLIC_APP_URL", default_value = "http://localhost:53332")]
     pub public_app_url: String,
 
+    /// Public URL of this gateway, baked into the install scripts it serves;
+    /// defaults to the host each request arrives on
+    #[arg(long, env = "PUBLIC_GATEWAY_URL")]
+    pub public_gateway_url: Option<String>,
+
     /// Postgres URL; falls back to the Setup config file
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     pub database_url: Option<String>,
@@ -60,6 +65,7 @@ pub struct ProxyConfig {
     pub upstream_chatgpt_origin: String,
     pub upstream_auth_origin: String,
     pub public_app_url: String,
+    pub public_gateway_url: Option<String>,
     pub settings: Settings,
 }
 
@@ -80,6 +86,32 @@ impl ProxyConfig {
             .parse()
             .map_err(|e| format!("Invalid bind address '{addr_str}': {e}"))?;
 
+        let public_gateway_url = match args.public_gateway_url {
+            Some(url) => {
+                let url = url.trim().trim_end_matches('/').to_string();
+                if url.is_empty() {
+                    None
+                } else {
+                    // The install scripts embed it verbatim in a quoted string.
+                    if !(url.starts_with("http://") || url.starts_with("https://")) {
+                        return Err(format!(
+                            "Invalid PUBLIC_GATEWAY_URL '{url}': must start with http:// or https://"
+                        ));
+                    }
+                    if url
+                        .chars()
+                        .any(|c| c.is_whitespace() || c == '"' || c == '\\')
+                    {
+                        return Err(format!(
+                            "Invalid PUBLIC_GATEWAY_URL '{url}': must not contain whitespace, quotes or backslashes"
+                        ));
+                    }
+                    Some(url)
+                }
+            }
+            None => None,
+        };
+
         // Fail at startup rather than on the first request.
         crate::billing::pricing::Pricing::from_env()?;
         crate::upstream::identity::VersionResolver::from_env(reqwest::Client::new())?;
@@ -94,6 +126,7 @@ impl ProxyConfig {
                 .to_string(),
             upstream_auth_origin: args.upstream_auth_origin.trim_end_matches('/').to_string(),
             public_app_url: args.public_app_url.trim_end_matches('/').to_string(),
+            public_gateway_url,
             settings: Settings {
                 database_url: args.database_url,
                 admin_jwt_secret: args.admin_jwt_secret,

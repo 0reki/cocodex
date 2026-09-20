@@ -38,11 +38,29 @@ PostgreSQL 地址和管理员账号即可。Secret 自动生成，与数据库�
 
 ## Codex 客户端接入
 
+网关自己提供安装脚本，脚本里的网关地址由服务端填好，用户不用传参：
+
 ```bash
-./scripts/install-codex-gateway.sh http://<网关>:53141 --login
+curl -fsSL https://api.cocodex.app/install.sh | sh
 ```
 
-Windows：`./scripts/install-codex-gateway.ps1 http://<网关>:53141 -Login`
+Windows：`irm https://api.cocodex.app/install.ps1 | iex`
+
+脚本改写 `~/.codex/config.toml` 的 `openai_base_url` / `chatgpt_base_url`，把
+刷新 / 注销 URL 写进 `~/.codex/cocodex-gateway.env`，再把这个 env 文件挂进登录
+shell 的 rc 文件（zsh 用 `$ZDOTDIR/.zshrc`，bash 用 `.bashrc`，macOS 上另外挂一份
+到 `.bash_profile` 这类登录文件，fish 用 `config.fish`，其余回落 `.profile`）。
+写完后若终端可交互且 `codex` 在 PATH 上，会直接进入设备码登录；`--no-login`
+可以跳过。
+
+脚本也能从仓库直接跑，此时网关地址是第一个参数：
+
+```bash
+./scripts/install.sh http://127.0.0.1:53141 --login
+```
+
+`GET /install.sh`、`GET /install.ps1` 填入的地址来自 `PUBLIC_GATEWAY_URL`；没配
+时用请求的 Host 和 `X-Forwarded-Proto` 推导。
 
 登录走网关自己的设备码 / OAuth，不把上游 ChatGPT 账号交给客户端：
 

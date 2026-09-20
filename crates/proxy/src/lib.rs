@@ -39,6 +39,7 @@ pub struct AppState {
     pub forwarder: Arc<BackendForwarder>,
     pub runtime: Arc<Runtime>,
     pub public_app_url: String,
+    pub public_gateway_url: Option<String>,
 }
 
 /// Builds the HTTP application and the runtime it serves from.
@@ -93,6 +94,7 @@ pub fn build(
         forwarder,
         runtime: runtime.clone(),
         public_app_url: config.public_app_url,
+        public_gateway_url: config.public_gateway_url,
     };
 
     // Codex traffic is relayed exactly as chatgpt.com answers it, so the

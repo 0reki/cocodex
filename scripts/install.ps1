@@ -1,4 +1,13 @@
-# Configure the official Codex CLI to use a CoCodex subscription gateway.
+# Point the official Codex CLI at a CoCodex subscription gateway.
+#
+# The gateway serves this file with its own URL baked in, so the usual way to
+# run it is:
+#
+#   irm https://<gateway>/install.ps1 | iex
+#
+# From a checkout the gateway URL is the first argument instead:
+#
+#   ./scripts/install.ps1 http://127.0.0.1:53141
 #
 # Writes ~/.codex/config.toml and persists refresh/revoke env vars in the
 # PowerShell profile. Codex does not read those OAuth URLs from config.toml.
@@ -13,11 +22,19 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Replaced by the gateway when it serves this script over HTTP; empty here.
+$GatewayUrlDefault = ""
+
+if ([string]::IsNullOrWhiteSpace($GatewayUrl)) {
+    $GatewayUrl = $GatewayUrlDefault
+}
+
 function Show-Usage {
     @"
-Usage: install-codex-gateway.ps1 <gateway-url> [-Login]
+Usage: install.ps1 [gateway-url] [-Login]
 
   gateway-url   CoCodex gateway origin, e.g. http://127.0.0.1:53141
+                Optional when the script was downloaded from a gateway.
   -Login        After writing config, run Codex device-code login
 "@
 }
@@ -67,7 +84,7 @@ $pattern = "(?s)$([regex]::Escape($Begin)).*?$([regex]::Escape($End))\r?\n?"
 $profileText = [regex]::Replace($profileText, $pattern, "")
 $block = @"
 $Begin
-# Managed by install-codex-gateway.ps1
+# Managed by the CoCodex install script. Delete this block to undo.
 `$env:CODEX_REFRESH_TOKEN_URL_OVERRIDE = "$RefreshUrl"
 `$env:CODEX_REVOKE_TOKEN_URL_OVERRIDE = "$RevokeUrl"
 $End
