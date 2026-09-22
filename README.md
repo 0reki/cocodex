@@ -47,12 +47,22 @@ curl -fsSL https://api.cocodex.app/install.sh | sh
 
 Windows：`irm https://api.cocodex.app/install.ps1 | iex`
 
-脚本改写 `~/.codex/config.toml` 的 `openai_base_url` / `chatgpt_base_url`，把
-刷新 / 注销 URL 写进 `~/.codex/cocodex-gateway.env`，再把这个 env 文件挂进登录
-shell 的 rc 文件（zsh 用 `$ZDOTDIR/.zshrc`，bash 用 `.bashrc`，macOS 上另外挂一份
-到 `.bash_profile` 这类登录文件，fish 用 `config.fish`，其余回落 `.profile`）。
-写完后若终端可交互且 `codex` 在 PATH 上，会直接进入设备码登录；`--no-login`
-可以跳过。
+脚本改写 `~/.codex/config.toml` 的 `openai_base_url` / `chatgpt_base_url`，再设置
+三个 Codex 只从环境变量读的登录地址：`CODEX_APP_SERVER_LOGIN_ISSUER`（= 网关地址）、
+`CODEX_REFRESH_TOKEN_URL_OVERRIDE`、`CODEX_REVOKE_TOKEN_URL_OVERRIDE`。
+
+- macOS / Linux：写进 `~/.codex/cocodex-gateway.env`，挂进登录 shell 的 rc 文件（zsh 用
+  `$ZDOTDIR/.zshrc`，bash 用 `.bashrc`，macOS 上另外挂一份到 `.bash_profile` 这类登录
+  文件，fish 用 `config.fish`，其余回落 `.profile`）。桌面应用不读 rc，所以 macOS 另外
+  `launchctl setenv` 并装一个 LaunchAgent（`~/Library/LaunchAgents/app.cocodex.gateway-env.plist`）
+  在每次登录时重设；Linux 写 `~/.config/environment.d/cocodex-gateway.conf`。
+- Windows：写成用户级环境变量（`HKCU\Environment`），从开始菜单启动的桌面端也能继承；
+  旧版脚本写在 PowerShell profile 里的块会被清掉。
+
+设置好后，Codex 桌面端 / IDE 插件完全退出再打开，点 “Sign in with ChatGPT” 即走网关的
+浏览器授权码登录（`/oauth/authorize` → 控制台确认 → 回调 `localhost:1455`），不需要设备码。
+CLI 的 `codex login` 浏览器模式不认自定义 issuer，所以 CLI 仍走设备码：写完后若终端
+可交互且 `codex` 在 PATH 上，会直接进入 `codex login --device-auth`；`--no-login` 可以跳过。
 
 脚本也能从仓库直接跑，此时网关地址是第一个参数：
 
@@ -67,7 +77,13 @@ shell 的 rc 文件（zsh 用 `$ZDOTDIR/.zshrc`，bash 用 `.bashrc`，macOS 上
 
 - `POST /api/accounts/deviceauth/usercode`、`POST /api/accounts/deviceauth/token`
 - `GET /oauth/authorize`、`POST /oauth/token`、`POST /oauth/revoke`
-- 浏览器授权回调只允许 Codex 的本机地址 `http://localhost|127.0.0.1|[::1]:<端口>/auth/callback`
+- 浏览器授权回调只允许 Codex 的本机地址 `http://localhost|127.0.0.1|[::1]:<端口>/auth/callback`；
+  `/oauth/authorize` 对其它 `redirect_uri` 直接 400，不跳转；缺 PKCE（`code_challenge` +
+  `S256`）或 `response_type` 不是 `code` 时按 OAuth 规范带 `error` 跳回回调地址。未知参数原样
+  透传给控制台确认页
+- `/oauth/token` 支持 `authorization_code`（校验 PKCE）和 `refresh_token`；Codex 登录后顺带
+  发的 API key token-exchange 返回 `unsupported_grant_type`，客户端会忽略
+- `/oauth/revoke` 接受 JSON（Codex）和表单（RFC 7009）
 
 下发的 access token 绑定一个 Session，只有该 Session 仍有未过期的 refresh token
 时才有效；refresh token 每次刷新都轮换，`/oauth/revoke` 或修改用户密码会让对应
