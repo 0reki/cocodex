@@ -27,11 +27,19 @@ pub struct RequestContext {
     pub upstream_account_id: Option<String>,
     pub upstream_client_version: Option<String>,
     pub upstream_installation_id: Option<String>,
-    /// OS the upstream login presents (`windows`, `macos` or `linux`).
+    /// OS the upstream login presents (`windows` or `linux`).
     pub upstream_platform: Option<String>,
     /// (upstream value, client value) for the identity upstream reports
     /// back: user id, account id and email.
     pub identity_swap: Vec<(String, String)>,
+    /// Set when the gateway owns this request's `x-codex-turn-state`: the
+    /// model is one it manages, so the client's own value never goes
+    /// upstream and the state held for this login takes its place (see
+    /// `crate::turn_state`). A WebSocket carries its state per turn instead,
+    /// so this stays unset there.
+    pub turn_state_key: Option<crate::turn_state::StateKey>,
+    /// The turn state to present, when one is held for the login and model.
+    pub upstream_turn_state: Option<String>,
     /// The timezone and date (`%Y-%m-%d`) the gateway presents in the
     /// conversation's `<environment_context>`, from its egress IP.
     pub presented_timezone: Option<String>,
@@ -74,6 +82,8 @@ impl RequestContext {
             upstream_installation_id: None,
             upstream_platform: None,
             identity_swap: Vec::new(),
+            turn_state_key: None,
+            upstream_turn_state: None,
             presented_timezone: None,
             presented_current_date: None,
             metadata: HashMap::new(),

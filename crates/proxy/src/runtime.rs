@@ -23,6 +23,7 @@ use crate::billing::settlement::{SettlementConfig, SettlementQueue};
 use crate::db;
 use crate::db::users::PortalUser;
 use crate::quota::QuotaService;
+use crate::turn_state::TurnStateStore;
 use crate::upstream::accounts::AccountService;
 use crate::upstream::client::UpstreamClient;
 
@@ -136,6 +137,7 @@ pub struct Ready {
     pub quota: Arc<QuotaService>,
     pub settlements: Arc<SettlementQueue>,
     pub pricing: Arc<Pricing>,
+    pub turn_state: Arc<TurnStateStore>,
     owners: OwnerAuthCache,
 }
 
@@ -169,6 +171,9 @@ pub struct Runtime {
     upstream: Arc<UpstreamClient>,
     pricing: Arc<Pricing>,
     owners: OwnerAuthCache,
+    /// Built before the database is reachable, because the proxy path reads
+    /// it on every request; its console settings arrive with `ready()`.
+    turn_state: Arc<TurnStateStore>,
     ready: OnceCell<Arc<Ready>>,
     last_failure: Mutex<Option<Instant>>,
 }
@@ -180,9 +185,16 @@ impl Runtime {
             upstream,
             pricing: Arc::new(pricing),
             owners: OwnerAuthCache::default(),
+            turn_state: Arc::new(TurnStateStore::default()),
             ready: OnceCell::new(),
             last_failure: Mutex::new(None),
         }
+    }
+
+    /// The turn states held per upstream login, which the proxy path reads
+    /// without waiting for the database.
+    pub fn turn_state(&self) -> &Arc<TurnStateStore> {
+        &self.turn_state
     }
 
     /// Connects on first use. Failed attempts are retried at most every
@@ -232,6 +244,8 @@ impl Runtime {
         accounts.spawn_refresher();
         let quota = QuotaService::new(pool.clone(), accounts.clone());
         quota.spawn_sync_loop();
+        self.turn_state.load(&pool).await;
+        crate::turn_state::probe::spawn(&self.turn_state, &accounts);
         Ok(Ready {
             sessions: CodexClientSessionStore::with_jwt_and_db(
                 ClientJwt::from_secret(client_secret),
@@ -243,6 +257,7 @@ impl Runtime {
             quota,
             settlements,
             pricing: self.pricing.clone(),
+            turn_state: self.turn_state.clone(),
             owners: self.owners.clone(),
         })
     }

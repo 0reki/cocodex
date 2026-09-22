@@ -18,14 +18,17 @@ fn ascii_only(value: String) -> String {
         .collect()
 }
 
-/// The OS a platform string presents upstream: `windows`, `macos` or
-/// `linux` (the default, also used for generic `all` logins). The User-Agent,
-/// the installation id and the cookie jar all follow this value, so one
-/// upstream login on one OS looks like one Codex installation.
+/// The OS a platform string presents upstream: `windows` or `linux` (the
+/// default, also used for generic `all` logins). The User-Agent, the
+/// installation id and the cookie jar all follow this value, so one upstream
+/// login on one OS looks like one Codex installation.
+///
+/// macOS is not among them: a ChatGPT account is logged in once per Windows
+/// and once per Linux, and a macOS client is served by the Linux login, so
+/// the gateway never presents a macOS machine.
 pub fn platform_family(platform: &str) -> &'static str {
     match platform.trim().to_lowercase().as_str() {
         "windows" => "windows",
-        "darwin" | "macos" => "macos",
         _ => "linux",
     }
 }
@@ -67,15 +70,6 @@ pub fn os_profile(platform: &str) -> &'static OsProfile {
         runtime_arch: "x86_64",
         sandbox: "windows_elevated",
     };
-    const MACOS: OsProfile = OsProfile {
-        ua_os: "Mac OS 15.5.0",
-        ua_arch: "arm64",
-        terminal: "Apple_Terminal/455",
-        runtime_os: "macos",
-        runtime_os_version: "15.5.0",
-        runtime_arch: "aarch64",
-        sandbox: "seatbelt",
-    };
     const LINUX: OsProfile = OsProfile {
         ua_os: "Debian 13.0.0",
         ua_arch: "x86_64",
@@ -87,8 +81,58 @@ pub fn os_profile(platform: &str) -> &'static OsProfile {
     };
     match platform_family(platform) {
         "windows" => &WINDOWS,
-        "macos" => &MACOS,
         _ => &LINUX,
+    }
+}
+
+/// Whether a terminal token could have come from `platform`.
+///
+/// Codex builds the token from the terminal it runs in
+/// (`codex_terminal_detection::user_agent()`), so a token only one OS can
+/// produce would contradict the OS the User-Agent names. A macOS client is
+/// served by a Linux login, and its Terminal.app or iTerm2 token has to go
+/// with the machine it came from.
+fn terminal_fits_platform(platform: &str, terminal: &str) -> bool {
+    let token = terminal.trim().to_ascii_lowercase();
+    let mac_only = token.starts_with("apple_terminal") || token.starts_with("iterm.app");
+    let windows_only = token.starts_with("windowsterminal");
+    let unix_only = [
+        "gnome-terminal",
+        "konsole",
+        "vte",
+        "xterm",
+        "screen",
+        "tmux",
+        "linux",
+    ]
+    .iter()
+    .any(|name| token.starts_with(name));
+    match platform_family(platform) {
+        "windows" => !mac_only && !unix_only,
+        _ => !mac_only && !windows_only,
+    }
+}
+
+/// The sandbox tag of `tag`'s own OS, or `None` when any OS can report it.
+/// Codex tags a turn with the sandbox it ran under
+/// (`codex-rs/core/src/sandbox_tags.rs`); `none`, `external` and the
+/// permission-mode tags say nothing about the machine.
+fn sandbox_platform(tag: &str) -> Option<&'static str> {
+    match tag.trim().to_ascii_lowercase().as_str() {
+        "seatbelt" => Some("macos"),
+        "seccomp" => Some("linux"),
+        "windows_elevated" | "windows_sandbox" | "windows_mxc" => Some("windows"),
+        _ => None,
+    }
+}
+
+/// The sandbox a turn of `platform` would report in place of `tag`, or
+/// `None` when the tag already fits the platform presented upstream.
+pub fn presented_sandbox(platform: &str, tag: &str) -> Option<&'static str> {
+    let family = platform_family(platform);
+    match sandbox_platform(tag) {
+        Some(owner) if owner != family => Some(os_profile(platform).sandbox),
+        _ => None,
     }
 }
 
@@ -189,6 +233,7 @@ pub fn rewrite_user_agent(client: &str, platform: &str, version: &str) -> String
         .split_once(") ")
         .map(|(_, terminal)| terminal.trim())
         .filter(|terminal| !terminal.is_empty())
+        .filter(|terminal| terminal_fits_platform(platform, terminal))
         .unwrap_or_else(|| os_profile(platform).terminal);
     codex_user_agent(name, platform, version, terminal, suffix)
 }
@@ -344,9 +389,11 @@ mod tests {
             user_agent_for_platform("windows", "0.200.0"),
             "codex-tui/0.200.0 (Windows 10.0.22631; x86_64) WindowsTerminal (codex-tui; 0.200.0)"
         );
+        // A macOS login presents the Linux machine: the gateway keeps one
+        // Windows and one Linux identity, and macOS clients ride the latter.
         assert_eq!(
-            user_agent_for_platform("macos", "0.200.0"),
-            "codex-tui/0.200.0 (Mac OS 15.5.0; arm64) Apple_Terminal/455 (codex-tui; 0.200.0)"
+            user_agent_for_platform("darwin", "0.200.0"),
+            "codex-tui/0.200.0 (Debian 13.0.0; x86_64) xterm-256color (codex-tui; 0.200.0)"
         );
         assert_eq!(
             user_agent_for_platform("linux", "0.200.0"),
@@ -382,22 +429,76 @@ mod tests {
             "codex_exec/0.156.0 (Windows 10.0.22631; x86_64) vscode/1.99.0 (codex_exec; 0.156.0)"
         );
         assert_eq!(
-            rewrite_user_agent("codex-mcp-client/0.155.1", "macos", "0.156.0"),
+            rewrite_user_agent("codex-mcp-client/0.155.1", "linux", "0.156.0"),
             "codex-mcp-client/0.156.0"
         );
         // A host app keeps its type and its own app version.
         assert_eq!(
             rewrite_user_agent(
                 "Codex Desktop/0.155.1 (Mac OS 14.1.0; arm64) unknown (Codex Desktop; 26.915.1)",
-                "macos",
+                "linux",
                 "0.156.0"
             ),
-            "Codex Desktop/0.156.0 (Mac OS 15.5.0; arm64) unknown (Codex Desktop; 26.915.1)"
+            "Codex Desktop/0.156.0 (Debian 13.0.0; x86_64) unknown (Codex Desktop; 26.915.1)"
         );
         assert_eq!(
             rewrite_user_agent("Apifox/1.0.0 (x)", "linux", "0.156.0"),
             "Apifox/0.156.0 (Debian 13.0.0; x86_64) xterm-256color"
         );
+    }
+
+    #[test]
+    fn a_macos_client_is_presented_as_the_linux_machine() {
+        // Terminal.app cannot run on the Debian machine the login presents,
+        // so the terminal token goes with the machine it belonged to.
+        assert_eq!(
+            rewrite_user_agent(
+                "codex-tui/0.155.1 (Mac OS 15.5.0; arm64) Apple_Terminal/455 (codex-tui; 0.155.1)",
+                "darwin",
+                "0.156.0"
+            ),
+            "codex-tui/0.156.0 (Debian 13.0.0; x86_64) xterm-256color (codex-tui; 0.156.0)"
+        );
+        assert_eq!(
+            rewrite_user_agent(
+                "codex_exec/0.155.1 (Mac OS 15.5.0; arm64) iTerm.app/3.5.0",
+                "linux",
+                "0.156.0"
+            ),
+            "codex_exec/0.156.0 (Debian 13.0.0; x86_64) xterm-256color"
+        );
+        // A terminal that exists on both keeps the client's own.
+        assert_eq!(
+            rewrite_user_agent(
+                "codex-tui/0.155.1 (Mac OS 15.5.0; arm64) vscode/1.99.0 (codex-tui; 0.155.1)",
+                "darwin",
+                "0.156.0"
+            ),
+            "codex-tui/0.156.0 (Debian 13.0.0; x86_64) vscode/1.99.0 (codex-tui; 0.156.0)"
+        );
+        // A Windows terminal under the Linux identity goes the same way.
+        assert_eq!(
+            rewrite_user_agent(
+                "codex-tui/0.155.1 (Windows 10.0.26100; x86_64) WindowsTerminal",
+                "linux",
+                "0.156.0"
+            ),
+            "codex-tui/0.156.0 (Debian 13.0.0; x86_64) xterm-256color"
+        );
+    }
+
+    #[test]
+    fn a_sandbox_of_another_os_becomes_the_presented_ones() {
+        assert_eq!(presented_sandbox("linux", "seatbelt"), Some("seccomp"));
+        assert_eq!(
+            presented_sandbox("windows", "seccomp"),
+            Some("windows_elevated")
+        );
+        // Already right, or nothing to do with the machine.
+        assert_eq!(presented_sandbox("linux", "seccomp"), None);
+        assert_eq!(presented_sandbox("linux", "none"), None);
+        assert_eq!(presented_sandbox("windows", "external"), None);
+        assert_eq!(presented_sandbox("darwin", "seatbelt"), Some("seccomp"));
     }
 
     #[test]

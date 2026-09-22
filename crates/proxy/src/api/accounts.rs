@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
+use tracing::warn;
 
 use super::{Body, Db, Principal, fail, internal};
 use crate::AppState;
@@ -45,12 +46,13 @@ fn public_account(account: &Account) -> Value {
     })
 }
 
+/// An upstream call this endpoint could not complete. The detail goes to the
+/// console and to the log: a login that fails leaves the admin looking at one
+/// message, and whoever reads the server has to see the same one.
 fn failure(status: StatusCode, error: &str, detail: impl std::fmt::Display) -> Response {
-    (
-        status,
-        Json(json!({ "error": error, "detail": detail.to_string() })),
-    )
-        .into_response()
+    let detail = detail.to_string();
+    warn!(status = status.as_u16(), %error, %detail, "upstream account call failed");
+    (status, Json(json!({ "error": error, "detail": detail }))).into_response()
 }
 
 fn bad_request(message: &str) -> Response {

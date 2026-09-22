@@ -6,6 +6,8 @@ use crate::billing::pricing;
 use crate::billing::usd::Usd;
 use crate::db::settlements::Settlement;
 use crate::runtime::{NotReady, OwnerStatus, Ready, Runtime};
+use crate::turn_state::{StateKey, TurnStateStore};
+use crate::upstream::client::TURN_STATE_HEADER;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::StatusCode;
@@ -65,6 +67,7 @@ impl Rejection {
 pub struct CustomInterceptor {
     runtime: Arc<Runtime>,
     egress_locale: Arc<crate::egress_locale::EgressLocaleResolver>,
+    turn_state: Arc<TurnStateStore>,
 }
 
 impl CustomInterceptor {
@@ -73,8 +76,59 @@ impl CustomInterceptor {
         egress_locale: Arc<crate::egress_locale::EgressLocaleResolver>,
     ) -> Self {
         Self {
+            turn_state: Arc::clone(runtime.turn_state()),
             runtime,
             egress_locale,
+        }
+    }
+
+    /// The turn state held for the login this request was routed to and the
+    /// model it asks for, when that model is managed.
+    fn turn_state_key(&self, ctx: &RequestContext, model: &str) -> Option<StateKey> {
+        let account_id = ctx.upstream_account_id.as_deref()?;
+        let platform = ctx.metadata.get(META_PLATFORM)?;
+        self.turn_state
+            .manages(model)
+            .then(|| StateKey::new(account_id, platform, model))
+    }
+
+    /// Takes the request's turn state over: the client's own value is
+    /// dropped and the login's, if the gateway holds one, is presented in
+    /// its place by `apply_upstream_identity_headers`.
+    fn adopt_turn_state(&self, ctx: &mut RequestContext, model: &str) {
+        let Some(key) = self.turn_state_key(ctx, model) else {
+            return;
+        };
+        let client = ctx
+            .client_headers
+            .get(TURN_STATE_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        ctx.upstream_turn_state = self.turn_state.present(&key, client.as_deref());
+        ctx.turn_state_key = Some(key);
+    }
+
+    /// The same for one WebSocket turn, whose state travels in the
+    /// `response.create` frame instead of a header.
+    fn adopt_ws_turn_state(
+        &self,
+        ctx: &RequestContext,
+        model: &str,
+        message: WsMessage,
+    ) -> WsMessage {
+        let (Some(key), WsMessage::Text(text)) = (self.turn_state_key(ctx, model), &message) else {
+            return message;
+        };
+        // The socket's own state was issued on the handshake, before any
+        // frame named a model; this is the first turn that can key it.
+        if let Some(state) = ctx.metadata.get(crate::websocket::HANDSHAKE_TURN_STATE) {
+            self.turn_state.capture(&key, state, "handshake");
+        }
+        let client = crate::client_identity::ws_turn_state(text.as_str());
+        let state = self.turn_state.present(&key, client.as_deref());
+        match crate::client_identity::rewrite_ws_turn_state(text.as_str(), state.as_deref()) {
+            Some((rewritten, _)) => WsMessage::Text(rewritten.into()),
+            None => message,
         }
     }
 
@@ -329,6 +383,11 @@ impl CustomInterceptor {
         };
         let status = response.status.unwrap_or(status);
         let success = (200..300).contains(&status);
+        // A refused turn is a reason to fetch a new state before its hour is
+        // up; the probe decides whether it is worth one.
+        if let Some(key) = self.turn_state_key(ctx, &model) {
+            self.turn_state.note_failure(&key, status);
+        }
         let (is_final, end_reason) = match response.terminal {
             Some(Terminal::Completed) => (true, Some("completed")),
             Some(Terminal::Incomplete) => (true, Some("incomplete")),
@@ -466,7 +525,7 @@ impl Interceptor for CustomInterceptor {
         // A few Codex requests carry no User-Agent at all; anything else
         // must identify its OS.
         let platform = match detect_platform(req.headers()) {
-            Some(platform) => Some(platform.as_str()),
+            Some(platform) => Some(platform.served_by()),
             None if !req.headers().contains_key(http::header::USER_AGENT) => None,
             None => {
                 return Ok(RequestAction::ShortCircuit(auth_error(
@@ -497,10 +556,11 @@ impl Interceptor for CustomInterceptor {
 
         // The requested model of an HTTP response is only in the request; the
         // routing hint carries it (a WebSocket turn brings its own).
-        if let Some(model) = routing_hint_model(req.headers())
-            && let Ok(mut obs) = ctx.observation.lock()
-        {
-            obs.set_requested_model(model);
+        if let Some(model) = routing_hint_model(req.headers()).map(str::to_string) {
+            if let Ok(mut obs) = ctx.observation.lock() {
+                obs.set_requested_model(&model);
+            }
+            self.adopt_turn_state(ctx, &model);
         }
 
         Ok(RequestAction::Forward(req))
@@ -535,13 +595,61 @@ impl Interceptor for CustomInterceptor {
                     .completed_model
                     .get_or_insert_with(|| model.to_string());
             }
+            // A turn state arrives as a response header, in the metadata
+            // event, or both; the log records its length whichever way it
+            // came.
+            if let Some(state) = resp
+                .headers()
+                .get(TURN_STATE_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .filter(|state| !state.is_empty())
+            {
+                obs.current.turn_state_len = Some(state.len());
+            }
+        }
+        // The turn state upstream issued for this login, for the next turn
+        // of whoever is routed to it.
+        let mut resp = resp;
+        if let Some(key) = ctx.turn_state_key.as_ref() {
+            if resp.status().is_success()
+                && let Some(state) = resp
+                    .headers()
+                    .get(TURN_STATE_HEADER)
+                    .and_then(|value| value.to_str().ok())
+            {
+                self.turn_state.capture(key, state, "response");
+            }
+            // Hand the client the state the gateway settled on, and take away
+            // one it would not present itself: the client replays what it is
+            // given, so a state that routes to another model would pin every
+            // later turn to it.
+            match self
+                .turn_state
+                .presentable(key)
+                .and_then(|held| axum::http::HeaderValue::from_str(&held).ok())
+            {
+                Some(value) => {
+                    resp.headers_mut().insert(TURN_STATE_HEADER, value);
+                }
+                None => {
+                    resp.headers_mut().remove(TURN_STATE_HEADER);
+                }
+            }
         }
         Ok(resp)
     }
 
     fn on_response_chunk(&self, ctx: &RequestContext, chunk: &[u8]) {
-        if let Ok(mut obs) = ctx.observation.lock() {
-            obs.ingest_chunk(chunk);
+        let captured = match ctx.observation.lock() {
+            Ok(mut obs) => {
+                obs.ingest_chunk(chunk);
+                obs.take_captured_turn_state()
+            }
+            Err(_) => return,
+        };
+        // A streamed response repeats the state in its metadata event.
+        if let (Some(state), Some(key)) = (captured, ctx.turn_state_key.as_ref()) {
+            self.turn_state.capture(key, &state, "metadata");
         }
     }
 
@@ -553,11 +661,19 @@ impl Interceptor for CustomInterceptor {
         let WsMessage::Text(text) = &msg else {
             return Ok(WsAction::Forward(msg));
         };
-        let starts_response = match ctx.observation.lock() {
-            Ok(mut obs) => obs.ingest_client_text(text).is_some_and(|value| {
-                value.get("type").and_then(|t| t.as_str()) == Some("response.create")
-            }),
-            Err(_) => false,
+        let (starts_response, model) = match ctx.observation.lock() {
+            Ok(mut obs) => {
+                let starts = obs.ingest_client_text(text).is_some_and(|value| {
+                    value.get("type").and_then(|t| t.as_str()) == Some("response.create")
+                });
+                (starts, obs.current.requested_model.clone())
+            }
+            Err(_) => (false, None),
+        };
+        // A WebSocket turn carries the state in its `response.create` frame.
+        let msg = match model.as_deref().filter(|_| starts_response) {
+            Some(model) => self.adopt_ws_turn_state(ctx, model, msg),
+            None => msg,
         };
         if !starts_response {
             return Ok(WsAction::Forward(msg));
@@ -597,10 +713,33 @@ impl Interceptor for CustomInterceptor {
         ctx: &RequestContext,
         msg: WsMessage,
     ) -> Result<WsAction, Box<dyn std::error::Error + Send + Sync>> {
-        if let WsMessage::Text(text) = &msg
-            && let Ok(mut obs) = ctx.observation.lock()
-        {
-            obs.ingest_text(text);
+        if let WsMessage::Text(text) = &msg {
+            let captured = match ctx.observation.lock() {
+                Ok(mut obs) => {
+                    obs.ingest_text(text);
+                    (
+                        obs.take_captured_turn_state(),
+                        obs.current.requested_model.clone(),
+                    )
+                }
+                Err(_) => (None, None),
+            };
+            if let (Some(state), Some(model)) = (captured.0, captured.1.clone())
+                && let Some(key) = self.turn_state_key(ctx, &model)
+            {
+                self.turn_state.capture(&key, &state, "metadata");
+            }
+            // The WebSocket counterpart: the metadata event is where a client
+            // reads its state, so it carries the gateway's or none at all.
+            if let Some(model) = captured.1
+                && let Some(key) = self.turn_state_key(ctx, &model)
+                && let Some(rewritten) = crate::client_identity::rewrite_ws_metadata_turn_state(
+                    text.as_str(),
+                    self.turn_state.presentable(&key).as_deref(),
+                )
+            {
+                return Ok(WsAction::Forward(WsMessage::Text(rewritten.into())));
+            }
         }
         self.settle_finished(ctx).await;
         Ok(WsAction::Forward(msg))

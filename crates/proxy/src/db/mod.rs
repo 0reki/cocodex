@@ -7,6 +7,7 @@ pub mod client_sessions;
 pub mod invitations;
 pub mod logs;
 pub mod quota;
+pub mod settings;
 pub mod settlements;
 pub mod users;
 

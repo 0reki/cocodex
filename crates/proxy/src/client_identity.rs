@@ -20,6 +20,7 @@ use serde_json::Value;
 use crate::interceptor::RequestContext;
 use crate::upstream::identity::{
     codex_version_from_user_agent, os_profile, platform_family, presented_client_version,
+    presented_sandbox,
 };
 
 const INSTALLATION_ID_METADATA_KEY: &str = "x-codex-installation-id";
@@ -73,13 +74,22 @@ pub fn gateway_installation_id(account_id: &str, platform: &str) -> String {
         .to_string()
 }
 
-/// `x-codex-turn-metadata` with the upstream login's installation id; every
-/// other field, including the client's `workspaces`, is kept as sent.
+/// `x-codex-turn-metadata` with the upstream login's installation id and, when
+/// the client ran under a sandbox only another OS has, the sandbox of the
+/// machine presented upstream. Every other field, including the client's
+/// `workspaces`, is kept as sent.
 pub fn rewrite_turn_metadata(raw: &str, identity: &PresentedIdentity<'_>) -> Option<String> {
     let mut value: Value = serde_json::from_str(raw).ok()?;
     let object = value.as_object_mut()?;
     if let Some(existing) = object.get_mut("installation_id") {
         *existing = Value::String(identity.installation_id.to_string());
+    }
+    if let Some(existing) = object.get_mut("sandbox")
+        && let Some(presented) = existing
+            .as_str()
+            .and_then(|tag| presented_sandbox(identity.platform, tag))
+    {
+        *existing = Value::String(presented.to_string());
     }
     to_ascii_json_string(&value).ok()
 }
@@ -331,6 +341,83 @@ pub fn rewrite_request_body(ctx: &RequestContext, headers: &HeaderMap, body: Byt
     }
 }
 
+/// Replaces the turn state an upstream `codex.response.metadata` event
+/// carries with the one the gateway settled on, or takes it out when there
+/// is none worth having. A state the gateway will not present must not reach
+/// the client either: the client replays whatever it is given, so handing it
+/// one pins every later turn to whatever issued it. Returns the rewritten
+/// event when it changed.
+pub fn rewrite_ws_metadata_turn_state(text: &str, state: Option<&str>) -> Option<String> {
+    let key = crate::upstream::client::TURN_STATE_HEADER;
+    let mut value: Value = serde_json::from_str(text).ok()?;
+    let kind = value.get("type").and_then(Value::as_str)?;
+    if kind != "codex.response.metadata" && kind != "response.metadata" {
+        return None;
+    }
+    let headers = value.get_mut("headers")?.as_object_mut()?;
+    let name = headers
+        .keys()
+        .find(|name| name.eq_ignore_ascii_case(key))
+        .cloned()?;
+    match state {
+        Some(state) => {
+            if headers.get(&name).and_then(Value::as_str) == Some(state) {
+                return None;
+            }
+            headers.insert(name, Value::String(state.to_string()));
+        }
+        None => {
+            headers.remove(&name);
+        }
+    }
+    Some(value.to_string())
+}
+
+/// The turn state a WebSocket `response.create` frame carries in its
+/// `client_metadata`, if any.
+pub fn ws_turn_state(text: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("response.create") {
+        return None;
+    }
+    value
+        .get("client_metadata")?
+        .get(crate::upstream::client::TURN_STATE_HEADER)?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Replaces the turn state a WebSocket `response.create` frame carries in
+/// its `client_metadata` with the one the gateway holds for the login, or
+/// removes it when the gateway holds none (see `crate::turn_state`). Returns
+/// the rewritten frame and whether the client had sent a state of its own.
+pub fn rewrite_ws_turn_state(text: &str, state: Option<&str>) -> Option<(String, bool)> {
+    let key = crate::upstream::client::TURN_STATE_HEADER;
+    let mut value: Value = serde_json::from_str(text).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("response.create") {
+        return None;
+    }
+    let object = value.as_object_mut()?;
+    if !object.contains_key("client_metadata") {
+        // Nothing to remove, and a state to present needs somewhere to sit.
+        state?;
+        object.insert(
+            "client_metadata".to_string(),
+            Value::Object(serde_json::Map::new()),
+        );
+    }
+    let metadata = object.get_mut("client_metadata")?.as_object_mut()?;
+    let had_own = metadata.get(key).is_some_and(Value::is_string);
+    let changed = match state {
+        Some(state) => {
+            metadata.insert(key.to_string(), Value::String(state.to_string()))
+                != Some(Value::String(state.to_string()))
+        }
+        None => metadata.remove(key).is_some(),
+    };
+    changed.then(|| (value.to_string(), had_own))
+}
+
 /// Rewrites a WebSocket `response.create` text frame; other frames are
 /// returned unchanged.
 pub fn rewrite_ws_client_text(text: &str, identity: &PresentedIdentity<'_>) -> Option<String> {
@@ -568,6 +655,21 @@ mod tests {
             format!(
                 r#"{{"installation_id":"{INSTALL}","session_id":"sess","thread_id":"thread","turn_id":"turn","sandbox":"seccomp","workspaces":{{"/home/alice/repo":{{"latest_git_commit_hash":"abc"}}}},"workspace_kind":"desktop-project","model":"gpt-5.4"}}"#
             )
+        );
+    }
+
+    #[test]
+    fn turn_metadata_sandbox_follows_the_presented_machine() {
+        // A macOS client is served by the Linux login, so the turn it reports
+        // cannot have run under seatbelt.
+        let rewritten = rewrite_turn_metadata(
+            r#"{"installation_id":"client-install","turn_id":"t","sandbox":"seatbelt"}"#,
+            &identity(),
+        )
+        .unwrap();
+        assert_eq!(
+            rewritten,
+            format!(r#"{{"installation_id":"{INSTALL}","turn_id":"t","sandbox":"seccomp"}}"#)
         );
     }
 

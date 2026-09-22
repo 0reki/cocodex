@@ -349,3 +349,17 @@ BEGIN
   END IF;
 END
 $$;
+
+-- Gateway settings the console writes at runtime, one JSON document per
+-- key (`turn_state` holds turn-state handling and its probe).
+CREATE TABLE IF NOT EXISTS gateway_settings (
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL,
+  updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
+);
+
+DROP TRIGGER IF EXISTS trg_set_updated_at_on_gateway_settings ON gateway_settings;
+CREATE TRIGGER trg_set_updated_at_on_gateway_settings
+  BEFORE UPDATE ON gateway_settings
+  FOR EACH ROW
+  EXECUTE FUNCTION set_updated_at();

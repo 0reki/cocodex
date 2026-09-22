@@ -181,6 +181,12 @@ impl AccountService {
         }
     }
 
+    /// Every login that can still be used upstream, for the background work
+    /// that maintains state per login rather than per request.
+    pub async fn active_logins(&self) -> Result<Vec<Account>, sqlx::Error> {
+        db::accounts::list_refreshable(&self.pool).await
+    }
+
     pub async fn usage(&self, account: &Account) -> Result<serde_json::Value, UpstreamError> {
         self.call_with_refresh(account, |row| async move {
             self.client

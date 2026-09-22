@@ -205,6 +205,12 @@ impl BackendForwarder {
                 // Not the client's credentials: a 401 would make Codex
                 // discard its own (valid) gateway session.
                 let message = "Upstream rejected the gateway's credentials";
+                warn!(
+                    request_id = %ctx.request_id,
+                    account_id = ctx.upstream_account_id.as_deref().unwrap_or(""),
+                    path = %ctx.target_path,
+                    "{message}"
+                );
                 self.interceptor
                     .on_request_finish(&ctx, Some(502), Some(message))
                     .await;
@@ -411,6 +417,27 @@ pub(crate) fn apply_upstream_identity_headers(headers: &mut HeaderMap, ctx: &Req
         headers.insert(version_header, hv);
     }
 
+    // The turn state is the login's, not the client's: on a managed model
+    // the client's own value never reaches upstream, and the one the gateway
+    // holds for that login takes its place. Unlike the identity headers this
+    // one may be added or removed, because a genuine Codex client sends it
+    // only once its session has been issued one.
+    if ctx.turn_state_key.is_some() {
+        let header = HeaderName::from_static(crate::upstream::client::TURN_STATE_HEADER);
+        match ctx
+            .upstream_turn_state
+            .as_deref()
+            .and_then(|state| HeaderValue::from_str(state).ok())
+        {
+            Some(hv) => {
+                headers.insert(header, hv);
+            }
+            None => {
+                headers.remove(header);
+            }
+        }
+    }
+
     let Some(identity) = client_identity::PresentedIdentity::from_ctx(ctx) else {
         return;
     };
@@ -606,7 +633,7 @@ mod tests {
         );
         assert_eq!(
             forwarded.get("user-agent").unwrap(),
-            "codex-tui/0.156.0 (Windows 10.0.22631; x86_64) xterm-256color (codex-tui; 0.156.0)"
+            "codex-tui/0.156.0 (Windows 10.0.22631; x86_64) WindowsTerminal (codex-tui; 0.156.0)"
         );
         assert_eq!(forwarded.get("originator").unwrap(), "codex-tui");
         assert_eq!(forwarded.get("version").unwrap(), "0.156.0");
@@ -636,9 +663,9 @@ mod tests {
         .unwrap();
         assert_eq!(metadata["installation_id"].as_str(), Some(install.as_str()));
         assert_eq!(metadata["session_id"].as_str(), Some("sess-keep"));
-        // The user's own sandbox setting; logins are per OS, so it always
-        // belongs to the presented platform.
-        assert_eq!(metadata["sandbox"].as_str(), Some("seccomp"));
+        // The sandbox follows the machine presented upstream: this client
+        // ran under Linux seccomp and is served by the Windows login.
+        assert_eq!(metadata["sandbox"].as_str(), Some("windows_elevated"));
         // The client's workspaces are its own and pass through unchanged.
         assert_eq!(
             metadata["workspaces"]["repo"]["associated_remote_urls"]["origin"].as_str(),
@@ -684,7 +711,7 @@ mod tests {
         let forwarded = upstream_headers(&ctx);
         assert_eq!(
             forwarded.get("user-agent").unwrap(),
-            "codex_exec/0.156.0 (Windows 10.0.22631; x86_64) xterm-256color (codex_exec; 0.156.0)"
+            "codex_exec/0.156.0 (Windows 10.0.22631; x86_64) WindowsTerminal (codex_exec; 0.156.0)"
         );
         assert_eq!(forwarded.get("originator").unwrap(), "codex_exec");
 

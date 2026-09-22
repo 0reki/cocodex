@@ -25,11 +25,23 @@ pub enum Platform {
 }
 
 impl Platform {
+    /// The OS the client itself runs on.
     pub fn as_str(&self) -> &'static str {
         match self {
             Platform::Windows => "windows",
             Platform::Linux => "linux",
             Platform::Darwin => "darwin",
+        }
+    }
+
+    /// The upstream login that serves this client. A ChatGPT account is
+    /// logged in once for Windows and once for Linux; a macOS client rides
+    /// the Linux login, because the two are close enough for one identity
+    /// while a Windows one would contradict everything the client sends.
+    pub fn served_by(&self) -> &'static str {
+        match self {
+            Platform::Windows => "windows",
+            Platform::Linux | Platform::Darwin => "linux",
         }
     }
 }

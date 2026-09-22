@@ -11,6 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
 use serde_json::{Value, json};
+use tracing::warn;
 
 use super::{Body, Db, Principal, fail, internal, no_store};
 use crate::AppState;
@@ -128,6 +129,7 @@ async fn my_usage(Db(ready): Db, principal: Principal) -> Response {
         Ok(summary) => summary,
         Err(error) if error == "upstream_account_unassigned" => return unassigned(),
         Err(detail) => {
+            warn!(%account_id, %detail, "upstream usage unavailable for this user");
             return no_store(
                 (
                     StatusCode::BAD_GATEWAY,

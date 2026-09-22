@@ -106,6 +106,9 @@ pub struct RequestObservation {
     pub settled: bool,
     /// A WebSocket carries many responses; HTTP exactly one.
     pub websocket: bool,
+    /// A turn state an upstream event carried, waiting to be taken into the
+    /// gateway's own cache (see `crate::turn_state`).
+    captured_turn_state: Option<String>,
 }
 
 impl Default for RequestObservation {
@@ -120,6 +123,7 @@ impl Default for RequestObservation {
             upstream_complete: false,
             settled: false,
             websocket: false,
+            captured_turn_state: None,
         }
     }
 }
@@ -265,12 +269,13 @@ impl RequestObservation {
         }
         // The turn state travels in the metadata event's relayed headers.
         if (kind == "response.metadata" || kind == "codex.response.metadata")
-            && let Some(len) = value
+            && let Some(state) = value
                 .get("headers")
                 .and_then(Value::as_object)
-                .and_then(turn_state_len)
+                .and_then(turn_state)
         {
-            current.turn_state_len = Some(len);
+            current.turn_state_len = Some(state.len());
+            self.captured_turn_state = Some(state);
         }
         if kind == "error" {
             current.status = value
@@ -306,6 +311,11 @@ impl RequestObservation {
         }
     }
 
+    /// The turn state the last upstream event carried, once.
+    pub fn take_captured_turn_state(&mut self) -> Option<String> {
+        self.captured_turn_state.take()
+    }
+
     /// Everything to settle: finished responses plus an unfinished one.
     pub fn take_all(&mut self) -> Vec<ResponseObservation> {
         let mut all = std::mem::take(&mut self.finished);
@@ -324,12 +334,12 @@ impl RequestObservation {
     }
 }
 
-/// The length of the `x-codex-turn-state` header value in a metadata event's
-/// relayed `headers` object (the name is matched case-insensitively).
-fn turn_state_len(headers: &serde_json::Map<String, Value>) -> Option<usize> {
+/// The `x-codex-turn-state` header value in a metadata event's relayed
+/// `headers` object (the name is matched case-insensitively).
+fn turn_state(headers: &serde_json::Map<String, Value>) -> Option<String> {
     headers.iter().find_map(|(name, value)| {
-        name.eq_ignore_ascii_case("x-codex-turn-state")
-            .then(|| value.as_str().map(str::len))
+        name.eq_ignore_ascii_case(crate::upstream::client::TURN_STATE_HEADER)
+            .then(|| value.as_str().map(str::to_string))
             .flatten()
     })
 }

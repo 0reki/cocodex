@@ -18,13 +18,11 @@ const LINUX_UA: &str =
 const DARWIN_UA: &str =
     "codex-tui/0.155.1 (Mac OS 14.1.0; arm64) iTerm.app/3.5.10 (codex-tui; 0.155.1)";
 // …and what the gateway presents for each platform at the pinned version:
-// the login's OS, the client's own terminal.
+// the login's OS, and the client's own terminal when that OS could run it.
 const UPSTREAM_WINDOWS_UA: &str =
     "codex-tui/0.154.0 (Windows 10.0.22631; x86_64) WindowsTerminal (codex-tui; 0.154.0)";
 const UPSTREAM_LINUX_UA: &str =
     "codex-tui/0.154.0 (Debian 13.0.0; x86_64) xterm-256color (codex-tui; 0.154.0)";
-const UPSTREAM_DARWIN_UA: &str =
-    "codex-tui/0.154.0 (Mac OS 15.5.0; arm64) iTerm.app/3.5.10 (codex-tui; 0.154.0)";
 
 #[derive(Clone, Default)]
 struct Captured {
@@ -69,14 +67,15 @@ fn get(bearer: &str, user_agent: &str) -> axum::http::request::Builder {
         .header("authorization", bearer)
 }
 
-/// One ChatGPT account logged in once per platform: each client platform
-/// must reach its own login with that platform's identity.
+/// One ChatGPT account logged in once for Windows and once for Linux: each
+/// client must reach the login that serves it, with that login's identity.
+/// A macOS client is served by the Linux login.
 #[tokio::test]
 async fn routes_each_platform_to_its_login_of_the_assigned_account() {
     common::pin_codex_version();
     let db = common::test_db().await;
     let (origin, captured) = mock_upstream().await;
-    for platform in ["windows", "linux", "darwin"] {
+    for platform in ["windows", "linux"] {
         db.insert_account(
             &format!("{platform}@x"),
             "acct-1",
@@ -140,8 +139,10 @@ async fn routes_each_platform_to_its_login_of_the_assigned_account() {
     // Headers the client did not send are not added.
     assert!(headers[1].get("originator").is_none());
     assert!(headers[1].get("version").is_none());
-    assert_eq!(headers[2]["authorization"], "Bearer darwin-token");
-    assert_eq!(headers[2]["user-agent"], UPSTREAM_DARWIN_UA);
+    // The macOS client rides the Linux login, and iTerm2 — which only runs
+    // on macOS — does not survive onto the Debian machine it presents.
+    assert_eq!(headers[2]["authorization"], "Bearer linux-token");
+    assert_eq!(headers[2]["user-agent"], UPSTREAM_LINUX_UA);
 }
 
 #[tokio::test]
@@ -160,8 +161,9 @@ async fn generic_login_serves_platforms_without_their_own() {
     assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
     let headers = captured.headers.lock().unwrap();
     assert_eq!(headers[0]["authorization"], "Bearer generic-token");
-    // A generic login presents the client's own platform.
-    assert_eq!(headers[0]["user-agent"], UPSTREAM_DARWIN_UA);
+    // A generic login presents the client's own platform, which for a macOS
+    // client is the Linux machine.
+    assert_eq!(headers[0]["user-agent"], UPSTREAM_LINUX_UA);
 }
 
 #[tokio::test]

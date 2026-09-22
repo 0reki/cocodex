@@ -9,6 +9,7 @@ pub mod install;
 pub mod logs;
 pub mod portal_auth;
 pub mod setup;
+pub mod turn_state;
 pub mod users;
 
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Map, Value, json};
+use tracing::{debug, error};
 
 use crate::AppState;
 use crate::auth::portal::{PortalTokenKind, verify_portal_token};
@@ -32,6 +34,11 @@ pub fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
     } else {
         "invalid_request_error"
     };
+    if status.is_server_error() {
+        error!(status = status.as_u16(), %code, %message, "request failed");
+    } else {
+        debug!(status = status.as_u16(), %code, %message, "request refused");
+    }
     (
         status,
         axum::Json(json!({ "error": { "message": message, "type": kind, "code": code } })),
@@ -40,12 +47,20 @@ pub fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
 }
 
 /// `{"ok": false, "error": "<message>"}`, the shape most console routes use.
+///
+/// Every failure is logged as well as answered: the admin reading the console
+/// and whoever reads the server are rarely the same person, and a message that
+/// lives only in the response leaves nothing to debug with once the page is
+/// closed. A server error is worth a line of its own; a refused or missing
+/// request is routine and stays at debug.
 pub fn fail(status: StatusCode, error: impl Into<String>) -> Response {
-    (
-        status,
-        axum::Json(json!({ "ok": false, "error": error.into() })),
-    )
-        .into_response()
+    let error = error.into();
+    if status.is_server_error() {
+        error!(status = status.as_u16(), %error, "console request failed");
+    } else {
+        debug!(status = status.as_u16(), %error, "console request refused");
+    }
+    (status, axum::Json(json!({ "ok": false, "error": error }))).into_response()
 }
 
 pub fn internal(error: impl std::fmt::Display) -> Response {
@@ -257,6 +272,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     let admin = Router::new()
         .merge(users::admin_routes())
         .merge(accounts::routes())
+        .merge(turn_state::routes())
         .route_layer(middleware::from_fn_with_state(state, require_admin));
     public
         .merge(signed_in)

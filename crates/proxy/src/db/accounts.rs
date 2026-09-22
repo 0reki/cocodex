@@ -1,11 +1,14 @@
 //! `openai_accounts`: one row per upstream login. A ChatGPT account
-//! (`account_id`) is usually logged in once per client platform.
+//! (`account_id`) is usually logged in once per client platform, and there
+//! are two of those: Windows and Linux. macOS clients are served by the
+//! Linux login, so a login stored as `darwin` (from before the two-platform
+//! scheme) reads back as `linux`.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 pub const STATUSES: [&str; 3] = ["active", "inactive", "disabled"];
-pub const PLATFORMS: [&str; 4] = ["windows", "linux", "darwin", "all"];
+pub const PLATFORMS: [&str; 3] = ["windows", "linux", "all"];
 
 fn normalize(value: &str) -> String {
     value.trim().to_lowercase().replace(' ', "_")
@@ -18,8 +21,8 @@ pub fn normalize_status(value: &str) -> Option<&'static str> {
 
 pub fn normalize_platform(value: &str) -> Option<&'static str> {
     let value = normalize(value);
-    if value == "macos" {
-        return Some("darwin");
+    if value == "macos" || value == "darwin" {
+        return Some("linux");
     }
     PLATFORMS
         .iter()
@@ -142,21 +145,33 @@ pub async fn resolve_for_platform(
     account_id: &str,
     platform: &str,
 ) -> Result<Option<Account>, sqlx::Error> {
+    // `darwin` names a client, not a login: macOS is served by Linux.
+    let platform = normalize_platform(platform)
+        .map(str::to_string)
+        .unwrap_or_else(|| normalize(platform));
     sqlx::query_as(sqlx::AssertSqlSafe(select(
         r#"
         WHERE account_id = $1
           AND LOWER(TRIM(COALESCE(status, ''))) <> 'disabled'
           AND BTRIM(access_token) <> ''
-          AND LOWER(TRIM(COALESCE(platform, 'all'))) IN ($2, 'all')
+          AND CASE
+                WHEN LOWER(TRIM(COALESCE(platform, 'all'))) IN ('darwin', 'macos')
+                  THEN 'linux'
+                ELSE LOWER(TRIM(COALESCE(platform, 'all')))
+              END IN ($2, 'all')
         ORDER BY
-          (LOWER(TRIM(COALESCE(platform, 'all'))) = $2) DESC,
+          (CASE
+             WHEN LOWER(TRIM(COALESCE(platform, 'all'))) IN ('darwin', 'macos')
+               THEN 'linux'
+             ELSE LOWER(TRIM(COALESCE(platform, 'all')))
+           END = $2) DESC,
           (LOWER(TRIM(status)) = 'active') DESC,
           updated_at DESC
         LIMIT 1
         "#,
     )))
     .bind(account_id)
-    .bind(platform)
+    .bind(&platform)
     .fetch_optional(pool)
     .await
 }

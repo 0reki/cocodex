@@ -36,7 +36,7 @@ pub struct Pricing {
 }
 
 /// Strips a dated snapshot suffix such as `-2026-01-15`.
-fn base_model_id(model: &str) -> &str {
+pub fn base_model_id(model: &str) -> &str {
     let bytes = model.as_bytes();
     if bytes.len() > 11 {
         let suffix = &model[model.len() - 11..];

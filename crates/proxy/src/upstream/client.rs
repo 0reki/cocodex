@@ -70,6 +70,18 @@ pub const CODEX_OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback"
 const CODEX_OAUTH_SCOPE: &str =
     "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
+/// The opaque routing token upstream issues with a Responses turn; Codex
+/// replays it on the turns that follow.
+pub const TURN_STATE_HEADER: &str = "x-codex-turn-state";
+
+/// What a Responses request answered with.
+pub struct ResponsesReply {
+    pub status: u16,
+    /// The turn state upstream issued, when the response carried one.
+    pub turn_state: Option<String>,
+    pub body: String,
+}
+
 /// The account a call is made on behalf of.
 pub struct Credentials<'a> {
     pub access_token: &'a str,
@@ -118,7 +130,16 @@ fn string_field(value: &Value, key: &str) -> String {
 }
 
 fn transport(error: reqwest::Error, endpoint: &str) -> UpstreamError {
-    UpstreamError::new(None, format!("{endpoint}: {error}"))
+    // The cause chain is where the useful part lives: reqwest's own Display
+    // is just "error sending request", while the source says whether the
+    // connection timed out or a proxy refused the tunnel.
+    let mut message = format!("{endpoint}: {error}");
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        message.push_str(&format!(": {cause}"));
+        source = cause.source();
+    }
+    UpstreamError::new(None, message)
 }
 
 impl UpstreamClient {
@@ -394,11 +415,25 @@ impl UpstreamClient {
         credentials: &Credentials<'_>,
         payload: &Value,
     ) -> Result<(u16, String), UpstreamError> {
+        let reply = self
+            .post_responses_with(&self.http, credentials, payload)
+            .await?;
+        Ok((reply.status, reply.body))
+    }
+
+    /// The same request over a caller-supplied client, so a turn-state probe
+    /// can leave through its own proxy. The turn state upstream issued comes
+    /// back with it.
+    pub async fn post_responses_with(
+        &self,
+        http: &reqwest::Client,
+        credentials: &Credentials<'_>,
+        payload: &Value,
+    ) -> Result<ResponsesReply, UpstreamError> {
         let body = zstd::encode_all(payload.to_string().as_bytes(), 3)
             .map_err(|e| UpstreamError::new(None, e.to_string()))?;
         let url = format!("{}/backend-api/codex/responses", self.chatgpt_origin);
-        let mut request = self
-            .http
+        let mut request = http
             .post(&url)
             .timeout(Duration::from_secs(300))
             .header(
@@ -442,6 +477,13 @@ impl UpstreamClient {
             );
         }
         let status = response.status().as_u16();
+        let turn_state = response
+            .headers()
+            .get(TURN_STATE_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         let text = response
             .text()
             .await
@@ -452,7 +494,11 @@ impl UpstreamClient {
                 format!("HTTP 401: {}", truncate(&text)),
             ));
         }
-        Ok((status, text))
+        Ok(ResponsesReply {
+            status,
+            turn_state,
+            body: text,
+        })
     }
 }
 
