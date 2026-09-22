@@ -273,8 +273,8 @@ fn rewrite_responses_body(value: &mut Value, identity: &PresentedIdentity<'_>) -
 }
 
 /// Rewrites whatever client identity a JSON body sent to `ctx.target_path`
-/// carries. MCP needs only the presented version, since Codex opens that
-/// session without credentials and so without an upstream login.
+/// carries. MCP needs only the presented version: the `initialize` handshake
+/// carries no account or installation identity.
 fn rewrite_json_body(value: &mut Value, ctx: &RequestContext) -> bool {
     let path = ctx.target_path.trim_end_matches('/');
     if path.ends_with("/ps/mcp") {
@@ -858,8 +858,7 @@ mod tests {
                 "clientInfo": { "name": "codex-mcp-client", "title": "Codex", "version": "0.155.1" }
             }
         });
-        // Codex opens the MCP session without credentials, so the request
-        // has no upstream login: only the presented version is known.
+        // Only the presented version matters to the handshake.
         let request = http::Request::builder()
             .uri("/backend-api/ps/mcp")
             .body(axum::body::Body::empty())

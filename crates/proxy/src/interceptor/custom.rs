@@ -498,11 +498,27 @@ fn upstream_token_identity(row: &crate::db::accounts::Account) -> (String, Strin
     (user_id, email)
 }
 
-/// The ChatGPT MCP endpoint without an `Authorization` header: Codex sends
-/// its session setup this way, and nothing in it identifies the user.
+/// The ChatGPT MCP endpoint, or a path under it, without an `Authorization`
+/// header. Codex only attaches ChatGPT credentials to chatgpt.com, so against
+/// the gateway it treats `codex_apps` as a plain OAuth MCP server: it probes
+/// the endpoint and its `.well-known` metadata, then opens the session, all
+/// without a token. Nothing in these requests identifies the user.
 fn is_unauthenticated_mcp(path: &str, headers: &http::HeaderMap) -> bool {
-    path.trim_end_matches('/').ends_with("/ps/mcp")
+    let path = path.trim_end_matches('/');
+    (path.ends_with("/ps/mcp") || path.contains("/ps/mcp/"))
         && !headers.contains_key(http::header::AUTHORIZATION)
+}
+
+/// What chatgpt.com answers an MCP request without credentials. The gateway
+/// gives the same answer itself instead of relaying the request: the upstream
+/// logins' connectors are not shared, and to Codex it means "no OAuth here".
+fn unauthenticated_mcp_response() -> Response {
+    (
+        StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+        r#"{"message":"no_biscuit_no_service"}"#,
+    )
+        .into_response()
 }
 
 #[async_trait]
@@ -512,14 +528,22 @@ impl Interceptor for CustomInterceptor {
         ctx: &mut RequestContext,
         req: Request<Body>,
     ) -> Result<RequestAction, Box<dyn std::error::Error + Send + Sync>> {
-        // Codex opens the ChatGPT MCP session without credentials; a
-        // genuine client's request reaches upstream just like that.
         if is_unauthenticated_mcp(&ctx.target_path, req.headers()) {
-            if let Ok(ready) = self.runtime.ready().await {
-                ctx.upstream_client_version = Some(ready.accounts.client.versions.version());
+            info!(
+                request_id = %ctx.request_id,
+                method = %ctx.method,
+                path = %ctx.path,
+                user_agent = req
+                    .headers()
+                    .get(http::header::USER_AGENT)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or(""),
+                "answering unauthenticated MCP request locally (451 no_biscuit_no_service)"
+            );
+            if let Ok(mut obs) = ctx.observation.lock() {
+                obs.record_error("no_biscuit_no_service", "MCP request without credentials");
             }
-            debug!(request_id = %ctx.request_id, "forwarding unauthenticated MCP request");
-            return Ok(RequestAction::Forward(req));
+            return Ok(RequestAction::ShortCircuit(unauthenticated_mcp_response()));
         }
 
         // A few Codex requests carry no User-Agent at all; anything else

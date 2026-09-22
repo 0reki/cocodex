@@ -227,15 +227,18 @@ async fn requests_without_a_user_agent_use_any_login_of_the_account() {
     }
 }
 
+/// Codex sends `codex_apps` traffic to the gateway without credentials (it
+/// only trusts chatgpt.com with its ChatGPT token): the OAuth discovery probes
+/// and the session itself. The gateway answers all of it the way chatgpt.com
+/// does, without relaying anything upstream.
 #[tokio::test]
-async fn unauthenticated_mcp_requests_pass_through() {
+async fn unauthenticated_mcp_requests_are_answered_locally() {
     common::pin_codex_version();
     let db = common::test_db().await;
     let (origin, captured) = mock_upstream().await;
     let app = create_router(common::config(db.settings(), &origin), None);
 
-    // Codex opens the ChatGPT MCP session like this (captured from 0.155.1).
-    let body = serde_json::json!({
+    let initialize = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 0,
         "method": "initialize",
@@ -245,25 +248,53 @@ async fn unauthenticated_mcp_requests_pass_through() {
             "clientInfo": { "name": "codex-mcp-client", "title": "Codex", "version": "0.155.1" }
         }
     });
-    let request = Request::builder()
-        .uri("/backend-api/ps/mcp")
-        .method("POST")
-        .header("user-agent", "codex-mcp-client/0.155.1")
-        .header("originator", "codex-tui")
-        .header("x-openai-product-sku", "codex")
-        .header("accept", "text/event-stream, application/json")
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_string()))
-        .unwrap();
-    assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
-
-    let other = captured.other.lock().unwrap();
-    let (_, headers, body) = &other[0];
-    assert!(headers.get("authorization").is_none());
-    assert!(headers.get("chatgpt-account-id").is_none());
-    assert_eq!(headers["user-agent"], "codex-mcp-client/0.154.0");
-    assert_eq!(headers["originator"], "codex-tui");
-    assert_eq!(headers["x-openai-product-sku"], "codex");
-    let body: serde_json::Value = serde_json::from_slice(body).unwrap();
-    assert_eq!(body["params"]["clientInfo"]["version"], "0.154.0");
+    let mut requests = vec![
+        Request::builder()
+            .uri("/backend-api/ps/mcp")
+            .method("POST")
+            .header("user-agent", "codex-mcp-client/0.155.1")
+            .header("originator", "codex-tui")
+            .header("x-openai-product-sku", "codex")
+            .header("accept", "text/event-stream, application/json")
+            .header("content-type", "application/json")
+            .body(Body::from(initialize.to_string()))
+            .unwrap(),
+    ];
+    // The discovery probes rmcp sends (captured from 0.155.0-alpha.9.2).
+    for path in [
+        "/backend-api/ps/mcp",
+        "/backend-api/ps/mcp/.well-known/oauth-protected-resource",
+        "/backend-api/ps/mcp/.well-known/openid-configuration",
+        "/api/codex/ps/mcp",
+    ] {
+        requests.push(
+            Request::builder()
+                .uri(path)
+                .method("GET")
+                .header("accept", "*/*")
+                .header("mcp-protocol-version", "2024-11-05")
+                .header("user-agent", "codex-mcp-client/0.155.0-alpha.9.2")
+                .header("x-openai-product-sku", "codex")
+                .body(Body::empty())
+                .unwrap(),
+        );
+    }
+    for request in requests {
+        let path = request.uri().path().to_string();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAVAILABLE_FOR_LEGAL_REASONS,
+            "{path}"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            &body[..],
+            br#"{"message":"no_biscuit_no_service"}"#,
+            "{path}"
+        );
+    }
+    assert!(captured.other.lock().unwrap().is_empty());
 }
