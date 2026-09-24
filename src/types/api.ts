@@ -57,6 +57,8 @@ export type RequestLog = {
   serviceTier: string | null;
   statusCode: number | null;
   ttfbMs: number | null;
+  // Time to the first generated token (not the first byte).
+  ttftMs: number | null;
   latencyMs: number | null;
   tokensInfo: Record<string, unknown> | null;
   totalTokens: number | null;

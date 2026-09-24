@@ -167,6 +167,20 @@ function getTokens(tokensInfo: Record<string, unknown> | null) {
   };
 }
 
+// Output tokens per second over generation, from the first generated token
+// (TTFT, not TTFB) to the end of the response.
+function getTps(log: RequestLog) {
+  const output = Number(log.tokensInfo?.output_tokens);
+  if (log.ttftMs === null || log.latencyMs === null) return null;
+  const seconds = (log.latencyMs - log.ttftMs) / 1000;
+  if (!Number.isFinite(output) || output <= 0 || seconds <= 0) return null;
+  return output / seconds;
+}
+
+function formatTps(value: number | null) {
+  return value === null ? "—" : `${value.toFixed(1)} tok/s`;
+}
+
 function formatTurnStateLen(value: number | null) {
   return value === null ? "—" : value.toLocaleString();
 }
@@ -239,6 +253,8 @@ function LogDetails({ log }: { log: RequestLog }) {
       </DetailField>
       <DetailField label="HTTP 状态">{log.statusCode ?? "—"}</DetailField>
       <DetailField label="TTFB">{formatMs(log.ttfbMs)}</DetailField>
+      <DetailField label="TTFT">{formatMs(log.ttftMs)}</DetailField>
+      <DetailField label="TPS">{formatTps(getTps(log))}</DetailField>
       <DetailField label="延迟">{formatMs(log.latencyMs)}</DetailField>
       <DetailField label="费用">{formatCost(log.cost)}</DetailField>
       <DetailField label="Intent ID">{log.intentId ?? "—"}</DetailField>
@@ -267,14 +283,19 @@ export function LogsPage() {
   const [history, setHistory] = useState<Array<string | null>>([]);
   const [selected, setSelected] = useState<RequestLog | null>(null);
 
-  const loadLogs = useCallback((signal: AbortSignal) => {
-    const params = new URLSearchParams({ limit: "50" });
-    if (cursor) params.set("cursor", cursor);
-    Object.entries(filters).forEach(([key, value]) => {
-      if (value) params.set(key, value);
-    });
-    return api<RequestLogsResponse>(`/api/request-logs?${params}`, { signal });
-  }, [api, cursor, filters]);
+  const loadLogs = useCallback(
+    (signal: AbortSignal) => {
+      const params = new URLSearchParams({ limit: "50" });
+      if (cursor) params.set("cursor", cursor);
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value) params.set(key, value);
+      });
+      return api<RequestLogsResponse>(`/api/request-logs?${params}`, {
+        signal,
+      });
+    },
+    [api, cursor, filters],
+  );
   const logs = useResource(loadLogs);
   const dateRange: DateRange | undefined = filters.dateFrom
     ? {
@@ -393,6 +414,7 @@ export function LogsPage() {
                   <TableHead className="px-3 py-2">模型</TableHead>
                   <TableHead className="px-3 py-2">状态</TableHead>
                   <TableHead className="px-3 py-2">TTFB / 延迟</TableHead>
+                  <TableHead className="px-3 py-2">TPS</TableHead>
                   <TableHead className="px-3 py-2">
                     输入 / 缓存 / 输出
                   </TableHead>
@@ -428,6 +450,9 @@ export function LogsPage() {
                         <TableCell className="px-3 py-2 text-xs">
                           {formatMs(log.ttfbMs)} / {formatMs(log.latencyMs)}
                         </TableCell>
+                        <TableCell className="px-3 py-2 text-xs whitespace-nowrap">
+                          {formatTps(getTps(log))}
+                        </TableCell>
                         <TableCell className="px-3 py-2 text-xs">
                           {tokens.input} / {tokens.cachedInput} /{" "}
                           {tokens.output}
@@ -456,7 +481,7 @@ export function LogsPage() {
                   })
                 ) : (
                   <TableRow>
-                    <TableCell colSpan={9} className="p-0">
+                    <TableCell colSpan={10} className="p-0">
                       <EmptyState className="min-h-32" />
                     </TableCell>
                   </TableRow>
