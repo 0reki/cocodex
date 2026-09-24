@@ -79,6 +79,9 @@ pub struct ResponseObservation {
     /// HTTP-like status carried by a WebSocket `error` event.
     pub status: Option<u16>,
     pub terminal: Option<Terminal>,
+    /// A plain (non-streaming) body was read to the end. Such a response —
+    /// Search, say — has no terminal event and is complete once it arrived.
+    pub body_complete: bool,
     /// Whether anything was sent or received for this response.
     pub active: bool,
 }
@@ -99,6 +102,7 @@ impl ResponseObservation {
             error_message: None,
             status: None,
             terminal: None,
+            body_complete: false,
             active: false,
         }
     }
@@ -238,10 +242,15 @@ impl RequestObservation {
         if self.is_sse == Some(true) {
             let leftover = std::mem::take(&mut self.sse_buf);
             self.ingest_block(&String::from_utf8_lossy(&leftover));
-        } else if !self.json_buf.is_empty()
+            return;
+        }
+        if !self.json_buf.is_empty()
             && let Ok(value) = serde_json::from_slice::<Value>(&std::mem::take(&mut self.json_buf))
         {
             self.ingest_event(&value);
+        }
+        if self.is_sse == Some(false) && self.upstream_complete && self.current.active {
+            self.current.body_complete = true;
         }
     }
 
@@ -528,6 +537,31 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
         let all = obs.take_all();
         assert_eq!(all[0].usage.as_ref().unwrap().total_tokens, Some(4));
         assert_eq!(all[0].terminal, Some(Terminal::Completed));
+    }
+
+    #[test]
+    fn plain_body_is_complete_once_read() {
+        // A Search response has no usage and no terminal event.
+        let mut obs = RequestObservation::default();
+        obs.ingest_chunk(br#"{"results":[]}"#);
+        obs.upstream_complete = true;
+        obs.finish_body();
+        let all = obs.take_all();
+        assert!(all[0].body_complete);
+        assert_eq!(all[0].terminal, None);
+
+        // The client left before the body ended.
+        let mut obs = RequestObservation::default();
+        obs.ingest_chunk(br#"{"results":["#);
+        obs.finish_body();
+        assert!(!obs.take_all()[0].body_complete);
+
+        // A stream that ended without a terminal event is not complete.
+        let mut obs = RequestObservation::default();
+        obs.ingest_chunk(b"data: {\"type\":\"response.created\",\"response\":{}}\n\n");
+        obs.upstream_complete = true;
+        obs.finish_body();
+        assert!(!obs.take_all()[0].body_complete);
     }
 
     #[test]

@@ -137,6 +137,10 @@ async fn mock_openai(state: Upstream) -> String {
             "/backend-api/codex/responses",
             get(responses_ws).post(responses_http),
         )
+        .route(
+            "/backend-api/codex/alpha/search",
+            post(|| async { axum::Json(json!({ "results": [{ "title": "cocodex" }] })) }),
+        )
         .route("/backend-api/wham/usage", get(usage))
         .route(
             "/backend-api/wham/analytics/daily-workspace-usage-counts",
@@ -388,7 +392,20 @@ async fn console_and_codex_client_end_to_end() {
         .unwrap();
     let codex = tokens["access_token"].as_str().unwrap().to_string();
 
-    // 5. Linux over SSE: the stale upstream token is refreshed and retried.
+    // 5. Search is a plain JSON request with no terminal event.
+    let response = client
+        .http
+        .post(format!("{}/backend-api/codex/alpha/search", client.base))
+        .bearer_auth(&codex)
+        .header("user-agent", LINUX_UA)
+        .json(&json!({ "query": "cocodex" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert!(response.text().await.unwrap().contains("results"));
+
+    // Linux over SSE: the stale upstream token is refreshed and retried.
     // Fast mode: the routing hint carries the tier.
     let response = client
         .http
@@ -451,6 +468,18 @@ async fn console_and_codex_client_end_to_end() {
         })
     })
     .await;
+    // The search arrived whole, so it is complete, not "unfinished".
+    let (_, logs) = client
+        .call("GET", "/api/request-logs?limit=10", Some(&alice), None)
+        .await;
+    let search = logs["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["path"] == "/backend-api/codex/alpha/search")
+        .unwrap_or_else(|| panic!("no search log: {logs}"));
+    assert_eq!(search["isFinal"], true, "{search}");
+    assert_eq!(search["streamEndReason"], "completed", "{search}");
     let (_, logs) = client
         .call(
             "GET",
@@ -490,7 +519,7 @@ async fn console_and_codex_client_end_to_end() {
             None,
         )
         .await;
-    assert_eq!(hourly["models"], json!(["gpt-5.4"]));
+    assert_eq!(hourly["models"], json!(["codex-search", "gpt-5.4"]));
     let (_, users) = client.call("GET", "/api/users", Some(admin), None).await;
     let alice_row = users["items"]
         .as_array()

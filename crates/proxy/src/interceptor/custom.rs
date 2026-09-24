@@ -394,6 +394,7 @@ impl CustomInterceptor {
             Some(Terminal::Failed) => (false, Some("failed")),
             Some(Terminal::Cancelled) => (false, Some("cancelled")),
             None if !success => (false, None),
+            None if response.body_complete => (true, Some("completed")),
             None if client_left => (false, Some("client_aborted")),
             None if transport_error.is_some() => (false, Some("upstream_error")),
             None => (false, None),
