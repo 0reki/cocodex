@@ -45,6 +45,8 @@ fn sse_turn(text: &str) -> String {
         "type": "response.completed",
         "response": {
             "model": "gpt-5.4",
+            // The real upstream reports `default` even for a Fast turn.
+            "service_tier": "default",
             "usage": { "input_tokens": 1000, "output_tokens": 500, "total_tokens": 1500 }
         }
     });
@@ -387,12 +389,13 @@ async fn console_and_codex_client_end_to_end() {
     let codex = tokens["access_token"].as_str().unwrap().to_string();
 
     // 5. Linux over SSE: the stale upstream token is refreshed and retried.
+    // Fast mode: the routing hint carries the tier.
     let response = client
         .http
         .post(format!("{}/backend-api/codex/responses", client.base))
         .bearer_auth(&codex)
         .header("user-agent", LINUX_UA)
-        .header("x-codex-routing-hint", "model=gpt-5.4")
+        .header("x-codex-routing-hint", "model=gpt-5.4;tier=priority")
         .json(&json!({ "model": "gpt-5.4", "input": "ping", "stream": true }))
         .send()
         .await
@@ -401,7 +404,8 @@ async fn console_and_codex_client_end_to_end() {
     assert!(response.text().await.unwrap().contains("pong"));
     assert_eq!(upstream.refreshes.load(Ordering::SeqCst), 1);
 
-    // 6. Windows over WebSocket: two turns on one connection.
+    // 6. Windows over WebSocket: two turns on one connection, the first in
+    // Fast mode.
     let mut request = format!("ws://{addr}/backend-api/codex/responses")
         .into_client_request()
         .unwrap();
@@ -412,12 +416,14 @@ async fn console_and_codex_client_end_to_end() {
         .headers_mut()
         .insert("user-agent", WINDOWS_UA.parse().unwrap());
     let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
-    for _ in 0..2 {
+    for tier in [Some("priority"), None] {
+        let mut create = json!({ "type": "response.create", "model": "gpt-5.4" });
+        if let Some(tier) = tier {
+            create["service_tier"] = json!(tier);
+        }
         socket
             .send(tokio_tungstenite::tungstenite::Message::Text(
-                json!({ "type": "response.create", "model": "gpt-5.4" })
-                    .to_string()
-                    .into(),
+                create.to_string().into(),
             ))
             .await
             .unwrap();
@@ -463,6 +469,19 @@ async fn console_and_codex_client_end_to_end() {
     assert_eq!(item["totalTokens"], 1500);
     // 1000 input at $2.50/M + 500 output at $15/M.
     assert_eq!(item["cost"], 0.01);
+    assert_eq!(item["serviceTier"], "default");
+    // The first generated token came with the output delta.
+    assert!(item["ttftMs"].is_i64(), "{item}");
+    // The two Fast turns are recorded as priority and billed at 2x (GPT-5.4)
+    // although the upstream reported `default`.
+    let fast: Vec<&Value> = logs["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["serviceTier"] == "priority")
+        .collect();
+    assert_eq!(fast.len(), 2, "{logs}");
+    assert!(fast.iter().all(|item| item["cost"] == 0.02), "{logs}");
     let (_, hourly) = client
         .call(
             "GET",
@@ -479,7 +498,7 @@ async fn console_and_codex_client_end_to_end() {
         .iter()
         .find(|u| u["id"] == alice_id.as_str())
         .unwrap();
-    assert_eq!(alice_row["used"], 0.03);
+    assert_eq!(alice_row["used"], 0.05);
     assert_eq!(alice_row["accountId"], ACCOUNT);
 
     // 8. The weekly window fills up: alice's share is exhausted.

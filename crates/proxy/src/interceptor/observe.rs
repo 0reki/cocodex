@@ -58,7 +58,13 @@ pub struct ResponseObservation {
     /// The model the `response.completed`/`response.done` event reports as
     /// used. Absent when the response never completed.
     pub completed_model: Option<String>,
-    pub service_tier: Option<String>,
+    /// The service tier the client asked for (`priority` is Codex's Fast
+    /// mode): the `response.create` frame's `service_tier` on a WebSocket
+    /// turn, or the `tier=` of `x-codex-routing-hint` on HTTP.
+    pub requested_service_tier: Option<String>,
+    /// The service tier the upstream events report. It says `default` even
+    /// for a Fast turn, so it only stands in when the client sent no tier.
+    pub upstream_service_tier: Option<String>,
     /// Length of the opaque `x-codex-turn-state` carried by the upstream
     /// `response.metadata` event, when present.
     pub turn_state_len: Option<usize>,
@@ -83,7 +89,8 @@ impl ResponseObservation {
             started_at,
             requested_model: None,
             completed_model: None,
-            service_tier: None,
+            requested_service_tier: None,
+            upstream_service_tier: None,
             turn_state_len: None,
             usage: None,
             ttfb_ms: None,
@@ -94,6 +101,14 @@ impl ResponseObservation {
             terminal: None,
             active: false,
         }
+    }
+
+    /// The tier the response is recorded and billed at: the one the client
+    /// asked for, else what the upstream reported.
+    pub fn service_tier(&self) -> Option<&str> {
+        self.requested_service_tier
+            .as_deref()
+            .or(self.upstream_service_tier.as_deref())
     }
 }
 
@@ -157,8 +172,13 @@ impl RequestObservation {
                 .or_else(|| value.get("response").and_then(|r| r.get("model")))
                 .and_then(Value::as_str);
             self.current.requested_model = model.map(str::to_string);
-            let tier = value.get("service_tier").and_then(Value::as_str);
-            self.current.service_tier = tier.map(str::to_string);
+            let tier = value
+                .get("service_tier")
+                .or_else(|| value.get("response").and_then(|r| r.get("service_tier")))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|tier| !tier.is_empty());
+            self.current.requested_service_tier = tier.map(str::to_string);
         }
         Some(value)
     }
@@ -168,6 +188,15 @@ impl RequestObservation {
     pub fn set_requested_model(&mut self, model: &str) {
         if self.current.requested_model.is_none() && !model.is_empty() {
             self.current.requested_model = Some(model.to_string());
+        }
+    }
+
+    /// Seeds the requested tier of an HTTP response, taken like the model
+    /// from `x-codex-routing-hint`.
+    pub fn set_requested_service_tier(&mut self, tier: &str) {
+        let tier = tier.trim();
+        if self.current.requested_service_tier.is_none() && !tier.is_empty() {
+            self.current.requested_service_tier = Some(tier.to_string());
         }
     }
 
@@ -261,7 +290,7 @@ impl RequestObservation {
         let response = value.get("response").filter(|r| r.is_object());
         for source in [Some(value), response].into_iter().flatten() {
             if let Some(tier) = string(source, "service_tier") {
-                current.service_tier = Some(tier.to_string());
+                current.upstream_service_tier = Some(tier.to_string());
             }
             if let Some(usage) = source.get("usage").and_then(Value::as_object) {
                 current.usage = Some(usage::extract(usage));
@@ -426,7 +455,8 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].terminal, Some(Terminal::Completed));
         assert_eq!(all[0].completed_model.as_deref(), Some("gpt-5.4"));
-        assert_eq!(all[0].service_tier.as_deref(), Some("priority"));
+        // With no tier in the request, the upstream's report stands in.
+        assert_eq!(all[0].service_tier(), Some("priority"));
         assert_eq!(all[0].usage.as_ref().unwrap().total_tokens, Some(20));
 
         // Bytes after the terminal event do not start another response.
@@ -453,6 +483,39 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
         let ttft = all[0].ttft_ms.unwrap();
         assert!((500..1000).contains(&ttft), "{ttft}");
         assert!(all[0].ttfb_ms.unwrap() < 500);
+    }
+
+    #[test]
+    fn requested_tier_wins_over_upstream_echo() {
+        // Fast on a WebSocket turn: the upstream still reports `default`.
+        let mut obs = RequestObservation {
+            websocket: true,
+            ..Default::default()
+        };
+        obs.ingest_client_text(
+            r#"{"type":"response.create","model":"gpt-6-astra","service_tier":"priority"}"#,
+        );
+        obs.ingest_text(r#"{"type":"response.created","response":{"service_tier":"auto"}}"#);
+        obs.ingest_text(
+            r#"{"type":"response.completed","response":{"service_tier":"default","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        );
+        // The next turn without a tier falls back to the upstream's report.
+        obs.ingest_client_text(r#"{"type":"response.create","model":"gpt-6-astra"}"#);
+        obs.ingest_text(
+            r#"{"type":"response.completed","response":{"service_tier":"default","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        );
+        let all = obs.take_all();
+        assert_eq!(all[0].service_tier(), Some("priority"));
+        assert_eq!(all[0].upstream_service_tier.as_deref(), Some("default"));
+        assert_eq!(all[1].service_tier(), Some("default"));
+
+        // HTTP: the tier comes from the routing hint.
+        let mut obs = RequestObservation::default();
+        obs.set_requested_service_tier("priority");
+        obs.ingest_chunk(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"service_tier\":\"default\"}}\n\n",
+        );
+        assert_eq!(obs.take_all()[0].service_tier(), Some("priority"));
     }
 
     #[test]

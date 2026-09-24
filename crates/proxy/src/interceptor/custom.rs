@@ -373,7 +373,7 @@ impl CustomInterceptor {
             .unwrap_or_default();
         let cost = pricing::apply_service_tier(
             ready.pricing.estimate(Some(&model), &tokens_info),
-            response.service_tier.as_deref(),
+            response.service_tier(),
             Some(&model),
         );
         let charge = if kind.billable() {
@@ -414,7 +414,7 @@ impl CustomInterceptor {
             requested_model,
             used_model,
             turn_state_len: response.turn_state_len.map(|len| len as i64),
-            service_tier: response.service_tier.clone(),
+            service_tier: response.service_tier().map(str::to_string),
             status_code: Some(status as i64),
             ttfb_ms: response.ttfb_ms.map(|v| v as i64),
             ttft_ms: response.ttft_ms.map(|v| v as i64),
@@ -433,6 +433,14 @@ impl CustomInterceptor {
                 .or_else(|| transport_error.map(str::to_string)),
             request_time: crate::db::iso(started_at),
         };
+        if response.requested_service_tier.is_some() {
+            debug!(
+                request_id = %ctx.request_id,
+                requested = ?response.requested_service_tier,
+                upstream = ?response.upstream_service_tier,
+                "service tier of a settled response"
+            );
+        }
         let ready = ready.clone();
         let account_id = ctx.metadata.get(META_ACCOUNT).cloned();
         tokio::spawn(async move {
@@ -579,9 +587,15 @@ impl Interceptor for CustomInterceptor {
             return Ok(RequestAction::ShortCircuit(rejection.response()));
         }
 
-        // The requested model of an HTTP response is only in the request; the
-        // routing hint carries it (a WebSocket turn brings its own).
-        if let Some(model) = routing_hint_model(req.headers()).map(str::to_string) {
+        // The requested model and tier of an HTTP response are only in the
+        // request; the routing hint carries them (a WebSocket turn brings its
+        // own in `response.create`).
+        if let Some(tier) = routing_hint_field(req.headers(), "tier")
+            && let Ok(mut obs) = ctx.observation.lock()
+        {
+            obs.set_requested_service_tier(tier);
+        }
+        if let Some(model) = routing_hint_field(req.headers(), "model").map(str::to_string) {
             if let Ok(mut obs) = ctx.observation.lock() {
                 obs.set_requested_model(&model);
             }
@@ -855,18 +869,18 @@ impl Interceptor for CustomInterceptor {
     }
 }
 
-/// The model in a `x-codex-routing-hint: model=<m>[;tier=<t>]` request
-/// header, which Codex sends on every Responses request.
-fn routing_hint_model(headers: &http::HeaderMap) -> Option<&str> {
+/// A field (`model`, `tier`) of the `x-codex-routing-hint:
+/// model=<m>[;tier=<t>]` request header, which Codex sends on every
+/// Responses request.
+fn routing_hint_field<'a>(headers: &'a http::HeaderMap, key: &str) -> Option<&'a str> {
     headers
         .get("x-codex-routing-hint")
         .and_then(|value| value.to_str().ok())
         .and_then(|hint| {
             hint.split(';').find_map(|part| {
-                part.trim()
-                    .strip_prefix("model=")
-                    .map(str::trim)
-                    .filter(|model| !model.is_empty())
+                let (name, value) = part.split_once('=')?;
+                let value = value.trim();
+                (name.trim() == key && !value.is_empty()).then_some(value)
             })
         })
 }
