@@ -64,6 +64,10 @@ pub struct ResponseObservation {
     pub turn_state_len: Option<usize>,
     pub usage: Option<ResponseUsage>,
     pub ttfb_ms: Option<u64>,
+    /// Time to the first generated token: the first output item or delta
+    /// event, which (unlike the first byte) excludes `response.created` and
+    /// other bookkeeping events sent before the model produces anything.
+    pub ttft_ms: Option<u64>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     /// HTTP-like status carried by a WebSocket `error` event.
@@ -83,6 +87,7 @@ impl ResponseObservation {
             turn_state_len: None,
             usage: None,
             ttfb_ms: None,
+            ttft_ms: None,
             error_code: None,
             error_message: None,
             status: None,
@@ -250,6 +255,9 @@ impl RequestObservation {
     fn ingest_event(&mut self, value: &Value) {
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
         let current = &mut self.current;
+        if current.ttft_ms.is_none() && is_generation_event(kind) {
+            current.ttft_ms = Some(current.started_at.elapsed().as_millis() as u64);
+        }
         let response = value.get("response").filter(|r| r.is_object());
         for source in [Some(value), response].into_iter().flatten() {
             if let Some(tier) = string(source, "service_tier") {
@@ -344,6 +352,13 @@ fn turn_state(headers: &serde_json::Map<String, Value>) -> Option<String> {
     })
 }
 
+/// An event carrying model output: an output item starting (reasoning
+/// included, whose tokens count as output) or any streamed delta.
+fn is_generation_event(kind: &str) -> bool {
+    kind == "response.output_item.added"
+        || (kind.starts_with("response.") && kind.ends_with(".delta"))
+}
+
 fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value
         .get(key)
@@ -419,6 +434,25 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
         obs.ingest_chunk(b"data: {\"type\":\"response.completed\",\"response\":{}}\n\n");
         obs.ingest_chunk(b"data: [DONE]\n\n");
         assert_eq!(obs.take_all().len(), 1);
+    }
+
+    #[test]
+    fn ttft_waits_for_generated_output() {
+        let mut obs = RequestObservation::default();
+        obs.ingest_chunk(b"data: {\"type\":\"response.created\",\"response\":{}}\n\n");
+        obs.ingest_chunk(b"data: {\"type\":\"response.in_progress\",\"response\":{}}\n\n");
+        assert!(obs.current.ttfb_ms.is_some());
+        assert_eq!(obs.current.ttft_ms, None);
+        // Pretend the model spent a while before producing anything.
+        obs.current.started_at -= std::time::Duration::from_millis(500);
+        obs.ingest_chunk(b"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\"}}\n\n");
+        obs.current.started_at -= std::time::Duration::from_millis(500);
+        obs.ingest_chunk(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n");
+        obs.ingest_chunk(b"data: {\"type\":\"response.completed\",\"response\":{}}\n\n");
+        let all = obs.take_all();
+        let ttft = all[0].ttft_ms.unwrap();
+        assert!((500..1000).contains(&ttft), "{ttft}");
+        assert!(all[0].ttfb_ms.unwrap() < 500);
     }
 
     #[test]

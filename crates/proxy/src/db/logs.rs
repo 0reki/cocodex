@@ -35,6 +35,7 @@ struct LogRow {
     service_tier: Option<String>,
     status_code: Option<i32>,
     ttfb_ms: Option<i32>,
+    ttft_ms: Option<i32>,
     latency_ms: Option<i32>,
     tokens_info: Option<Value>,
     total_tokens: Option<i32>,
@@ -62,6 +63,7 @@ impl LogRow {
             "serviceTier": self.service_tier,
             "statusCode": self.status_code,
             "ttfbMs": self.ttfb_ms,
+            "ttftMs": self.ttft_ms,
             "latencyMs": self.latency_ms,
             "tokensInfo": self.tokens_info,
             "totalTokens": self.total_tokens,
@@ -186,7 +188,7 @@ pub async fn list(
           logs.id, logs.intent_id, logs.is_final, logs.stream_end_reason,
           logs.path, logs.model_id, logs.requested_model, logs.used_model,
           logs.turn_state_len, logs.key_id::text AS key_id, logs.service_tier,
-          logs.status_code, logs.ttfb_ms, logs.latency_ms, logs.tokens_info,
+          logs.status_code, logs.ttfb_ms, logs.ttft_ms, logs.latency_ms, logs.tokens_info,
           logs.total_tokens, logs.cost::float8 AS cost, logs.error_code, logs.error_message,
           logs.request_time, logs.created_at, logs.updated_at
         FROM model_response_logs logs

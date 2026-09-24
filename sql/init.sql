@@ -290,6 +290,10 @@ ALTER TABLE model_response_logs
   ADD COLUMN IF NOT EXISTS used_model TEXT;
 ALTER TABLE model_response_logs
   ADD COLUMN IF NOT EXISTS turn_state_len INTEGER;
+-- Time to the first generated token (not the first byte); with `latency_ms`
+-- and the output tokens it gives the generation speed.
+ALTER TABLE model_response_logs
+  ADD COLUMN IF NOT EXISTS ttft_ms INTEGER;
 
 CREATE INDEX IF NOT EXISTS idx_model_response_logs_request_time
   ON model_response_logs (request_time DESC, id DESC);

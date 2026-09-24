@@ -35,6 +35,9 @@ pub struct Settlement {
     pub service_tier: Option<String>,
     pub status_code: Option<i64>,
     pub ttfb_ms: Option<i64>,
+    /// Time to the first generated token; see `ResponseObservation::ttft_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<i64>,
     pub latency_ms: Option<i64>,
     pub tokens_info: Option<serde_json::Value>,
     pub total_tokens: Option<i64>,
@@ -115,6 +118,7 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
                 "service_tier": item.service_tier,
                 "status_code": item.status_code,
                 "ttfb_ms": item.ttfb_ms,
+                "ttft_ms": item.ttft_ms,
                 "latency_ms": item.latency_ms,
                 "tokens_info": item.tokens_info,
                 "total_tokens": item.total_tokens,
@@ -146,6 +150,7 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
             service_tier text,
             status_code integer,
             ttfb_ms integer,
+            ttft_ms integer,
             latency_ms integer,
             tokens_info jsonb,
             total_tokens integer,
@@ -165,7 +170,7 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
             settlement_id, intent_id, owner_user_id, key_id, is_final,
             stream_end_reason, path, model_id, requested_model, used_model,
             turn_state_len, service_tier, status_code,
-            ttfb_ms, latency_ms, tokens_info, total_tokens, cost,
+            ttfb_ms, ttft_ms, latency_ms, tokens_info, total_tokens, cost,
             error_code, error_message, request_time
           )
           SELECT
@@ -174,7 +179,7 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
             input.stream_end_reason, input.path, input.model_id,
             input.requested_model, input.used_model, input.turn_state_len,
             input.service_tier,
-            input.status_code, input.ttfb_ms, input.latency_ms, input.tokens_info,
+            input.status_code, input.ttfb_ms, input.ttft_ms, input.latency_ms, input.tokens_info,
             input.total_tokens, input.cost, input.error_code, input.error_message,
             input.request_time
           FROM input

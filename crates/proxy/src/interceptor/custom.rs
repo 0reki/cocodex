@@ -417,6 +417,7 @@ impl CustomInterceptor {
             service_tier: response.service_tier.clone(),
             status_code: Some(status as i64),
             ttfb_ms: response.ttfb_ms.map(|v| v as i64),
+            ttft_ms: response.ttft_ms.map(|v| v as i64),
             latency_ms: Some(response.started_at.elapsed().as_millis() as i64),
             tokens_info: Some(serde_json::Value::Object(tokens_info)),
             total_tokens: response
