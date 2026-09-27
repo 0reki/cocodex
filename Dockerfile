@@ -5,7 +5,9 @@ COPY sql ./sql
 COPY scripts ./scripts
 COPY crates/proxy/Cargo.toml crates/proxy/Cargo.lock ./crates/proxy/
 COPY crates/proxy/src ./crates/proxy/src
-RUN cargo build --release --locked --manifest-path crates/proxy/Cargo.toml
+# `--build-arg BUILD_JOBS=1` keeps a build on a small machine gentle.
+ARG BUILD_JOBS
+RUN cargo build --release --locked ${BUILD_JOBS:+-j $BUILD_JOBS} --manifest-path crates/proxy/Cargo.toml
 
 FROM debian:bookworm-slim
 
