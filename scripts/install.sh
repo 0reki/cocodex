@@ -10,7 +10,8 @@
 #
 #   ./scripts/install.sh http://127.0.0.1:53141
 #
-# It writes ~/.codex/config.toml (openai_base_url / chatgpt_base_url) and an
+# It writes ~/.codex/config.toml (openai_base_url / chatgpt_base_url, with
+# Codex telemetry turned off) and an
 # env file for the login issuer and refresh/revoke overrides, then hooks that
 # env file into the rc file of your login shell. Codex does not read those
 # OAuth URLs from config.toml, so environment variables are the only way in.
@@ -143,22 +144,53 @@ env_file_expr() {
   esac
 }
 
+# Codex's own telemetry stays off: its analytics, feedback uploads and
+# OpenTelemetry export would report the user's machine and prompts.
+TELEMETRY_TOML='[analytics]
+enabled = false
+
+[feedback]
+enabled = false
+
+[otel]
+exporter = "none"
+trace_exporter = "none"
+metrics_exporter = "none"
+log_user_prompt = false'
+
 upsert_toml() {
   tmp=$(make_temp)
+  kept=$(make_temp)
+  if [ -f "$TOML" ]; then
+    # Drop the keys and tables we are about to write, each table up to the
+    # next header and with its subtables (an [otel.exporter.x] table would
+    # clash with `exporter = "none"`), then the blank lines left at either
+    # end, so repeated runs do not grow the file.
+    grep -v -E '^[[:space:]]*openai_base_url[[:space:]]*=' "$TOML" \
+      | grep -v -E '^[[:space:]]*chatgpt_base_url[[:space:]]*=' \
+      | awk '
+          /^[[:space:]]*\[/ {
+            header = $0
+            sub(/#.*/, "", header)
+            gsub(/[[:space:]]/, "", header)
+            skip = header ~ /^\[+(analytics|feedback|otel)[].]/
+          }
+          !skip { print }' \
+      | awk 'NF { if (seen) for (; blank > 0; blank--) print ""; blank = 0; seen = 1; print; next }
+             { blank++ }' >"$kept" || true
+  fi
   {
     printf 'openai_base_url = "%s"\n' "$OPENAI_BASE_URL"
     printf 'chatgpt_base_url = "%s"\n' "$CHATGPT_BASE_URL"
     printf '\n'
-    if [ -f "$TOML" ]; then
-      # Drop the keys we are about to write, then the blank lines they left
-      # behind, so repeated runs do not grow the file.
-      grep -v -E '^[[:space:]]*openai_base_url[[:space:]]*=' "$TOML" \
-        | grep -v -E '^[[:space:]]*chatgpt_base_url[[:space:]]*=' \
-        | awk 'NF { seen = 1 } seen { print }' || true
+    if [ -s "$kept" ]; then
+      cat "$kept"
+      printf '\n'
     fi
+    printf '%s\n' "$TELEMETRY_TOML"
   } >"$tmp"
   cat "$tmp" >"$TOML"
-  rm -f "$tmp"
+  rm -f "$tmp" "$kept"
 }
 
 write_env_file() {

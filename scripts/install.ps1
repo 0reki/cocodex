@@ -9,9 +9,10 @@
 #
 #   ./scripts/install.ps1 http://127.0.0.1:53141
 #
-# Writes ~/.codex/config.toml and persists the login issuer and refresh/revoke
-# overrides as user environment variables. Codex does not read those OAuth
-# URLs from config.toml. User-level variables (rather than the PowerShell
+# Writes ~/.codex/config.toml (with Codex telemetry turned off) and persists
+# the login issuer and refresh/revoke overrides as user environment
+# variables. Codex does not read those OAuth URLs from config.toml.
+# User-level variables (rather than the PowerShell
 # profile) also reach the Codex desktop app started from the Start menu, so
 # its "Sign in with ChatGPT" button logs in against the gateway through the
 # browser, no device code needed.
@@ -68,17 +69,53 @@ $End = "# <<< cocodex-gateway <<<"
 
 New-Item -ItemType Directory -Force -Path $CodexHome | Out-Null
 
-$existing = @()
+# Codex's own telemetry stays off: its analytics, feedback uploads and
+# OpenTelemetry export would report the user's machine and prompts.
+$Telemetry = @(
+    "[analytics]"
+    "enabled = false"
+    ""
+    "[feedback]"
+    "enabled = false"
+    ""
+    "[otel]"
+    'exporter = "none"'
+    'trace_exporter = "none"'
+    'metrics_exporter = "none"'
+    "log_user_prompt = false"
+)
+
+# Keep the rest of the file, minus the keys and tables written here: each
+# table up to the next header and with its subtables (an
+# [otel.exporter.x] table would clash with `exporter = "none"`).
+$kept = New-Object System.Collections.Generic.List[string]
 if (Test-Path $Toml) {
-    $existing = Get-Content -LiteralPath $Toml | Where-Object {
-        $_ -notmatch '^openai_base_url\s*=' -and $_ -notmatch '^chatgpt_base_url\s*='
+    $skip = $false
+    foreach ($line in Get-Content -LiteralPath $Toml) {
+        if ($line -match '^\s*\[') {
+            $header = ($line -replace '#.*$', '') -replace '\s', ''
+            $skip = $header -match '^\[+(analytics|feedback|otel)[\].]'
+        }
+        if ($skip -or $line -match '^\s*(openai_base_url|chatgpt_base_url)\s*=') {
+            continue
+        }
+        $kept.Add($line)
     }
 }
-@(
+# Without the blank lines left at either end, reruns do not grow the file.
+while ($kept.Count -and -not $kept[0].Trim()) { $kept.RemoveAt(0) }
+while ($kept.Count -and -not $kept[$kept.Count - 1].Trim()) { $kept.RemoveAt($kept.Count - 1) }
+
+$lines = @(
     "openai_base_url = `"$OpenAiBaseUrl`""
     "chatgpt_base_url = `"$ChatGptBaseUrl`""
     ""
-) + $existing | Set-Content -LiteralPath $Toml -Encoding utf8
+)
+if ($kept.Count) {
+    $lines += $kept
+    $lines += ""
+}
+$lines + $Telemetry | Set-Content -LiteralPath $Toml -Encoding utf8
 
 $GatewayEnv = [ordered]@{
     CODEX_APP_SERVER_LOGIN_ISSUER    = $LoginIssuer

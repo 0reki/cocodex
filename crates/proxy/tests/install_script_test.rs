@@ -68,6 +68,16 @@ async fn install_ps1_carries_the_gateway_url() {
 
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("$GatewayUrlDefault = \"https://api.cocodex.app\""));
+    // It turns Codex telemetry off like install.sh does.
+    for line in [
+        "\"[analytics]\"",
+        "\"[feedback]\"",
+        "\"[otel]\"",
+        "'exporter = \"none\"'",
+        "\"log_user_prompt = false\"",
+    ] {
+        assert!(body.contains(line), "install.ps1 lacks {line}");
+    }
 }
 
 #[tokio::test]
@@ -96,23 +106,48 @@ async fn the_served_script_configures_codex_when_run() {
     let home = common::scratch_dir();
     let script = home.join("install.sh");
     std::fs::write(&script, &body).unwrap();
+    // A config of the user's own, with telemetry set up their way.
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(
+        home.join(".codex/config.toml"),
+        "model = \"gpt-5.5\"\n\n[otel]\nexporter = \"otlp-http\"\n\n\
+         [otel.exporter.otlp-http]\nendpoint = \"http://collector\"\n\n\
+         [mcp_servers.docs]\ncommand = \"docs\"\n",
+    )
+    .unwrap();
 
-    let output = std::process::Command::new("sh")
-        .arg(&script)
-        .arg("--no-login")
-        .env("HOME", &home)
-        .env("SHELL", "/bin/zsh")
-        .output()
-        .expect("sh is available on every supported platform");
-    assert!(
-        output.status.success(),
-        "install.sh failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let toml = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+    let run = || {
+        let output = std::process::Command::new("sh")
+            .arg(&script)
+            .arg("--no-login")
+            .env("HOME", &home)
+            .env("SHELL", "/bin/zsh")
+            .output()
+            .expect("sh is available on every supported platform");
+        assert!(
+            output.status.success(),
+            "install.sh failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        std::fs::read_to_string(home.join(".codex/config.toml")).unwrap()
+    };
+    let toml = run();
     assert!(toml.contains("openai_base_url = \"https://api.cocodex.app/backend-api/codex\""));
     assert!(toml.contains("chatgpt_base_url = \"https://api.cocodex.app/backend-api\""));
+    // Codex telemetry is off, replacing the user's own tables whole.
+    for line in [
+        "[analytics]\nenabled = false",
+        "[feedback]\nenabled = false",
+        "[otel]\nexporter = \"none\"\ntrace_exporter = \"none\"\nmetrics_exporter = \"none\"\nlog_user_prompt = false",
+    ] {
+        assert!(toml.contains(line), "{toml}");
+    }
+    assert_eq!(toml.matches("[otel").count(), 1, "{toml}");
+    assert!(!toml.contains("collector"), "{toml}");
+    // Everything else is the user's and stays.
+    assert!(toml.contains("model = \"gpt-5.5\"") && toml.contains("[mcp_servers.docs]"));
+    // Running it again changes nothing.
+    assert_eq!(run(), toml);
 
     let env_file = std::fs::read_to_string(home.join(".codex/cocodex-gateway.env")).unwrap();
     assert!(

@@ -46,7 +46,9 @@ curl -fsSL https://api.cocodex.app/install.sh | sh
 
 Windows：`irm https://api.cocodex.app/install.ps1 | iex`
 
-脚本改写 `~/.codex/config.toml` 的 `openai_base_url` / `chatgpt_base_url`，再设置
+脚本改写 `~/.codex/config.toml` 的 `openai_base_url` / `chatgpt_base_url`，并关闭
+Codex 自带的遥测（`[analytics]`、`[feedback]` 的 `enabled = false`，`[otel]` 各导出器为
+`"none"`、`log_user_prompt = false`；已有的这三个表连同子表整段替换），再设置
 三个 Codex 只从环境变量读的登录地址：`CODEX_APP_SERVER_LOGIN_ISSUER`（= 网关地址）、
 `CODEX_REFRESH_TOKEN_URL_OVERRIDE`、`CODEX_REVOKE_TOKEN_URL_OVERRIDE`。
 
