@@ -527,7 +527,10 @@ async fn console_and_codex_client_end_to_end() {
         .iter()
         .find(|u| u["id"] == alice_id.as_str())
         .unwrap();
-    assert_eq!(alice_row["used"], 0.05);
+    // Users carry no dollar quota: their limits come from a quota profile.
+    assert!(alice_row.get("used").is_none());
+    assert_eq!(alice_row["quota"]["profileName"], "默认");
+    assert_eq!(alice_row["quota"]["effective"]["weeklySharePercent"], 25.0);
     assert_eq!(alice_row["accountId"], ACCOUNT);
 
     // 8. The weekly window fills up: alice's share is exhausted.

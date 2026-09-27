@@ -245,3 +245,52 @@ async fn test_session_lifecycle_follows_refresh_token() {
     assert!(!store.is_session_live(&session_id).await.unwrap());
     assert!(store.refresh(&refreshed.refresh_token).await.is_none());
 }
+
+#[test]
+fn token_identity_looks_like_an_email_password_chatgpt_user() {
+    let jwt = ClientJwt::from_secret("test-client-jwt-secret");
+    let first = jwt.sign_session_tokens("74228003-b281-4c40-b98a-241409f613ea", "a@b.c");
+    let claims = jwt.verify_access_token(&first.access_token).unwrap();
+    // Auth0's database connection and a 24-hex user id, like a real
+    // `urn:openai:amr:pwd` login.
+    let id = claims.sub.strip_prefix("auth0|").unwrap();
+    assert_eq!(id.len(), 24);
+    assert!(
+        id.bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    );
+    // User and org ids: 24 mixed-case letters and digits, like chatgpt.com's.
+    let auth = &claims.openai_auth;
+    for (id, prefix) in [
+        (auth.chatgpt_user_id.as_str(), "user-"),
+        (auth.poid.as_deref().unwrap(), "org-"),
+    ] {
+        let rest = id.strip_prefix(prefix).unwrap();
+        assert_eq!(rest.len(), 24, "{id}");
+        assert!(rest.bytes().all(|b| b.is_ascii_alphanumeric()), "{id}");
+        assert!(!rest.contains("74228003"), "{id} exposes the account id");
+    }
+    assert_eq!(auth.user_id, auth.chatgpt_user_id);
+    assert_eq!(
+        auth.chatgpt_account_user_id.as_deref(),
+        Some(format!("{}__{}", auth.chatgpt_user_id, auth.chatgpt_account_id).as_str())
+    );
+    // The same account keeps its subject across sessions, in both tokens.
+    let second = jwt.sign_session_tokens("74228003-b281-4c40-b98a-241409f613ea", "a@b.c");
+    let again = jwt.verify_access_token(&second.access_token).unwrap();
+    assert_eq!(again.sub, claims.sub);
+    assert_eq!(again.openai_auth.chatgpt_user_id, auth.chatgpt_user_id);
+    assert_eq!(again.openai_auth.poid, auth.poid);
+    let payload = second.id_token.split('.').nth(1).unwrap();
+    let id_claims: serde_json::Value = serde_json::from_slice(
+        &base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(id_claims["sub"], claims.sub.as_str());
+    let other = jwt.sign_session_tokens("11111111-1111-4111-8111-111111111111", "a@b.c");
+    assert_ne!(
+        jwt.verify_access_token(&other.access_token).unwrap().sub,
+        claims.sub
+    );
+}

@@ -3,13 +3,14 @@ pub mod auth;
 pub mod billing;
 pub mod client_identity;
 pub mod config;
+pub mod conversation_scope;
 pub mod db;
 pub mod egress_locale;
+pub mod features;
 pub mod forwarder;
 pub mod interceptor;
 pub mod quota;
 pub mod runtime;
-pub mod turn_state;
 pub mod upstream;
 pub mod websocket;
 
@@ -103,6 +104,9 @@ pub fn build(
     let gateway = Router::new()
         .route("/backend-api/{*path}", any(handle_backend_api))
         .route("/backend-api", any(handle_backend_api))
+        // The desktop webview reads GPT discovery from chatgpt.com's public API.
+        .route("/public-api/{*path}", any(handle_backend_api))
+        .route("/public-api", any(handle_backend_api))
         .route("/wham/{*path}", any(handle_backend_api))
         .route("/wham", any(handle_backend_api))
         .route("/api/codex/{*path}", any(handle_backend_api))

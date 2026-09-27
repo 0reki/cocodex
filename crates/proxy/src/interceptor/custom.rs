@@ -7,8 +7,8 @@ use crate::billing::usd::Usd;
 use crate::client_identity::{ClientProfile, ProfileEndpoint};
 use crate::db::logs::ProfileUsage;
 use crate::db::settlements::Settlement;
+use crate::db::users::PortalUser;
 use crate::runtime::{NotReady, OwnerStatus, Ready, Runtime};
-use crate::turn_state::{StateKey, TurnStateStore};
 use crate::upstream::client::TURN_STATE_HEADER;
 use async_trait::async_trait;
 use axum::body::Body;
@@ -47,6 +47,26 @@ impl Rejection {
         auth_error(self.status, self.code, &self.message)
     }
 
+    /// A refused conversation reads as chatgpt.com's own "no such
+    /// conversation"; other failures keep the gateway's error shape.
+    fn conversation_response(&self) -> Response {
+        let detail = match self.code {
+            "conversation_not_found" => serde_json::json!("Not Found"),
+            // ChatGPT's own shape for a spent limit.
+            "feature_quota_exceeded" => serde_json::json!({
+                "message": self.message,
+                "code": self.code,
+            }),
+            _ => return self.response(),
+        };
+        (
+            self.status,
+            [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
+            serde_json::json!({ "detail": detail }).to_string(),
+        )
+            .into_response()
+    }
+
     /// The Codex Responses WebSocket error event.
     fn ws_event(&self) -> WsMessage {
         WsMessage::Text(
@@ -71,7 +91,6 @@ impl Rejection {
 pub struct CustomInterceptor {
     runtime: Arc<Runtime>,
     egress_locale: Arc<crate::egress_locale::EgressLocaleResolver>,
-    turn_state: Arc<TurnStateStore>,
     /// Each user's usage for the Codex profile page, kept briefly: the page
     /// is opened now and then, and its numbers need not be to the second.
     profile_usage: std::sync::Mutex<HashMap<String, (Instant, ProfileUsage)>>,
@@ -86,7 +105,6 @@ impl CustomInterceptor {
         egress_locale: Arc<crate::egress_locale::EgressLocaleResolver>,
     ) -> Self {
         Self {
-            turn_state: Arc::clone(runtime.turn_state()),
             runtime,
             egress_locale,
             profile_usage: std::sync::Mutex::new(HashMap::new()),
@@ -156,77 +174,236 @@ impl CustomInterceptor {
         client
     }
 
-    /// The turn state held for the login this request was routed to and the
-    /// model it asks for, when that model is managed.
-    fn turn_state_key(&self, ctx: &RequestContext, model: &str) -> Option<StateKey> {
-        let account_id = ctx.upstream_account_id.as_deref()?;
-        let platform = ctx.metadata.get(META_PLATFORM)?;
-        self.turn_state
-            .manages(model)
-            .then(|| StateKey::new(account_id, platform, model))
+    /// The upstream login's profile is not the client's to change: an edit
+    /// (e.g. `PATCH /wham/profiles/me` renaming the user) is sent upstream as
+    /// a read, and the client gets back its own, unchanged profile.
+    fn keep_upstream_profile(&self, ctx: &RequestContext, req: Request<Body>) -> Request<Body> {
+        use crate::client_identity::ProfileEndpoint;
+
+        let is_person = matches!(
+            ProfileEndpoint::of(&ctx.target_path),
+            Some(ProfileEndpoint::Me | ProfileEndpoint::Profile | ProfileEndpoint::CodexProfile)
+        );
+        if !is_person || matches!(*req.method(), http::Method::GET | http::Method::HEAD) {
+            return req;
+        }
+        info!(
+            request_id = %ctx.request_id,
+            method = %req.method(),
+            path = %ctx.target_path,
+            "profile edit not relayed; reading the profile instead"
+        );
+        let (mut parts, _) = req.into_parts();
+        parts.method = http::Method::GET;
+        parts.headers.remove(http::header::CONTENT_TYPE);
+        parts.headers.remove(http::header::CONTENT_LENGTH);
+        parts.headers.remove(http::header::CONTENT_ENCODING);
+        Request::from_parts(parts, Body::empty())
     }
 
-    /// Takes the request's turn state over: the client's own value is
-    /// dropped and the login's, if the gateway holds one, is presented in
-    /// its place by `apply_upstream_identity_headers`.
-    fn adopt_turn_state(&self, ctx: &mut RequestContext, model: &str) {
-        let Some(key) = self.turn_state_key(ctx, model) else {
-            return;
-        };
-        let client = ctx
-            .client_headers
-            .get(TURN_STATE_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        ctx.upstream_turn_state = self.turn_state.present(&key, client.as_deref());
-        ctx.turn_state_key = Some(key);
-    }
-
-    /// The same for one WebSocket turn, whose state travels in the
-    /// `response.create` frame instead of a header.
-    fn adopt_ws_turn_state(
+    /// Binds the conversation a turn names to the user, refuses one that is
+    /// not theirs, and loads their conversations for a listing to filter.
+    async fn scope_conversations(
         &self,
-        ctx: &RequestContext,
-        model: &str,
-        message: WsMessage,
-    ) -> WsMessage {
-        let (Some(key), WsMessage::Text(text)) = (self.turn_state_key(ctx, model), &message) else {
-            return message;
+        ctx: &mut RequestContext,
+        req: Request<Body>,
+    ) -> Result<Request<Body>, Rejection> {
+        use crate::conversation_scope::{self as scope, ConversationUse};
+        use crate::db::conversations::{self, Ownership};
+
+        let path = ctx.target_path.clone();
+        let listing = req.method() == http::Method::GET && scope::is_list_path(&path);
+        let read_body = scope::may_name_conversation_in_body(req.method(), &path)
+            && !req.headers().contains_key(http::header::CONTENT_ENCODING);
+        if !listing && !read_body && scope::path_conversation_id(&path).is_none() {
+            return Ok(req);
+        }
+        let (Some(owner), Some(account_id)) = (
+            ctx.metadata.get(META_OWNER).cloned(),
+            ctx.metadata.get(META_ACCOUNT).cloned(),
+        ) else {
+            return Ok(req);
         };
-        // The socket's own state was issued on the handshake, before any
-        // frame named a model; this is the first turn that can key it.
-        if let Some(state) = ctx.metadata.get(crate::websocket::HANDSHAKE_TURN_STATE) {
-            self.turn_state.capture(&key, state, "handshake");
+        let unavailable = |error: sqlx::Error| {
+            warn!(request_id = %ctx.request_id, %error, "conversation owner lookup failed");
+            Rejection::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "database_unavailable",
+                "Failed to check the conversation",
+            )
+        };
+        let ready = self.runtime.ready().await.map_err(|_| {
+            Rejection::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "database_unavailable",
+                "Failed to check the conversation",
+            )
+        })?;
+        if listing {
+            ctx.owned_conversations = Some(
+                conversations::owned(&ready.db, &owner)
+                    .await
+                    .map_err(unavailable)?,
+            );
+            return Ok(req);
         }
-        let client = crate::client_identity::ws_turn_state(text.as_str());
-        let state = self.turn_state.present(&key, client.as_deref());
-        match crate::client_identity::rewrite_ws_turn_state(text.as_str(), state.as_deref()) {
-            Some((rewritten, _)) => WsMessage::Text(rewritten.into()),
-            None => message,
+
+        if req.method() == http::Method::POST && scope::is_turn_path(&path) {
+            ctx.conversation_scan = Some(Default::default());
         }
+        let (req, body) = if read_body {
+            let (parts, body) = req.into_parts();
+            let body = axum::body::to_bytes(body, crate::forwarder::MAX_REQUEST_BODY_BYTES)
+                .await
+                .map_err(|_| {
+                    Rejection::new(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "payload_too_large",
+                        "Request payload too large",
+                    )
+                })?;
+            (
+                Request::from_parts(parts, Body::from(body.clone())),
+                Some(body),
+            )
+        } else {
+            (req, None)
+        };
+        for named in scope::conversation_uses(&path, body.as_deref()) {
+            let (id, ownership) = match &named {
+                ConversationUse::Turn(id) => (
+                    id,
+                    conversations::bind(&ready.db, id, &owner, &account_id).await,
+                ),
+                ConversationUse::Access(id) => {
+                    (id, conversations::ownership(&ready.db, id, &owner).await)
+                }
+            };
+            match ownership.map_err(unavailable)? {
+                Ownership::Own => {}
+                ownership => {
+                    warn!(
+                        request_id = %ctx.request_id,
+                        owner,
+                        conversation_id = %id,
+                        ?ownership,
+                        path = %path,
+                        "refused a conversation that is not the user's"
+                    );
+                    return Err(Rejection::new(
+                        StatusCode::NOT_FOUND,
+                        "conversation_not_found",
+                        "Not Found",
+                    ));
+                }
+            }
+        }
+
+        // Counted features: a turn asking for one past the user's cap is
+        // refused; `/conversation/init` reports what the user has left.
+        let Some(user) = ctx.owner.clone() else {
+            return Ok(req);
+        };
+        if scope::is_turn_path(&path)
+            && let Some(body) = body.as_deref()
+        {
+            ctx.requested_features = crate::features::requested(body);
+            if let Some(model) = serde_json::from_slice::<serde_json::Value>(body)
+                .ok()
+                .as_ref()
+                .and_then(|value| value.get("model")?.as_str().map(str::to_string))
+                && let Ok(mut obs) = ctx.observation.lock()
+            {
+                obs.set_requested_model(&model);
+            }
+            ctx.turn_conversation_id = scope::body_conversation_id(body);
+            for feature in ctx.requested_features.clone() {
+                let Some(allowance) = self.allowance(&ready, &user, feature).await? else {
+                    continue;
+                };
+                if allowance.remaining() == 0 {
+                    let reset = allowance.reset_after(chrono::Utc::now());
+                    warn!(
+                        request_id = %ctx.request_id,
+                        owner,
+                        feature = feature.name(),
+                        used = allowance.used,
+                        limit = allowance.limit,
+                        "refused a turn past the user's feature quota"
+                    );
+                    return Err(Rejection::new(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "feature_quota_exceeded",
+                        format!(
+                            "You have used all {} of your {} uses; more are available after {}",
+                            allowance.limit,
+                            feature.name(),
+                            reset.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        ),
+                    ));
+                }
+            }
+        } else if crate::features::is_init_path(&path) {
+            let mut allowances = Vec::new();
+            for feature in crate::features::Feature::ALL {
+                if let Some(allowance) = self.allowance(&ready, &user, feature).await? {
+                    allowances.push(allowance);
+                }
+            }
+            if !allowances.is_empty() {
+                ctx.feature_allowances = Some(allowances);
+            }
+        }
+        Ok(req)
     }
 
-    async fn owner_rejection(&self, ready: &Ready, owner: &str) -> Option<Rejection> {
+    /// The user's standing on a feature, when their profile caps it.
+    async fn allowance(
+        &self,
+        ready: &Ready,
+        user: &PortalUser,
+        feature: crate::features::Feature,
+    ) -> Result<Option<crate::features::Allowance>, Rejection> {
+        let Some(limit) = feature.limit(user) else {
+            return Ok(None);
+        };
+        let since = chrono::Utc::now() - feature.window();
+        let (used, oldest) =
+            crate::db::feature_usage::usage_since(&ready.db, &user.id, feature.name(), since)
+                .await
+                .map_err(|error| {
+                    warn!(%error, owner = %user.id, "feature usage lookup failed");
+                    Rejection::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "database_unavailable",
+                        "Failed to check the feature quota",
+                    )
+                })?;
+        Ok(Some(crate::features::Allowance {
+            feature,
+            limit,
+            used,
+            oldest,
+        }))
+    }
+
+    /// The portal user behind a request, if they may use the gateway.
+    async fn active_owner(&self, ready: &Ready, owner: &str) -> Result<PortalUser, Rejection> {
         match ready.verify_owner(owner).await {
-            Ok(OwnerStatus::Active(_)) => None,
-            Ok(OwnerStatus::Unknown) => Some(Rejection::new(
+            Ok(OwnerStatus::Active(user)) => Ok(user),
+            Ok(OwnerStatus::Unknown) => Err(Rejection::new(
                 StatusCode::UNAUTHORIZED,
                 "invalid_token",
                 "Invalid access token",
             )),
-            Ok(OwnerStatus::Disabled(_)) => Some(Rejection::new(
+            Ok(OwnerStatus::Disabled(_)) => Err(Rejection::new(
                 StatusCode::FORBIDDEN,
                 "user_inactive",
                 "User is disabled",
             )),
-            Ok(OwnerStatus::QuotaExceeded(_)) => Some(Rejection::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                "insufficient_quota",
-                "User quota exceeded",
-            )),
             Err(error) => {
                 warn!(%error, "portal user lookup failed");
-                Some(Rejection::new(
+                Err(Rejection::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "database_unavailable",
                     "Failed to verify access token",
@@ -235,16 +412,20 @@ impl CustomInterceptor {
         }
     }
 
-    async fn quota_rejection(ready: &Ready, account_id: &str, owner: &str) -> Option<Rejection> {
-        let decision = ready.quota.check(account_id, owner).await;
+    async fn quota_rejection(
+        ready: &Ready,
+        account_id: &str,
+        user: &PortalUser,
+    ) -> Option<Rejection> {
+        let limit = user.weekly_share_percent;
+        let decision = ready.quota.check(account_id, &user.id, limit).await;
         (!decision.allowed).then(|| {
             Rejection::new(
                 StatusCode::TOO_MANY_REQUESTS,
                 "upstream_user_quota_exceeded",
                 format!(
-                    "Your share of the upstream account's weekly quota is used up ({:.1}% of {}%)",
+                    "Your share of the upstream account's weekly quota is used up ({:.1}% of {limit}%)",
                     decision.allocated_percent,
-                    crate::quota::USER_QUOTA_PERCENT
                 ),
             )
         })
@@ -324,9 +505,7 @@ impl CustomInterceptor {
         if let Ok(mut obs) = ctx.observation.lock() {
             obs.owner_user_id = Some(owner.clone());
         }
-        if let Some(rejection) = self.owner_rejection(&ready, &owner).await {
-            return Err(rejection);
-        }
+        let user = self.active_owner(&ready, &owner).await?;
 
         let account_id = match ready.accounts.assigned_account(&owner).await {
             Ok(Some(account_id)) => account_id,
@@ -349,10 +528,11 @@ impl CustomInterceptor {
         ctx.metadata.insert(META_ACCOUNT.into(), account_id.clone());
 
         if classify_backend_kind(&ctx.target_path).billable()
-            && let Some(rejection) = Self::quota_rejection(&ready, &account_id, &owner).await
+            && let Some(rejection) = Self::quota_rejection(&ready, &account_id, &user).await
         {
             return Err(rejection);
         }
+        ctx.owner = Some(user);
 
         let resolved = match platform {
             Some(platform) => ready.accounts.resolve(&account_id, platform).await,
@@ -466,11 +646,6 @@ impl CustomInterceptor {
         };
         let status = response.status.unwrap_or(status);
         let success = (200..300).contains(&status);
-        // A refused turn is a reason to fetch a new state before its hour is
-        // up; the probe decides whether it is worth one.
-        if let Some(key) = self.turn_state_key(ctx, &model) {
-            self.turn_state.note_failure(&key, status);
-        }
         let (is_final, end_reason) = match response.terminal {
             Some(Terminal::Completed) => (true, Some("completed")),
             Some(Terminal::Incomplete) => (true, Some("incomplete")),
@@ -490,7 +665,6 @@ impl CustomInterceptor {
             intent_id: Some(ctx.request_id.clone()),
             owner_user_id: Some(owner.clone()),
             api_key_id: None,
-            charge,
             is_final: Some(is_final),
             stream_end_reason: end_reason.map(str::to_string),
             path: ctx.target_path.clone(),
@@ -708,6 +882,18 @@ impl Interceptor for CustomInterceptor {
             }
             return Ok(RequestAction::ShortCircuit(rejection.response()));
         }
+        let req = self.keep_upstream_profile(ctx, req);
+        let req = match self.scope_conversations(ctx, req).await {
+            Ok(req) => req,
+            Err(rejection) => {
+                if let Ok(mut obs) = ctx.observation.lock() {
+                    obs.record_error(rejection.code, &rejection.message);
+                }
+                return Ok(RequestAction::ShortCircuit(
+                    rejection.conversation_response(),
+                ));
+            }
+        };
 
         // The requested model and tier of an HTTP response are only in the
         // request; the routing hint carries them (a WebSocket turn brings its
@@ -721,7 +907,6 @@ impl Interceptor for CustomInterceptor {
             if let Ok(mut obs) = ctx.observation.lock() {
                 obs.set_requested_model(&model);
             }
-            self.adopt_turn_state(ctx, &model);
         }
 
         Ok(RequestAction::Forward(req))
@@ -732,6 +917,36 @@ impl Interceptor for CustomInterceptor {
         ctx: &RequestContext,
         resp: Response,
     ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
+        // A turn upstream took counts against the features it asked for.
+        if resp.status().is_success()
+            && !ctx.requested_features.is_empty()
+            && let (Some(owner), Some(account_id)) = (
+                ctx.metadata.get(META_OWNER).cloned(),
+                ctx.metadata.get(META_ACCOUNT).cloned(),
+            )
+        {
+            let runtime = Arc::clone(&self.runtime);
+            let features = ctx.requested_features.clone();
+            let conversation_id = ctx.turn_conversation_id.clone();
+            tokio::spawn(async move {
+                let Ok(ready) = runtime.ready().await else {
+                    return;
+                };
+                for feature in features {
+                    if let Err(error) = crate::db::feature_usage::record(
+                        &ready.db,
+                        &owner,
+                        &account_id,
+                        feature.name(),
+                        conversation_id.as_deref(),
+                    )
+                    .await
+                    {
+                        warn!(%error, owner, feature = feature.name(), "recording a feature use failed");
+                    }
+                }
+            });
+        }
         if let Ok(mut obs) = ctx.observation.lock() {
             if let Some(content_type) = resp
                 .headers()
@@ -768,49 +983,47 @@ impl Interceptor for CustomInterceptor {
                 obs.current.turn_state_len = Some(state.len());
             }
         }
-        // The turn state upstream issued for this login, for the next turn
-        // of whoever is routed to it.
-        let mut resp = resp;
-        if let Some(key) = ctx.turn_state_key.as_ref() {
-            if resp.status().is_success()
-                && let Some(state) = resp
-                    .headers()
-                    .get(TURN_STATE_HEADER)
-                    .and_then(|value| value.to_str().ok())
-            {
-                self.turn_state.capture(key, state, "response");
-            }
-            // Hand the client the state the gateway settled on, and take away
-            // one it would not present itself: the client replays what it is
-            // given, so a state that routes to another model would pin every
-            // later turn to it.
-            match self
-                .turn_state
-                .presentable(key)
-                .and_then(|held| axum::http::HeaderValue::from_str(&held).ok())
-            {
-                Some(value) => {
-                    resp.headers_mut().insert(TURN_STATE_HEADER, value);
-                }
-                None => {
-                    resp.headers_mut().remove(TURN_STATE_HEADER);
-                }
-            }
-        }
         Ok(resp)
     }
 
     fn on_response_chunk(&self, ctx: &RequestContext, chunk: &[u8]) {
-        let captured = match ctx.observation.lock() {
-            Ok(mut obs) => {
-                obs.ingest_chunk(chunk);
-                obs.take_captured_turn_state()
-            }
-            Err(_) => return,
-        };
-        // A streamed response repeats the state in its metadata event.
-        if let (Some(state), Some(key)) = (captured, ctx.turn_state_key.as_ref()) {
-            self.turn_state.capture(key, &state, "metadata");
+        if let Ok(mut obs) = ctx.observation.lock() {
+            obs.ingest_chunk(chunk);
+        }
+        let found = ctx
+            .conversation_scan
+            .as_ref()
+            .and_then(|scan| scan.lock().ok()?.push(chunk));
+        if let (Some(conversation_id), Some(owner), Some(account_id)) = (
+            found,
+            ctx.metadata.get(META_OWNER).cloned(),
+            ctx.metadata.get(META_ACCOUNT).cloned(),
+        ) {
+            let runtime = Arc::clone(&self.runtime);
+            let request_id = ctx.request_id.clone();
+            tokio::spawn(async move {
+                let Ok(ready) = runtime.ready().await else {
+                    return;
+                };
+                match crate::db::conversations::bind(
+                    &ready.db,
+                    &conversation_id,
+                    &owner,
+                    &account_id,
+                )
+                .await
+                {
+                    Ok(crate::db::conversations::Ownership::Own) => {}
+                    Ok(ownership) => warn!(
+                        %request_id, owner, conversation_id, ?ownership,
+                        "a turn's response names a conversation bound to someone else"
+                    ),
+                    Err(error) => warn!(
+                        %request_id, %error, conversation_id,
+                        "binding a new conversation failed"
+                    ),
+                }
+            });
         }
     }
 
@@ -822,19 +1035,11 @@ impl Interceptor for CustomInterceptor {
         let WsMessage::Text(text) = &msg else {
             return Ok(WsAction::Forward(msg));
         };
-        let (starts_response, model) = match ctx.observation.lock() {
-            Ok(mut obs) => {
-                let starts = obs.ingest_client_text(text).is_some_and(|value| {
-                    value.get("type").and_then(|t| t.as_str()) == Some("response.create")
-                });
-                (starts, obs.current.requested_model.clone())
-            }
-            Err(_) => (false, None),
-        };
-        // A WebSocket turn carries the state in its `response.create` frame.
-        let msg = match model.as_deref().filter(|_| starts_response) {
-            Some(model) => self.adopt_ws_turn_state(ctx, model, msg),
-            None => msg,
+        let starts_response = match ctx.observation.lock() {
+            Ok(mut obs) => obs.ingest_client_text(text).is_some_and(|value| {
+                value.get("type").and_then(|t| t.as_str()) == Some("response.create")
+            }),
+            Err(_) => false,
         };
         if !starts_response {
             return Ok(WsAction::Forward(msg));
@@ -845,13 +1050,15 @@ impl Interceptor for CustomInterceptor {
         else {
             return Ok(WsAction::Forward(msg));
         };
-        let mut rejection = self.owner_rejection(&ready, owner).await;
-        if rejection.is_none()
-            && classify_backend_kind(&ctx.target_path).billable()
-            && let Some(account_id) = ctx.metadata.get(META_ACCOUNT)
-        {
-            rejection = Self::quota_rejection(&ready, account_id, owner).await;
-        }
+        let rejection = match self.active_owner(&ready, owner).await {
+            Err(rejection) => Some(rejection),
+            Ok(user) => match ctx.metadata.get(META_ACCOUNT) {
+                Some(account_id) if classify_backend_kind(&ctx.target_path).billable() => {
+                    Self::quota_rejection(&ready, account_id, &user).await
+                }
+                _ => None,
+            },
+        };
         let Some(rejection) = rejection else {
             return Ok(WsAction::Forward(msg));
         };
@@ -874,33 +1081,10 @@ impl Interceptor for CustomInterceptor {
         ctx: &RequestContext,
         msg: WsMessage,
     ) -> Result<WsAction, Box<dyn std::error::Error + Send + Sync>> {
-        if let WsMessage::Text(text) = &msg {
-            let captured = match ctx.observation.lock() {
-                Ok(mut obs) => {
-                    obs.ingest_text(text);
-                    (
-                        obs.take_captured_turn_state(),
-                        obs.current.requested_model.clone(),
-                    )
-                }
-                Err(_) => (None, None),
-            };
-            if let (Some(state), Some(model)) = (captured.0, captured.1.clone())
-                && let Some(key) = self.turn_state_key(ctx, &model)
-            {
-                self.turn_state.capture(&key, &state, "metadata");
-            }
-            // The WebSocket counterpart: the metadata event is where a client
-            // reads its state, so it carries the gateway's or none at all.
-            if let Some(model) = captured.1
-                && let Some(key) = self.turn_state_key(ctx, &model)
-                && let Some(rewritten) = crate::client_identity::rewrite_ws_metadata_turn_state(
-                    text.as_str(),
-                    self.turn_state.presentable(&key).as_deref(),
-                )
-            {
-                return Ok(WsAction::Forward(WsMessage::Text(rewritten.into())));
-            }
+        if let WsMessage::Text(text) = &msg
+            && let Ok(mut obs) = ctx.observation.lock()
+        {
+            obs.ingest_text(text);
         }
         self.settle_finished(ctx).await;
         Ok(WsAction::Forward(msg))

@@ -4,10 +4,12 @@
 pub mod accounts;
 pub mod assignments;
 pub mod client_sessions;
+pub mod conversations;
+pub mod feature_usage;
 pub mod invitations;
 pub mod logs;
+pub mod profiles;
 pub mod quota;
-pub mod settings;
 pub mod settlements;
 pub mod users;
 

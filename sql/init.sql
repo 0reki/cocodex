@@ -14,16 +14,14 @@ CREATE TABLE IF NOT EXISTS portal_users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
   enabled BOOLEAN NOT NULL DEFAULT true,
-  quota NUMERIC(20, 8),
-  used NUMERIC(20, 8) NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
 );
 
-ALTER TABLE portal_users
-  ADD COLUMN IF NOT EXISTS quota NUMERIC(20, 8);
-ALTER TABLE portal_users
-  ADD COLUMN IF NOT EXISTS used NUMERIC(20, 8) NOT NULL DEFAULT 0;
+-- Users have no dollar quota: each one's limit is a share of the upstream
+-- account's weekly window (see `crate::quota`).
+ALTER TABLE portal_users DROP COLUMN IF EXISTS quota;
+ALTER TABLE portal_users DROP COLUMN IF EXISTS used;
 
 CREATE INDEX IF NOT EXISTS idx_portal_users_role ON portal_users (role);
 CREATE INDEX IF NOT EXISTS idx_portal_users_enabled ON portal_users (enabled);
@@ -199,32 +197,7 @@ DROP TABLE IF EXISTS upstream_quota_settlements;
 DROP TABLE IF EXISTS upstream_user_window_usage;
 DROP TABLE IF EXISTS upstream_quota_windows;
 
--- API keys are gone. Keep any quota they carried before dropping them.
-DO $$
-BEGIN
-  IF to_regclass(current_schema() || '.api_keys') IS NOT NULL THEN
-    UPDATE portal_users users
-    SET
-      quota = keys.quota,
-      used = COALESCE(keys.used, 0)
-    FROM (
-      SELECT DISTINCT ON (owner_user_id)
-        owner_user_id,
-        quota,
-        used
-      FROM api_keys
-      WHERE revoked_at IS NULL
-      ORDER BY
-        owner_user_id,
-        CASE WHEN name = 'Codex client' THEN 0 ELSE 1 END,
-        updated_at DESC
-    ) keys
-    WHERE keys.owner_user_id = users.id
-      AND users.quota IS NULL
-      AND COALESCE(users.used, 0) = 0;
-  END IF;
-END
-$$;
+-- API keys are gone.
 DROP TABLE IF EXISTS model_response_log_hourly_rollups;
 DROP TABLE IF EXISTS api_keys CASCADE;
 
@@ -354,16 +327,64 @@ BEGIN
 END
 $$;
 
--- Gateway settings the console writes at runtime, one JSON document per
--- key (`turn_state` holds turn-state handling and its probe).
-CREATE TABLE IF NOT EXISTS gateway_settings (
-  key TEXT PRIMARY KEY,
-  value JSONB NOT NULL,
+-- Which portal user each ChatGPT conversation belongs to. Users sharing one
+-- upstream account would otherwise see and open each other's conversations;
+-- a conversation is bound to the user whose request first names it.
+CREATE TABLE IF NOT EXISTS conversation_owners (
+  conversation_id TEXT PRIMARY KEY,
+  owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_owners_owner
+  ON conversation_owners (owner_user_id);
+
+-- Quota profiles: what a user may consume, set by an admin. A user takes
+-- the values of their profile (the default one when none is set), overridden
+-- key by key by `portal_users.quota_overrides`. A NULL feature limit means
+-- the gateway sets none of its own; the upstream account's still applies.
+CREATE TABLE IF NOT EXISTS quota_profiles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  is_default BOOLEAN NOT NULL DEFAULT false,
+  weekly_share_percent DOUBLE PRECISION NOT NULL DEFAULT 25,
+  deep_research_limit INTEGER,
+  image_gen_limit INTEGER,
+  created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
 );
+-- Messages to Pro models (`gpt-*-pro`), which have their own weekly pool.
+ALTER TABLE quota_profiles ADD COLUMN IF NOT EXISTS pro_message_limit INTEGER;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quota_profiles_one_default
+  ON quota_profiles (is_default) WHERE is_default;
+INSERT INTO quota_profiles (name, is_default)
+SELECT '默认', true
+WHERE NOT EXISTS (SELECT 1 FROM quota_profiles WHERE is_default);
 
-DROP TRIGGER IF EXISTS trg_set_updated_at_on_gateway_settings ON gateway_settings;
-CREATE TRIGGER trg_set_updated_at_on_gateway_settings
-  BEFORE UPDATE ON gateway_settings
+DROP TRIGGER IF EXISTS trg_set_updated_at_on_quota_profiles ON quota_profiles;
+CREATE TRIGGER trg_set_updated_at_on_quota_profiles
+  BEFORE UPDATE ON quota_profiles
   FOR EACH ROW
   EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE portal_users
+  ADD COLUMN IF NOT EXISTS quota_profile_id UUID
+    REFERENCES quota_profiles(id) ON DELETE SET NULL;
+-- Keys present here override the profile: `weeklySharePercent`,
+-- `deepResearchLimit`, `imageGenLimit`, `proMessageLimit` (a null limit
+-- overrides to none).
+ALTER TABLE portal_users
+  ADD COLUMN IF NOT EXISTS quota_overrides JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+-- One row per use of a counted ChatGPT feature (Deep Research, image
+-- generation, a Pro model message), counted over its rolling window.
+CREATE TABLE IF NOT EXISTS feature_usage (
+  id BIGSERIAL PRIMARY KEY,
+  owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL,
+  feature TEXT NOT NULL,
+  conversation_id TEXT,
+  used_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_feature_usage_owner_feature_time
+  ON feature_usage (owner_user_id, feature, used_at DESC);

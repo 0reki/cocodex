@@ -35,14 +35,20 @@ pub struct RequestContext {
     /// The client's name and email, shown on the ChatGPT profile endpoints
     /// in place of the upstream login's.
     pub client_profile: Option<crate::client_identity::ClientProfile>,
-    /// Set when the gateway owns this request's `x-codex-turn-state`: the
-    /// model is one it manages, so the client's own value never goes
-    /// upstream and the state held for this login takes its place (see
-    /// `crate::turn_state`). A WebSocket carries its state per turn instead,
-    /// so this stays unset there.
-    pub turn_state_key: Option<crate::turn_state::StateKey>,
-    /// The turn state to present, when one is held for the login and model.
-    pub upstream_turn_state: Option<String>,
+    /// The portal user the request was admitted for, with their quota.
+    pub owner: Option<crate::db::users::PortalUser>,
+    /// Counted features a `/f/conversation` turn asks for, recorded once
+    /// upstream takes it, and the conversation it names.
+    pub requested_features: Vec<crate::features::Feature>,
+    pub turn_conversation_id: Option<String>,
+    /// The user's allowances, loaded for `/conversation/init` to report.
+    pub feature_allowances: Option<Vec<crate::features::Allowance>>,
+    /// The client's own conversations, loaded for a conversation listing so
+    /// the forwarder can drop everyone else's (see `crate::conversation_scope`).
+    pub owned_conversations: Option<std::collections::HashSet<String>>,
+    /// Set on a turn: finds the conversation its response names, so a new
+    /// chat is bound to the user who started it.
+    pub conversation_scan: Option<Arc<Mutex<crate::conversation_scope::ConversationIdScanner>>>,
     /// The timezone and date (`%Y-%m-%d`) the gateway presents in the
     /// conversation's `<environment_context>`, from its egress IP.
     pub presented_timezone: Option<String>,
@@ -86,8 +92,12 @@ impl RequestContext {
             upstream_platform: None,
             identity_swap: Vec::new(),
             client_profile: None,
-            turn_state_key: None,
-            upstream_turn_state: None,
+            owner: None,
+            requested_features: Vec::new(),
+            turn_conversation_id: None,
+            feature_allowances: None,
+            owned_conversations: None,
+            conversation_scan: None,
             presented_timezone: None,
             presented_current_date: None,
             metadata: HashMap::new(),

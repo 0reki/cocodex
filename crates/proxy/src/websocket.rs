@@ -20,9 +20,6 @@ use url::Url;
 
 type UpstreamSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-/// Context key holding the turn state the upstream handshake answered with.
-pub const HANDSHAKE_TURN_STATE: &str = "handshake_turn_state";
-
 /// Offers permessage-deflate on the upstream handshake, matching the Codex
 /// client (`codex-rs/codex-api/src/endpoint/responses_websocket.rs`).
 fn upstream_ws_config() -> WebSocketConfig {
@@ -190,26 +187,6 @@ pub async fn handle_ws_upgrade(
             }
         }
     };
-    // The turn state a Responses WebSocket is given arrives on the handshake,
-    // before any frame names a model. Keep it until the first
-    // `response.create` says which model it belongs to, and keep it from the
-    // client until then.
-    let mut handshake_headers = handshake_headers;
-    if let Some(state) = handshake_headers
-        .get(crate::upstream::client::TURN_STATE_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-    {
-        ctx.metadata.insert(HANDSHAKE_TURN_STATE.to_string(), state);
-    }
-    // The client is handed the state the gateway settles on, per turn, in the
-    // metadata event. It must not pick one up here: this Codex reads the
-    // handshake's state into nothing, but that is its choice to change, and a
-    // state the gateway would not present must not reach a client by way of a
-    // detail of the client's own implementation.
-    handshake_headers.remove(crate::upstream::client::TURN_STATE_HEADER);
     info!(request_id = %ctx.request_id, "WebSocket proxy established with upstream");
     let mut response = ws.on_upgrade(move |client| relay(client, upstream, ctx, interceptor));
     // Codex reads the model, reasoning and rate-limit markers off the

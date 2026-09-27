@@ -342,83 +342,6 @@ pub fn rewrite_request_body(ctx: &RequestContext, headers: &HeaderMap, body: Byt
     }
 }
 
-/// Replaces the turn state an upstream `codex.response.metadata` event
-/// carries with the one the gateway settled on, or takes it out when there
-/// is none worth having. A state the gateway will not present must not reach
-/// the client either: the client replays whatever it is given, so handing it
-/// one pins every later turn to whatever issued it. Returns the rewritten
-/// event when it changed.
-pub fn rewrite_ws_metadata_turn_state(text: &str, state: Option<&str>) -> Option<String> {
-    let key = crate::upstream::client::TURN_STATE_HEADER;
-    let mut value: Value = serde_json::from_str(text).ok()?;
-    let kind = value.get("type").and_then(Value::as_str)?;
-    if kind != "codex.response.metadata" && kind != "response.metadata" {
-        return None;
-    }
-    let headers = value.get_mut("headers")?.as_object_mut()?;
-    let name = headers
-        .keys()
-        .find(|name| name.eq_ignore_ascii_case(key))
-        .cloned()?;
-    match state {
-        Some(state) => {
-            if headers.get(&name).and_then(Value::as_str) == Some(state) {
-                return None;
-            }
-            headers.insert(name, Value::String(state.to_string()));
-        }
-        None => {
-            headers.remove(&name);
-        }
-    }
-    Some(value.to_string())
-}
-
-/// The turn state a WebSocket `response.create` frame carries in its
-/// `client_metadata`, if any.
-pub fn ws_turn_state(text: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(text).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("response.create") {
-        return None;
-    }
-    value
-        .get("client_metadata")?
-        .get(crate::upstream::client::TURN_STATE_HEADER)?
-        .as_str()
-        .map(str::to_string)
-}
-
-/// Replaces the turn state a WebSocket `response.create` frame carries in
-/// its `client_metadata` with the one the gateway holds for the login, or
-/// removes it when the gateway holds none (see `crate::turn_state`). Returns
-/// the rewritten frame and whether the client had sent a state of its own.
-pub fn rewrite_ws_turn_state(text: &str, state: Option<&str>) -> Option<(String, bool)> {
-    let key = crate::upstream::client::TURN_STATE_HEADER;
-    let mut value: Value = serde_json::from_str(text).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("response.create") {
-        return None;
-    }
-    let object = value.as_object_mut()?;
-    if !object.contains_key("client_metadata") {
-        // Nothing to remove, and a state to present needs somewhere to sit.
-        state?;
-        object.insert(
-            "client_metadata".to_string(),
-            Value::Object(serde_json::Map::new()),
-        );
-    }
-    let metadata = object.get_mut("client_metadata")?.as_object_mut()?;
-    let had_own = metadata.get(key).is_some_and(Value::is_string);
-    let changed = match state {
-        Some(state) => {
-            metadata.insert(key.to_string(), Value::String(state.to_string()))
-                != Some(Value::String(state.to_string()))
-        }
-        None => metadata.remove(key).is_some(),
-    };
-    changed.then(|| (value.to_string(), had_own))
-}
-
 /// Rewrites a WebSocket `response.create` text frame; other frames are
 /// returned unchanged.
 pub fn rewrite_ws_client_text(text: &str, identity: &PresentedIdentity<'_>) -> Option<String> {
@@ -595,6 +518,14 @@ impl serde_json::ser::Formatter for AsciiJsonFormatter {
         }
         Ok(())
     }
+}
+
+/// Responses relayed exactly as upstream sent them. `/celsius/ws/user` hands
+/// the webview the address and signed credentials of upstream's own
+/// WebSocket, which name the login; swapping its identity in them would
+/// break the connection they are for.
+pub fn relays_verbatim(path: &str) -> bool {
+    path.starts_with("/backend-api/celsius/ws/")
 }
 
 /// The client's own profile, shown in place of the upstream login's on the

@@ -114,15 +114,6 @@ async fn owner_status_follows_user_row() {
     ));
 
     let other = db.create_user("carol").await;
-    sqlx::query("UPDATE portal_users SET quota = 1, used = 1 WHERE id = $1::uuid")
-        .bind(&other)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-    assert!(matches!(
-        ready.verify_owner(&other).await.unwrap(),
-        OwnerStatus::QuotaExceeded(_)
-    ));
     sqlx::query("UPDATE portal_users SET enabled = false WHERE id = $1::uuid")
         .bind(&other)
         .execute(&db.pool)

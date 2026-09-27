@@ -16,7 +16,6 @@ use tracing::warn;
 use super::{Body, Db, Principal, fail, internal, no_store};
 use crate::AppState;
 use crate::auth::password;
-use crate::billing::usd::Usd;
 use crate::db;
 use crate::db::assignments::SetOutcome;
 use crate::db::invitations::CreateError;
@@ -33,7 +32,6 @@ pub fn admin_routes() -> Router<AppState> {
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{id}/upstream", put(set_upstream))
         .route("/api/users/{id}/username", put(set_username))
-        .route("/api/users/{id}/quota", put(set_quota))
         .route("/api/users/{id}/password", put(set_password))
         .route("/api/users/{id}/enable", post(enable))
         .route("/api/users/{id}/disable", post(disable))
@@ -53,8 +51,6 @@ fn public_user(user: &PortalUserRecord, assignment: Option<Option<&AssignmentVie
         "username": user.username,
         "role": user.role(),
         "enabled": user.enabled,
-        "quota": user.quota,
-        "used": user.used,
     });
     if let Some(assignment) = assignment {
         value["sourceAccountId"] = json!(assignment.and_then(|a| a.source_account_id.clone()));
@@ -125,7 +121,16 @@ async fn my_usage(Db(ready): Db, principal: Principal) -> Response {
         Ok(None) => return unassigned(),
         Err(error) => return no_store(internal(error)),
     };
-    let summary = match ready.quota.summary(&account_id, &principal.id).await {
+    let limit_percent = match db::users::find_by_id(&ready.db, &principal.id).await {
+        Ok(Some(user)) => user.weekly_share_percent,
+        Ok(None) => return no_store(fail(StatusCode::NOT_FOUND, "user not found")),
+        Err(error) => return no_store(internal(error)),
+    };
+    let summary = match ready
+        .quota
+        .summary(&account_id, &principal.id, limit_percent)
+        .await
+    {
         Ok(summary) => summary,
         Err(error) if error == "upstream_account_unassigned" => return unassigned(),
         Err(detail) => {
@@ -232,16 +237,26 @@ async fn create_invitation(Db(ready): Db, principal: Principal, headers: HeaderM
 }
 
 async fn list_users(Db(ready): Db) -> Response {
-    let (users, views) =
-        match tokio::try_join!(db::users::list(&ready.db), assignment_views(&ready)) {
-            Ok(result) => result,
-            Err(error) => return internal(error),
-        };
-    Json(json!({
-        "items": users.iter().map(|user| public_user(user, Some(views.get(&user.id)))).collect::<Vec<_>>(),
-        "count": users.len(),
-    }))
-    .into_response()
+    let (users, views, quotas) = match tokio::try_join!(
+        db::users::list(&ready.db),
+        assignment_views(&ready),
+        db::profiles::user_settings(&ready.db),
+    ) {
+        Ok(result) => result,
+        Err(error) => return internal(error),
+    };
+    let items: Vec<Value> = users
+        .iter()
+        .map(|user| {
+            let mut value = public_user(user, Some(views.get(&user.id)));
+            value["quota"] = quotas
+                .iter()
+                .find(|quota| quota.user_id == user.id)
+                .map_or(Value::Null, super::profiles::public_user_quota);
+            value
+        })
+        .collect();
+    Json(json!({ "items": items, "count": users.len() })).into_response()
 }
 
 /// Accepts `accountId` (a ChatGPT account id) or, for older clients,
@@ -334,27 +349,6 @@ async fn set_username(Db(ready): Db, Path(id): Path<String>, body: Body) -> Resp
     }
     match updated(db::users::update_username(&ready.db, &id, &username).await) {
         Ok(user) => Json(json!({ "ok": true, "user": public_user(&user, None) })).into_response(),
-        Err(response) => response,
-    }
-}
-
-async fn set_quota(Db(ready): Db, Path(id): Path<String>, body: Body) -> Response {
-    if id.trim().is_empty() {
-        return fail(StatusCode::BAD_REQUEST, "id is required");
-    }
-    let quota = match body.0.get("quota") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(s)) if s.is_empty() => None,
-        Some(value) => match Usd::from_json(value) {
-            Some(amount) if amount.0 >= 0 => Some(amount.to_string()),
-            _ => return fail(StatusCode::BAD_REQUEST, "quota is invalid"),
-        },
-    };
-    match updated(db::users::update_quota(&ready.db, &id, quota).await) {
-        Ok(user) => {
-            ready.evict_owner(&id).await;
-            Json(json!({ "ok": true, "user": public_user(&user, None) })).into_response()
-        }
         Err(response) => response,
     }
 }

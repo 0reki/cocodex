@@ -8,8 +8,8 @@ pub mod health;
 pub mod install;
 pub mod logs;
 pub mod portal_auth;
+pub mod profiles;
 pub mod setup;
-pub mod turn_state;
 pub mod users;
 
 use std::sync::Arc;
@@ -272,7 +272,7 @@ pub fn router(state: AppState) -> Router<AppState> {
     let admin = Router::new()
         .merge(users::admin_routes())
         .merge(accounts::routes())
-        .merge(turn_state::routes())
+        .merge(profiles::routes())
         .route_layer(middleware::from_fn_with_state(state, require_admin));
     public
         .merge(signed_in)

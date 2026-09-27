@@ -58,6 +58,10 @@ async fn mock_upstream() -> (String, Captured) {
                         [
                             (SET_COOKIE, "__cf_bm=cf-value; Path=/; Secure; HttpOnly"),
                             (CONTENT_TYPE, "text/event-stream"),
+                            (
+                                axum::http::HeaderName::from_static("x-codex-turn-state"),
+                                "upstream-state",
+                            ),
                         ],
                         concat!(
                             "event: response.created\n",
@@ -159,6 +163,33 @@ async fn mock_upstream() -> (String, Captured) {
                     }}}))
                 },
             ),
+        )
+        .route(
+            "/public-api/gizmos/discovery/mine",
+            axum::routing::get(
+                |State(state): State<Captured>, headers: HeaderMap, uri: axum::http::Uri| async move {
+                    record_webview(&state, &headers, &uri);
+                    // The login's own GPTs name it as their author.
+                    axum::Json(json!({
+                        "info": { "id": "mine", "title": "My GPTs" },
+                        "list": { "items": [{ "resource": { "gizmo": {
+                            "id": "g-1",
+                            "organization_id": "org-UPSTREAM",
+                            "author": { "user_id": "user-UPSTREAM" }
+                        }}}], "cursor": null }
+                    }))
+                },
+            ),
+        )
+        .route(
+            "/backend-api/celsius/ws/user",
+            // Upstream's own WebSocket credentials, which name the login.
+            axum::routing::get(|| async {
+                axum::Json(json!({
+                    "websocket_url": "wss://ws.chatgpt.com/celsius/user-UPSTREAM?account=acct-1",
+                    "user_id": "user-UPSTREAM"
+                }))
+            }),
         )
         .route(
             "/backend-api/subscriptions",
@@ -572,4 +603,96 @@ async fn payments_are_never_relayed() {
         .unwrap();
     let response = app.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn public_api_is_relayed_as_the_client() {
+    let (app, captured, bearer) = setup().await;
+    let token = bearer.trim_start_matches("Bearer ");
+    let claims = cocodex_proxy::auth::jwt::ClientJwt::from_secret(common::TEST_SECRET)
+        .verify_access_token(token)
+        .unwrap();
+
+    let mine = webview_get(&app, &bearer, "/public-api/gizmos/discovery/mine?limit=20").await;
+    let gizmo = &mine["list"]["items"][0]["resource"]["gizmo"];
+    assert_eq!(
+        gizmo["author"]["user_id"],
+        claims.openai_auth.chatgpt_user_id.as_str()
+    );
+    assert_eq!(
+        gizmo["organization_id"],
+        claims.openai_auth.poid.as_deref().unwrap()
+    );
+
+    let seen = captured.webview.lock().unwrap();
+    assert_eq!(
+        seen.as_slice(),
+        [(
+            WEBVIEW_UA.to_string(),
+            "/public-api/gizmos/discovery/mine?limit=20".to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn turn_state_is_relayed_as_is() {
+    let (app, captured, bearer) = setup().await;
+    let mut request = responses_request(&bearer, None, body_with_client_identity());
+    request.headers_mut().insert(
+        "x-codex-turn-state",
+        axum::http::HeaderValue::from_static("client-state"),
+    );
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // Upstream's state reaches the client, and the client's reaches upstream.
+    assert_eq!(response.headers()["x-codex-turn-state"], "upstream-state");
+    let responses = captured.responses.lock().unwrap();
+    assert_eq!(responses[0].0["x-codex-turn-state"], "client-state");
+}
+
+#[tokio::test]
+async fn upstream_websocket_credentials_are_relayed_verbatim() {
+    let (app, _captured, bearer) = setup().await;
+    let request = Request::builder()
+        .uri("/backend-api/celsius/ws/user")
+        .header("authorization", &bearer)
+        .header("user-agent", WEBVIEW_UA)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "websocket_url": "wss://ws.chatgpt.com/celsius/user-UPSTREAM?account=acct-1",
+            "user_id": "user-UPSTREAM"
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_profile_edit_never_reaches_the_upstream_login() {
+    let (app, captured, bearer) = setup().await;
+    let request = Request::builder()
+        .method("PATCH")
+        .uri("/backend-api/wham/profiles/me")
+        .header("authorization", &bearer)
+        .header("user-agent", WEBVIEW_UA)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"display_name":"renamed"}"#))
+        .unwrap();
+    // Upstream serves the profile to GET only: a PATCH would be a 405.
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let profile: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(profile["profile"]["username"], "user");
+    assert_ne!(profile["profile"]["display_name"], "renamed");
+    assert_eq!(captured.webview.lock().unwrap().len(), 1);
 }

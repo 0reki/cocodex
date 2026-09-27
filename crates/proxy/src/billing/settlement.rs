@@ -19,7 +19,6 @@ use sqlx::PgPool;
 use tokio::sync::{Mutex, Notify};
 use tracing::{error, warn};
 
-use crate::auth::owner_cache::OwnerAuthCache;
 use crate::db;
 use crate::db::settlements::Settlement;
 
@@ -214,7 +213,6 @@ struct State {
 
 pub struct SettlementQueue {
     pool: PgPool,
-    owners: OwnerAuthCache,
     config: SettlementConfig,
     state: Mutex<State>,
     flush_lock: Mutex<()>,
@@ -224,7 +222,6 @@ pub struct SettlementQueue {
 impl SettlementQueue {
     pub async fn start(
         pool: PgPool,
-        owners: OwnerAuthCache,
         config: SettlementConfig,
     ) -> std::io::Result<Arc<SettlementQueue>> {
         let path = config.wal_path.clone();
@@ -234,7 +231,6 @@ impl SettlementQueue {
         let queued = live.iter().map(|item| item.settlement_id.clone()).collect();
         let queue = Arc::new(SettlementQueue {
             pool,
-            owners,
             state: Mutex::new(State {
                 pending: live.into(),
                 queued,
@@ -325,10 +321,7 @@ impl SettlementQueue {
                 return Ok(());
             }
             match db::settlements::flush(&self.pool, &batch).await {
-                Ok(result) => {
-                    for owner in &result.owners_over_quota {
-                        self.owners.invalidate(owner).await;
-                    }
+                Ok(_) => {
                     self.acknowledge(&batch).await;
                 }
                 Err(error) => {
@@ -429,7 +422,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_records_written_by_node() {
+    fn reads_records_written_by_node_and_older_gateways() {
         // Produced by the Node backend's encodeWalPayload(), including
         // characters whose escaping could differ between serializers.
         let line = "{\"checksum\":\"65c90c81cd52b95fa59445751d5bf36f77d85f6c3c05181a737d6e112fb50e89\",\"payload\":{\"version\":1,\"operation\":\"put\",\"settlement\":{\"settlementId\":\"s-1\",\"intentId\":null,\"ownerUserId\":\"11111111-1111-4111-8111-111111111111\",\"apiKeyId\":null,\"charge\":\"12345\",\"isFinal\":true,\"streamEndReason\":\"stop\",\"path\":\"/backend-api/codex/responses\",\"modelId\":\"gpt-5.4\",\"serviceTier\":null,\"statusCode\":200,\"ttfbMs\":12,\"latencyMs\":40,\"tokensInfo\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12},\"totalTokens\":12,\"cost\":\"12345\",\"errorCode\":null,\"errorMessage\":\"引擎 \\\"x\\\"\\n\u{2028}\",\"requestTime\":\"2026-09-19T08:00:00.000Z\"}}}";
@@ -437,12 +430,18 @@ mod tests {
             panic!("expected put");
         };
         assert_eq!(settlement.settlement_id, "s-1");
-        assert_eq!(settlement.charge.to_string(), "0.00012345");
-        // Re-encoding yields the exact same line.
         assert_eq!(
-            encode_record(&put_payload(&settlement)),
-            format!("{line}\n")
+            settlement.error_message.as_deref(),
+            Some("引擎 \"x\"\n\u{2028}")
         );
+        // The dollar charge it carries is no longer part of a record: users
+        // have no dollar quota. What is written now reads back the same.
+        let rewritten = encode_record(&put_payload(&settlement));
+        assert!(!rewritten.contains("charge"), "{rewritten}");
+        let WalRecord::Put(again) = decode_record(rewritten.trim_end()).unwrap() else {
+            panic!("expected put");
+        };
+        assert_eq!(again, settlement);
 
         let tampered = line.replace("\"s-1\"", "\"s-2\"");
         assert!(decode_record(&tampered).is_err());

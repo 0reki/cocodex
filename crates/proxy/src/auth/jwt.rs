@@ -103,28 +103,35 @@ pub fn gateway_account_id(owner_user_id: &str) -> String {
     owner_user_id.trim().to_string()
 }
 
+/// The account's ChatGPT user id: `user-` and 24 mixed-case letters and
+/// digits, like chatgpt.com's, derived from the account so it stays the
+/// same across sessions.
 pub fn chatgpt_user_id_for(account_id: &str) -> String {
-    let compact = compact_alnum(account_id);
-    let take = compact.len().min(24);
-    format!("user-{}", &compact[..take])
+    format!("user-{}", derived_alnum("user", account_id))
 }
 
+/// The account's personal organization id, `org-` and 24 letters and
+/// digits in the same way.
 pub fn chatgpt_org_id_for(account_id: &str) -> String {
-    let compact = compact_alnum(account_id);
-    let take = compact.len().min(24);
-    format!("org-{}", &compact[..take])
+    format!("org-{}", derived_alnum("org", account_id))
 }
 
-fn compact_alnum(value: &str) -> String {
-    let compact: String = value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .collect();
-    if compact.is_empty() {
-        "gateway".to_string()
-    } else {
-        compact
-    }
+/// 24 mixed-case letters and digits from a hash of `account_id`.
+fn derived_alnum(kind: &str, account_id: &str) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    Sha256::digest(format!("cocodex-{kind}:{}", account_id.trim()).as_bytes())
+        .iter()
+        .take(24)
+        .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
+        .collect()
+}
+
+/// The token subject of an email/password ChatGPT user: Auth0's database
+/// connection and a 24-hex user id, derived here from the account so it
+/// stays the same across sessions.
+pub fn auth0_subject_for(account_id: &str) -> String {
+    let digest = Sha256::digest(format!("cocodex-sub:{account_id}").as_bytes());
+    format!("auth0|{}", &hex::encode(digest)[..24])
 }
 
 fn display_name_from_email(email: &str) -> String {
@@ -254,7 +261,7 @@ impl ClientJwt {
         let name = display_name_from_email(email);
         let session_id = session_id.to_string();
         let chatgpt_account_user_id = format!("{chatgpt_user_id}__{account_id}");
-        let sub = format!("cocodex|{account_id}");
+        let sub = auth0_subject_for(&account_id);
 
         let access_claims = CodexJwtClaims {
             iss: ISSUER.to_string(),

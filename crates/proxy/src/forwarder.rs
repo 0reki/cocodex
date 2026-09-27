@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use url::Url;
 
 /// Largest request body accepted for forwarding (image edits carry images).
-const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Forwarder for `/backend-api/*` requests to upstream ChatGPT.
 #[derive(Clone)]
@@ -268,7 +268,8 @@ impl BackendForwarder {
             .get(http::header::CONTENT_ENCODING)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|v| !v.trim().eq_ignore_ascii_case("identity"));
-        let swap = Arc::new(std::sync::Mutex::new(if compressed {
+        let verbatim = client_identity::relays_verbatim(&ctx.target_path);
+        let swap = Arc::new(std::sync::Mutex::new(if compressed || verbatim {
             client_identity::IdentitySwap::default()
         } else {
             client_identity::IdentitySwap::new(&ctx.identity_swap)
@@ -288,18 +289,43 @@ impl BackendForwarder {
         })
         .filter_map(|item: Option<Result<bytes::Bytes, std::io::Error>>| async move { item });
         // A profile body describes the login's person and account in fields
-        // that cannot be swapped as bytes; it is small, so it is rewritten
+        // that cannot be swapped as bytes, and a conversation listing holds
+        // every user's conversations; both are small, so they are rewritten
         // whole.
         let endpoint = client_identity::ProfileEndpoint::of(&ctx.target_path);
-        let upstream_stream = match (&ctx.client_profile, endpoint) {
-            (Some(profile), Some(endpoint)) if status.is_success() && !compressed => {
-                let body = upstream_resp.bytes().await.map(|body| {
-                    client_identity::rewrite_profile_body(endpoint, &body, profile)
-                        .map_or(body, bytes::Bytes::from)
-                });
-                futures_util::stream::once(async move { body }).boxed()
-            }
-            _ => upstream_resp.bytes_stream().boxed(),
+        let profile = ctx.client_profile.as_ref().zip(endpoint);
+        let rewrite_whole = status.is_success()
+            && !compressed
+            && (profile.is_some()
+                || ctx.owned_conversations.is_some()
+                || ctx.feature_allowances.is_some());
+        let upstream_stream = if rewrite_whole {
+            let body = upstream_resp.bytes().await.map(|mut body| {
+                if let Some((client, endpoint)) = profile
+                    && let Some(rewritten) =
+                        client_identity::rewrite_profile_body(endpoint, &body, client)
+                {
+                    body = bytes::Bytes::from(rewritten);
+                }
+                if let Some(owned) = &ctx.owned_conversations
+                    && let Some(filtered) = crate::conversation_scope::filter_listing(&body, owned)
+                {
+                    body = bytes::Bytes::from(filtered);
+                }
+                if let Some(allowances) = &ctx.feature_allowances
+                    && let Some(rewritten) = crate::features::rewrite_limits_progress(
+                        &body,
+                        allowances,
+                        chrono::Utc::now(),
+                    )
+                {
+                    body = bytes::Bytes::from(rewritten);
+                }
+                body
+            });
+            futures_util::stream::once(async move { body }).boxed()
+        } else {
+            upstream_resp.bytes_stream().boxed()
         };
         let byte_stream = upstream_stream.map(move |item| {
             let _keep_guard = &finish_guard_chunk;
@@ -435,27 +461,6 @@ pub(crate) fn apply_upstream_identity_headers(headers: &mut HeaderMap, ctx: &Req
         && let Ok(hv) = HeaderValue::from_str(version)
     {
         headers.insert(version_header, hv);
-    }
-
-    // The turn state is the login's, not the client's: on a managed model
-    // the client's own value never reaches upstream, and the one the gateway
-    // holds for that login takes its place. Unlike the identity headers this
-    // one may be added or removed, because a genuine Codex client sends it
-    // only once its session has been issued one.
-    if ctx.turn_state_key.is_some() {
-        let header = HeaderName::from_static(crate::upstream::client::TURN_STATE_HEADER);
-        match ctx
-            .upstream_turn_state
-            .as_deref()
-            .and_then(|state| HeaderValue::from_str(state).ok())
-        {
-            Some(hv) => {
-                headers.insert(header, hv);
-            }
-            None => {
-                headers.remove(header);
-            }
-        }
     }
 
     let Some(identity) = client_identity::PresentedIdentity::from_ctx(ctx) else {

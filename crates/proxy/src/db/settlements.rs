@@ -16,8 +16,6 @@ pub struct Settlement {
     pub owner_user_id: Option<String>,
     #[serde(default)]
     pub api_key_id: Option<String>,
-    #[serde(with = "scaled_usd")]
-    pub charge: Usd,
     pub is_final: Option<bool>,
     pub stream_end_reason: Option<String>,
     pub path: String,
@@ -48,22 +46,6 @@ pub struct Settlement {
     pub request_time: String,
 }
 
-mod scaled_usd {
-    use super::Usd;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &Usd, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&value.0.to_string())
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Usd, D::Error> {
-        let raw = String::deserialize(d)?;
-        raw.parse::<i128>()
-            .map(Usd)
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 mod scaled_usd_opt {
     use super::Usd;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -88,15 +70,12 @@ mod scaled_usd_opt {
 
 pub struct FlushResult {
     pub accepted: Vec<String>,
-    /// Owners whose spend reached their quota with this batch.
-    pub owners_over_quota: Vec<String>,
 }
 
 pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, sqlx::Error> {
     if batch.is_empty() {
         return Ok(FlushResult {
             accepted: Vec::new(),
-            owners_over_quota: Vec::new(),
         });
     }
     let payload: Vec<serde_json::Value> = batch
@@ -107,7 +86,6 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
                 "intent_id": item.intent_id,
                 "owner_user_id": item.owner_user_id,
                 "key_id": item.api_key_id,
-                "charge": item.charge.to_string(),
                 "is_final": item.is_final,
                 "stream_end_reason": item.stream_end_reason,
                 "path": item.path,
@@ -130,7 +108,7 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
         })
         .collect();
 
-    let (accepted, owners_over_quota): (serde_json::Value, serde_json::Value) = sqlx::query_as(
+    let (accepted,): (serde_json::Value,) = sqlx::query_as(
         r#"
         WITH raw_input AS (
           SELECT *
@@ -139,7 +117,6 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
             intent_id text,
             owner_user_id uuid,
             key_id uuid,
-            charge numeric,
             is_final boolean,
             stream_end_reason text,
             path text,
@@ -187,24 +164,6 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
           ON CONFLICT (settlement_id) DO NOTHING
           RETURNING settlement_id, owner_user_id, model_id, request_time, total_tokens, cost
         ),
-        accepted AS (
-          SELECT input.*
-          FROM input
-          JOIN inserted_logs USING (settlement_id)
-        ),
-        user_charges AS (
-          SELECT owner_user_id, SUM(charge) AS amount
-          FROM accepted
-          WHERE owner_user_id IS NOT NULL AND charge > 0
-          GROUP BY owner_user_id
-        ),
-        updated_users AS (
-          UPDATE portal_users users
-          SET used = GREATEST(0, COALESCE(users.used, 0) + charges.amount)
-          FROM user_charges charges
-          WHERE users.id = charges.owner_user_id
-          RETURNING users.id, users.used, users.quota
-        ),
         rollup_values AS (
           SELECT
             date_trunc('hour', request_time) AS hour_bucket,
@@ -235,12 +194,7 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
           RETURNING 1
         )
         SELECT
-          COALESCE((SELECT jsonb_agg(settlement_id) FROM inserted_logs), '[]'::jsonb),
-          COALESCE(
-            (SELECT jsonb_agg(id::text) FROM updated_users
-              WHERE quota IS NOT NULL AND used >= quota),
-            '[]'::jsonb
-          )
+          COALESCE((SELECT jsonb_agg(settlement_id) FROM inserted_logs), '[]'::jsonb)
         "#,
     )
     .bind(serde_json::Value::Array(payload))
@@ -252,6 +206,5 @@ pub async fn flush(pool: &PgPool, batch: &[Settlement]) -> Result<FlushResult, s
     };
     Ok(FlushResult {
         accepted: strings(accepted),
-        owners_over_quota: strings(owners_over_quota),
     })
 }

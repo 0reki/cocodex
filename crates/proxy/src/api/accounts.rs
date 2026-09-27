@@ -435,9 +435,14 @@ async fn test(
     let model = Some(body.str("model"))
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| "gpt-5.6-luna".into());
+    let limit_percent = match db::users::find_by_id(&ready.db, &principal.id).await {
+        Ok(Some(user)) => user.weekly_share_percent,
+        Ok(None) => return fail(StatusCode::NOT_FOUND, "user not found"),
+        Err(error) => return internal(error),
+    };
     if !ready
         .quota
-        .check(&account.account_id, &principal.id)
+        .check(&account.account_id, &principal.id, limit_percent)
         .await
         .allowed
     {

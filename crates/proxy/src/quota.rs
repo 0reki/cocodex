@@ -1,7 +1,7 @@
 //! Per-user share of an upstream ChatGPT account's weekly quota.
 //!
-//! Each user may consume at most `USER_QUOTA_PERCENT` of the account's
-//! weekly window. A user's share is the window's `used_percent` split by the
+//! Each user may consume at most their weekly share (from their quota
+//! profile, `crate::db::profiles`) of the account's weekly window. A user's share is the window's `used_percent` split by the
 //! usage (USD) each assigned user recorded in that window.
 
 use std::collections::{HashMap, HashSet};
@@ -18,8 +18,6 @@ use crate::billing::usd::Usd;
 use crate::db;
 use crate::upstream::accounts::AccountService;
 use crate::upstream::usage_summary::{RateLimit, Window};
-
-pub const USER_QUOTA_PERCENT: f64 = 25.0;
 
 #[derive(Debug, Clone, Default)]
 struct Snapshot {
@@ -74,13 +72,18 @@ impl QuotaService {
 
     /// Whether the user may start another billable request. Without a
     /// current window reading the request is let through and a sync starts.
-    pub async fn check(self: &Arc<Self>, account_id: &str, owner: &str) -> QuotaDecision {
+    pub async fn check(
+        self: &Arc<Self>,
+        account_id: &str,
+        owner: &str,
+        limit_percent: f64,
+    ) -> QuotaDecision {
         let snapshot = self.snapshots.read().await.get(account_id).cloned();
         match snapshot {
             Some(snapshot) if snapshot.is_current() => {
                 let allocated = snapshot.allocated_percent(owner);
                 QuotaDecision {
-                    allowed: allocated < USER_QUOTA_PERCENT,
+                    allowed: allocated < limit_percent,
                     allocated_percent: allocated,
                     reset_at: Some(snapshot.reset_at),
                 }
@@ -246,7 +249,12 @@ impl QuotaService {
     }
 
     /// The console's view of the user's share, read live from upstream.
-    pub async fn summary(&self, account_id: &str, owner: &str) -> Result<Value, String> {
+    pub async fn summary(
+        &self,
+        account_id: &str,
+        owner: &str,
+        limit_percent: f64,
+    ) -> Result<Value, String> {
         let account = db::accounts::representative(&self.pool, account_id)
             .await
             .map_err(|e| e.to_string())?
@@ -256,7 +264,7 @@ impl QuotaService {
         let Some(weekly) = rate_limit.weekly() else {
             return Ok(json!({
                 "capturedAt": db::iso(chrono::Utc::now()),
-                "limitPercent": USER_QUOTA_PERCENT,
+                "limitPercent": limit_percent,
                 "pools": { "standard": {
                     "available": false,
                     "usageUnit": "weighted_usd",
@@ -284,7 +292,7 @@ impl QuotaService {
             .filter(|w| w.limit_window_seconds != crate::upstream::usage_summary::WEEK_SECONDS);
         Ok(json!({
             "capturedAt": db::iso(chrono::Utc::now()),
-            "limitPercent": USER_QUOTA_PERCENT,
+            "limitPercent": limit_percent,
             "pools": { "standard": {
                 "available": true,
                 "usageUnit": "weighted_usd",

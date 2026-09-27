@@ -16,12 +16,16 @@ pub enum BackendKind {
     Responses,
     Images,
     Search,
+    /// A ChatGPT turn (`/f/conversation`) from the desktop app's webview.
+    Conversation,
     Passthrough,
 }
 
 impl BackendKind {
     /// Kinds whose cost is charged to the user and counted against the
-    /// upstream quota share. Images and Search are logged but free.
+    /// upstream quota share. Images, Search and ChatGPT turns are logged but
+    /// free: a ChatGPT turn reports no token usage, and its limits are the
+    /// feature quotas (`crate::features`).
     pub fn billable(self) -> bool {
         matches!(self, Self::Responses)
     }
@@ -35,6 +39,8 @@ pub fn classify_backend_kind(path: &str) -> BackendKind {
         BackendKind::Images
     } else if normalized.contains("/alpha/search") {
         BackendKind::Search
+    } else if crate::conversation_scope::is_turn_path(normalized) {
+        BackendKind::Conversation
     } else {
         BackendKind::Passthrough
     }
@@ -130,9 +136,6 @@ pub struct RequestObservation {
     pub settled: bool,
     /// A WebSocket carries many responses; HTTP exactly one.
     pub websocket: bool,
-    /// A turn state an upstream event carried, waiting to be taken into the
-    /// gateway's own cache (see `crate::turn_state`).
-    captured_turn_state: Option<String>,
 }
 
 impl Default for RequestObservation {
@@ -147,7 +150,6 @@ impl Default for RequestObservation {
             upstream_complete: false,
             settled: false,
             websocket: false,
-            captured_turn_state: None,
         }
     }
 }
@@ -293,6 +295,17 @@ impl RequestObservation {
     fn ingest_event(&mut self, value: &Value) {
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
         let current = &mut self.current;
+        // A ChatGPT turn names the model that answered on its assistant
+        // message (`{"v": {"message": {...}}}` deltas).
+        if let Some(message) = value.get("v").and_then(|v| v.get("message"))
+            && message.pointer("/author/role").and_then(Value::as_str) == Some("assistant")
+            && let Some(model) = message
+                .pointer("/metadata/model_slug")
+                .and_then(Value::as_str)
+            && !model.is_empty()
+        {
+            current.completed_model = Some(model.to_string());
+        }
         if current.ttft_ms.is_none() && is_generation_event(kind) {
             current.ttft_ms = Some(current.started_at.elapsed().as_millis() as u64);
         }
@@ -321,7 +334,6 @@ impl RequestObservation {
                 .and_then(turn_state)
         {
             current.turn_state_len = Some(state.len());
-            self.captured_turn_state = Some(state);
         }
         if kind == "error" {
             current.status = value
@@ -355,11 +367,6 @@ impl RequestObservation {
             let done = std::mem::replace(current, ResponseObservation::new(Instant::now()));
             self.finished.push(done);
         }
-    }
-
-    /// The turn state the last upstream event carried, once.
-    pub fn take_captured_turn_state(&mut self) -> Option<String> {
-        self.captured_turn_state.take()
     }
 
     /// Everything to settle: finished responses plus an unfinished one.
@@ -437,6 +444,20 @@ mod tests {
         assert!(classify_backend_kind("/backend-api/codex/responses").billable());
         assert!(!classify_backend_kind("/backend-api/codex/images/generations").billable());
         assert!(!classify_backend_kind("/backend-api/codex/models").billable());
+        // ChatGPT turns are logged, not billed; the rest of ChatGPT is not logged.
+        assert_eq!(
+            classify_backend_kind("/backend-api/f/conversation"),
+            BackendKind::Conversation
+        );
+        assert!(!BackendKind::Conversation.billable());
+        assert_eq!(
+            classify_backend_kind("/backend-api/conversations"),
+            BackendKind::Passthrough
+        );
+        assert_eq!(
+            classify_backend_kind("/backend-api/f/conversation/prepare"),
+            BackendKind::Passthrough
+        );
         // Housekeeping traffic is passthrough and never logged or settled.
         for path in [
             "/backend-api/codex/analytics-events/events",

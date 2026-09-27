@@ -2,15 +2,21 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-/// Portal user as the gateway checks it on every request.
+/// Portal user as the gateway checks it on every request, with the quota
+/// their profile and overrides give them.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PortalUser {
     pub id: String,
     pub username: String,
     pub role: String,
     pub enabled: bool,
-    /// `quota IS NULL OR used < quota`, computed in SQL to avoid NUMERIC decoding.
-    pub within_quota: bool,
+    /// Most of the upstream account's weekly window the user may consume.
+    pub weekly_share_percent: f64,
+    /// Uses per rolling window; `None` sets no limit of the gateway's own.
+    pub deep_research_limit: Option<i32>,
+    pub image_gen_limit: Option<i32>,
+    /// Messages to Pro models per rolling week.
+    pub pro_message_limit: Option<i32>,
 }
 
 /// Full portal user row for the management API.
@@ -21,8 +27,6 @@ pub struct PortalUserRecord {
     pub password_hash: String,
     pub role: String,
     pub enabled: bool,
-    pub quota: Option<f64>,
-    pub used: f64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -41,8 +45,8 @@ impl PortalUserRecord {
 pub const MAX_PORTAL_USERS: i64 = 4;
 const SEAT_LOCK_KEY: i64 = 8_453_201_114_258;
 
-const RECORD_COLUMNS: &str = "id::text AS id, username, password_hash, role, enabled, \
-    quota::float8 AS quota, used::float8 AS used, created_at, updated_at";
+const RECORD_COLUMNS: &str =
+    "id::text AS id, username, password_hash, role, enabled, created_at, updated_at";
 
 #[derive(Debug)]
 pub enum UserWriteError {
@@ -72,18 +76,21 @@ pub async fn find_by_id(pool: &PgPool, id: &str) -> Result<Option<PortalUser>, s
     let Some(id) = parse_id(id) else {
         return Ok(None);
     };
-    sqlx::query_as::<_, PortalUser>(
+    sqlx::query_as::<_, PortalUser>(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT
-          id::text AS id,
-          username,
-          role,
-          enabled,
-          (quota IS NULL OR used < quota) AS within_quota
-        FROM portal_users
-        WHERE id = $1
+          u.id::text AS id,
+          u.username,
+          u.role,
+          u.enabled,
+          {effective}
+        FROM portal_users u
+        {join}
+        WHERE u.id = $1
         "#,
-    )
+        effective = super::profiles::EFFECTIVE_COLUMNS,
+        join = super::profiles::PROFILE_JOIN,
+    )))
     .bind(id)
     .fetch_optional(pool)
     .await
@@ -265,13 +272,4 @@ pub async fn set_enabled(
     enabled: bool,
 ) -> Result<Option<PortalUserRecord>, UserWriteError> {
     update_returning(pool, id, "enabled = $2", |q| q.bind(enabled)).await
-}
-
-/// `quota` is a decimal string such as `"10.00000000"`, or `None` for unlimited.
-pub async fn update_quota(
-    pool: &PgPool,
-    id: &str,
-    quota: Option<String>,
-) -> Result<Option<PortalUserRecord>, UserWriteError> {
-    update_returning(pool, id, "quota = $2::numeric", |q| q.bind(quota)).await
 }
