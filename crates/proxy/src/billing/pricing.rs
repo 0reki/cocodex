@@ -10,11 +10,14 @@ use super::usd::Usd;
 fn default_prices() -> Vec<Value> {
     vec![
         json!({ "slug": "gpt-6-astra", "input_price_per_million": "10", "cached_input_price_per_million": "1", "output_price_per_million": "50" }),
+        json!({ "slug": "gpt-6-sol", "input_price_per_million": "2", "cached_input_price_per_million": "0.2", "output_price_per_million": "10" }),
+        json!({ "slug": "gpt-6-luna", "input_price_per_million": "0.1", "cached_input_price_per_million": "0.01", "output_price_per_million": "0.5" }),
         json!({ "slug": "gpt-5.6-sol", "input_price_per_million": "4", "cached_input_price_per_million": "0.4", "output_price_per_million": "20" }),
         json!({ "slug": "daybreak_blue", "input_price_per_million": "4", "cached_input_price_per_million": "0.4", "output_price_per_million": "20" }),
         json!({ "slug": "daybreak_red", "input_price_per_million": "12.5", "cached_input_price_per_million": "1.25", "output_price_per_million": "75" }),
         json!({ "slug": "gpt-5.6-terra", "input_price_per_million": "2", "cached_input_price_per_million": "0.2", "output_price_per_million": "12" }),
         json!({ "slug": "gpt-5.6-luna", "input_price_per_million": "0.2", "cached_input_price_per_million": "0.02", "output_price_per_million": "1.2" }),
+        json!({ "slug": "gpt-rosalind-research", "input_price_per_million": "5", "cached_input_price_per_million": "0.5", "output_price_per_million": "25" }),
         json!({ "slug": "gpt-5.5", "input_price_per_million": "5", "cached_input_price_per_million": "0.5", "output_price_per_million": "30" }),
         json!({ "slug": "gpt-5.4", "input_price_per_million": "2.5", "cached_input_price_per_million": "0.25", "output_price_per_million": "15" }),
         json!({ "slug": "gpt-5.4-mini", "input_price_per_million": "0.75", "cached_input_price_per_million": "0.075", "output_price_per_million": "4.52" }),
@@ -241,7 +244,8 @@ pub fn apply_service_tier(
     let model = model
         .map(|m| base_model_id(m.trim()).to_lowercase())
         .unwrap_or_default();
-    let (numerator, denominator) = if model == "gpt-6-astra"
+    let (numerator, denominator) = if model == "gpt-6"
+        || model.starts_with("gpt-6-")
         || model == "gpt-5.5"
         || model == "gpt-5.6"
         || model.starts_with("gpt-5.6-")
@@ -279,6 +283,27 @@ mod tests {
                 .estimate(Some("unknown-model"), &info(json!({ "input_tokens": 5 })))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn newer_models_are_priced() {
+        let pricing = Pricing::from_env().unwrap();
+        // 1000 uncached input at 2, 1000 cached at 0.2, 500 output at 10 (per 1M).
+        let sol = pricing
+            .estimate(
+                Some("gpt-6-sol"),
+                &info(json!({ "input_tokens": 2000, "cached_input_tokens": 1000, "output_tokens": 500 })),
+            )
+            .unwrap();
+        assert_eq!(sol.to_string(), "0.00720000");
+        for slug in ["gpt-6-luna", "gpt-rosalind-research"] {
+            assert!(
+                pricing
+                    .estimate(Some(slug), &info(json!({ "input_tokens": 1_000_000 })))
+                    .is_some(),
+                "{slug} has no price"
+            );
+        }
     }
 
     #[test]

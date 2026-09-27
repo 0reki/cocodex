@@ -149,7 +149,7 @@ Codex 客户端之后每轮都会带上它：HTTP 放在请求头，WebSocket �
 ## 计费与结算
 
 费用按内置价格（美元 / 百万 Token，可用 `OPENAI_MODEL_PRICING_JSON` 按 slug 覆盖）
-计算，`service_tier: "priority"` 对 GPT-6 Astra、GPT-5.6 系列、GPT-5.5 按 2.5 倍、
+计算，`service_tier: "priority"` 对 GPT-6 系列、GPT-5.6 系列、GPT-5.5 按 2.5 倍、
 GPT-5.4 按 2 倍计费。只有 Responses 的标准 Token 计费并计入上游额度；Responses 中
 图片工具的用量（`image_generation`）只记录不计费，Images、Search 与其他请求只记日志，
 不扣费也不计入额度。
@@ -157,11 +157,14 @@ GPT-5.4 按 2 倍计费。只有 Responses 的标准 Token 计费并计入上游
 | 计费项 | Input | Cached input | Output |
 | --- | ---: | ---: | ---: |
 | GPT-6 Astra | $10 | $1 | $50 |
+| GPT-6 Sol | $2 | $0.2 | $10 |
+| GPT-6 Luna | $0.1 | $0.01 | $0.5 |
 | GPT-5.6 Sol | $4 | $0.4 | $20 |
 | Daybreak Blue | $4 | $0.4 | $20 |
 | Daybreak Red | $12.5 | $1.25 | $75 |
 | GPT-5.6 Terra | $2 | $0.2 | $12 |
 | GPT-5.6 Luna | $0.2 | $0.02 | $1.2 |
+| GPT-Rosalind-Research | $5 | $0.5 | $25 |
 | GPT-5.5 | $5 | $0.5 | $30 |
 | GPT-5.4 | $2.5 | $0.25 | $15 |
 | GPT-5.4 mini | $0.75 | $0.075 | $4.52 |
