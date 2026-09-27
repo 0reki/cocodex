@@ -175,10 +175,23 @@ export type UserQuotaPool = {
   }>;
 };
 
+// The user's standing on one counted ChatGPT feature over its rolling
+// window. `limit`/`remaining` are null when the user's profile sets no cap.
+export type FeatureUsage = {
+  feature: "deep_research" | "image_gen" | "pro_message";
+  limit: number | null;
+  used: number;
+  remaining: number | null;
+  windowSeconds: number;
+  // Unix seconds at which the oldest use in the window frees up.
+  resetAt: number | null;
+};
+
 export type MyUsageResponse = {
   ok: true;
   capturedAt: string;
   limitPercent: number;
+  features?: FeatureUsage[];
   users: PortalUser[];
   pools: {
     standard: UserQuotaPool;

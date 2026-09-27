@@ -1,10 +1,18 @@
-import { Gauge, PackagePlus, type LucideIcon } from "lucide-react";
+import {
+  Gauge,
+  ImageIcon,
+  PackagePlus,
+  Sparkles,
+  Telescope,
+  type LucideIcon,
+} from "lucide-react";
 import { useCallback } from "react";
 
 import { ErrorState, LoadingState, PageHeader, Tooltip } from "@/components/ui";
 import { useResource } from "@/hooks/use-resource";
 import { useAuth } from "@/lib/auth";
 import type {
+  FeatureUsage,
   MyUsageResponse,
   PortalUser,
   QuotaWindow,
@@ -132,6 +140,66 @@ function QuotaRow({
   );
 }
 
+const FEATURES: Record<
+  FeatureUsage["feature"],
+  { title: string; window: string; icon: LucideIcon }
+> = {
+  deep_research: { title: "Deep Research", window: "30 天", icon: Telescope },
+  image_gen: { title: "图片生成", window: "24 小时", icon: ImageIcon },
+  pro_message: { title: "Pro 模型消息", window: "7 天", icon: Sparkles },
+};
+
+function formatUnixTime(seconds: number) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(seconds * 1000));
+}
+
+// One counted feature, measured against the user's own cap.
+function FeatureRow({ usage }: { usage: FeatureUsage }) {
+  const meta = FEATURES[usage.feature];
+  const Icon = meta.icon;
+  const percent =
+    usage.limit === null
+      ? 0
+      : usage.limit === 0
+        ? 100
+        : Math.min(100, (usage.used / usage.limit) * 100);
+  const exhausted = usage.remaining === 0;
+
+  return (
+    <section className="grid gap-4 py-5 first:pt-0 last:pb-0">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Icon className="size-4 text-muted-foreground" />
+          <h2 className="font-semibold">{meta.title}</h2>
+        </div>
+        <div className="text-sm text-muted-foreground">
+          {usage.limit === null
+            ? `不限 · 近 ${meta.window}已用 ${usage.used} 次`
+            : `近 ${meta.window}已用 ${usage.used} / ${usage.limit} 次 · 剩余 ${usage.remaining ?? 0} 次`}
+          {usage.resetAt !== null && exhausted
+            ? ` · ${formatUnixTime(usage.resetAt)} 恢复 1 次`
+            : null}
+        </div>
+      </div>
+      {usage.limit === null ? null : (
+        <div className="relative h-3 overflow-hidden rounded-full bg-muted">
+          <span
+            className={`absolute inset-y-0 left-0 rounded-full transition-[width] ${
+              exhausted ? "bg-destructive" : "bg-primary"
+            }`}
+            style={{ width: `${percent}%` }}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function MyUsagePage() {
   const { api } = useAuth();
   const load = useCallback(
@@ -169,6 +237,9 @@ export function MyUsagePage() {
                 icon={PackagePlus}
               />
             ) : null}
+            {(data.features ?? []).map((usage) => (
+              <FeatureRow key={usage.feature} usage={usage} />
+            ))}
           </div>
         </>
       ) : null}
