@@ -56,7 +56,10 @@ export function CodexDevicePage() {
       >
         <p className="text-center text-sm text-muted-foreground">
           将以账号
-          <span className="font-medium text-foreground"> {user?.username} </span>
+          <span className="font-medium text-foreground">
+            {" "}
+            {user?.username}{" "}
+          </span>
           授权本机 Codex 客户端。请确认下方设备码与客户端显示的一致。
         </p>
         {error ? <InlineNotice tone="error">{error}</InlineNotice> : null}

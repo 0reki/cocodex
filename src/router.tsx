@@ -174,6 +174,13 @@ export const router = createBrowserRouter([
                       return { Component: module.UsersPage };
                     },
                   },
+                  {
+                    path: "/quota-profiles",
+                    lazy: async () => {
+                      const module = await import("@/pages/quota-profiles");
+                      return { Component: module.QuotaProfilesPage };
+                    },
+                  },
                 ],
               },
               {

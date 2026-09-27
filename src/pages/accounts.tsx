@@ -1,11 +1,6 @@
 import { Spinner } from "@/ui/components/spinner";
 import { ArrowUpRight, EllipsisVertical } from "lucide-react";
-import {
-  useCallback,
-  useEffect,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import {
   EmptyState,
@@ -84,15 +79,12 @@ type TestResult = {
 
 const LOGIN_PLATFORMS: { value: UpstreamPlatform; label: string }[] = [
   { value: "windows", label: "Windows" },
-  { value: "linux", label: "Linux" },
-  { value: "darwin", label: "macOS" },
+  { value: "linux", label: "Linux（同时服务 macOS 客户端）" },
 ];
 
 function platformLabel(platform: UpstreamPlatform): string {
   return (
-    { windows: "Windows", linux: "Linux", darwin: "macOS", all: "通用" }[
-      platform
-    ] ?? platform
+    { windows: "Windows", linux: "Linux", all: "通用" }[platform] ?? platform
   );
 }
 
@@ -166,8 +158,8 @@ function AccountOAuthLogin({
       <div className="grid gap-4">
         {error ? <InlineNotice tone="error">{error}</InlineNotice> : null}
         <p className="text-sm text-muted-foreground">
-          已在新标签页打开 OpenAI 授权页（平台：{platformLabel(platform)}）。登录后浏览器会跳转到
-          {" "}
+          已在新标签页打开 OpenAI 授权页（平台：{platformLabel(platform)}
+          ）。登录后浏览器会跳转到{" "}
           <code className="rounded bg-muted px-1 py-0.5 text-xs">
             {flow.redirectUri}
           </code>{" "}
@@ -215,7 +207,8 @@ function AccountOAuthLogin({
     <div className="grid gap-4">
       {error ? <InlineNotice tone="error">{error}</InlineNotice> : null}
       <p className="text-sm text-muted-foreground">
-        走与 Codex 一致的浏览器 OAuth 登录添加账号。请先选择该账号服务的系统平台。
+        走与 Codex 一致的浏览器 OAuth
+        登录添加账号。请先选择该账号服务的系统平台。
       </p>
       <label className="grid gap-1.5 text-sm">
         <span className="text-muted-foreground">平台</span>

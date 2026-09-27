@@ -181,6 +181,17 @@ function formatTps(value: number | null) {
   return value === null ? "—" : `${value.toFixed(1)} tok/s`;
 }
 
+// Which client a logged request came from: a ChatGPT turn from the desktop
+// app (`/f/conversation`), or Codex (Responses and its image and search
+// tools).
+function sourceLabel(path: string) {
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed.endsWith("/f/conversation") ||
+    trimmed === "/backend-api/conversation"
+    ? "ChatGPT"
+    : "Codex";
+}
+
 function formatTurnStateLen(value: number | null) {
   return value === null ? "—" : value.toLocaleString();
 }
@@ -237,7 +248,7 @@ function LogDetails({ log }: { log: RequestLog }) {
       <DetailField label="请求时间">
         {formatRequestTime(log.requestTime)}
       </DetailField>
-      <DetailField label="路径">{log.path}</DetailField>
+      <DetailField label="路径">{sourceLabel(log.path)}</DetailField>
       <DetailField label="模型">
         <ModelLabel log={log} />
       </DetailField>
@@ -434,7 +445,7 @@ export function LogsPage() {
                           {formatRequestTime(log.requestTime)}
                         </TableCell>
                         <TableCell className="max-w-56 px-3 py-2 text-xs">
-                          {log.path}
+                          {sourceLabel(log.path)}
                         </TableCell>
                         <TableCell className="px-3 py-2 text-xs">
                           <ModelLabel log={log} />

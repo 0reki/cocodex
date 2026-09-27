@@ -1,12 +1,7 @@
 import { Gauge, PackagePlus, type LucideIcon } from "lucide-react";
 import { useCallback } from "react";
 
-import {
-  ErrorState,
-  LoadingState,
-  PageHeader,
-  Tooltip,
-} from "@/components/ui";
+import { ErrorState, LoadingState, PageHeader, Tooltip } from "@/components/ui";
 import { useResource } from "@/hooks/use-resource";
 import { useAuth } from "@/lib/auth";
 import type {
@@ -127,7 +122,6 @@ function QuotaRow({
               <span>100%</span>
             </div>
           </div>
-
         </>
       ) : (
         <div className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
@@ -141,8 +135,7 @@ function QuotaRow({
 export function MyUsagePage() {
   const { api } = useAuth();
   const load = useCallback(
-    (signal: AbortSignal) =>
-      api<MyUsageResponse>("/api/my-usage", { signal }),
+    (signal: AbortSignal) => api<MyUsageResponse>("/api/my-usage", { signal }),
     [api],
   );
   const { data, error, loading, reload } = useResource(load);
@@ -158,7 +151,9 @@ export function MyUsagePage() {
 
       {data ? (
         <>
-          {error ? <ErrorState message={error} retry={() => void reload()} /> : null}
+          {error ? (
+            <ErrorState message={error} retry={() => void reload()} />
+          ) : null}
           <div className="divide-y rounded-xl border bg-background p-5">
             <QuotaRow
               title="标准"

@@ -8,8 +8,40 @@ export type PortalUser = {
   balance?: number;
   accountId?: string | null;
   sourceAccountId?: string | null;
+  // Admin user list only: the quota the user's profile and overrides give.
+  quota?: UserQuota | null;
   createdAt?: string;
   updatedAt?: string;
+};
+
+// What a user may consume. A null feature limit means the gateway sets none
+// of its own; the upstream account's pool still applies.
+export type QuotaLimits = {
+  weeklySharePercent: number;
+  deepResearchLimit: number | null;
+  imageGenLimit: number | null;
+  // Messages to Pro models (gpt-*-pro) per rolling week.
+  proMessageLimit: number | null;
+};
+
+export type QuotaProfile = QuotaLimits & {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  userCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type QuotaProfilesResponse = { items: QuotaProfile[] };
+
+// A key present in `overrides` replaces the profile's value (a null limit
+// overrides to none).
+export type UserQuota = {
+  profileId: string | null;
+  profileName: string | null;
+  overrides: Partial<QuotaLimits>;
+  effective: QuotaLimits;
 };
 
 export type TokenEnvelope = {
@@ -23,7 +55,9 @@ export type AuthResponse = {
   accessToken: TokenEnvelope;
 };
 
-export type UpstreamPlatform = "windows" | "linux" | "darwin" | "all";
+// macOS clients are served by the Linux login, so a login is only ever
+// Windows or Linux ("all" is a generic login that serves both).
+export type UpstreamPlatform = "windows" | "linux" | "all";
 
 export type OpenAIAccount = {
   id: string;

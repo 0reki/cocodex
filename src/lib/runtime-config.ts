@@ -8,8 +8,7 @@ function parseEndpoint(value: unknown): OpenAIApiEndpoint | null {
   if (!value || typeof value !== "object") return null;
   const endpoint = value as Record<string, unknown>;
   const id = typeof endpoint.id === "string" ? endpoint.id.trim() : "";
-  const label =
-    typeof endpoint.label === "string" ? endpoint.label.trim() : "";
+  const label = typeof endpoint.label === "string" ? endpoint.label.trim() : "";
   const rawBaseUrl =
     typeof endpoint.baseUrl === "string" ? endpoint.baseUrl.trim() : "";
   if (!id || !label || !rawBaseUrl) return null;
