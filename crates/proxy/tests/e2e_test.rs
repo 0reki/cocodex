@@ -543,6 +543,18 @@ async fn console_and_codex_client_end_to_end() {
         usage["pools"]["standard"]["allocation"]["allocatedPercent"],
         90.0
     );
+    // Counted ChatGPT features: the default profile caps none of them.
+    assert_eq!(
+        usage["features"],
+        json!([
+            { "feature": "deep_research", "limit": null, "used": 0, "remaining": null,
+              "windowSeconds": 30 * 86_400, "resetAt": null },
+            { "feature": "image_gen", "limit": null, "used": 0, "remaining": null,
+              "windowSeconds": 86_400, "resetAt": null },
+            { "feature": "pro_message", "limit": null, "used": 0, "remaining": null,
+              "windowSeconds": 7 * 86_400, "resetAt": null },
+        ])
+    );
     let response = client
         .http
         .post(format!("{}/backend-api/codex/responses", client.base))

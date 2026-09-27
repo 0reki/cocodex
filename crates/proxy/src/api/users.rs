@@ -121,9 +121,14 @@ async fn my_usage(Db(ready): Db, principal: Principal) -> Response {
         Ok(None) => return unassigned(),
         Err(error) => return no_store(internal(error)),
     };
-    let limit_percent = match db::users::find_by_id(&ready.db, &principal.id).await {
-        Ok(Some(user)) => user.weekly_share_percent,
+    let user = match db::users::find_by_id(&ready.db, &principal.id).await {
+        Ok(Some(user)) => user,
         Ok(None) => return no_store(fail(StatusCode::NOT_FOUND, "user not found")),
+        Err(error) => return no_store(internal(error)),
+    };
+    let limit_percent = user.weekly_share_percent;
+    let features = match feature_usage(&ready, &user).await {
+        Ok(features) => features,
         Err(error) => return no_store(internal(error)),
     };
     let summary = match ready
@@ -153,6 +158,7 @@ async fn my_usage(Db(ready): Db, principal: Principal) -> Response {
     if let (Value::Object(target), Value::Object(fields)) = (&mut body, summary) {
         target.extend(fields);
     }
+    body["features"] = features;
     body["users"] = users
         .iter()
         .filter(|user| {
@@ -163,6 +169,38 @@ async fn my_usage(Db(ready): Db, principal: Principal) -> Response {
         .map(|user| public_user(user, None))
         .collect();
     no_store(Json(body).into_response())
+}
+
+/// The user's standing on each counted ChatGPT feature over its rolling
+/// window: `limit` and `remaining` are null when their profile sets no cap,
+/// `resetAt` (unix seconds) is when the oldest use in the window frees up.
+async fn feature_usage(
+    ready: &Ready,
+    user: &crate::db::users::PortalUser,
+) -> Result<Value, sqlx::Error> {
+    use crate::features::Feature;
+
+    let now = chrono::Utc::now();
+    let mut items = Vec::new();
+    for feature in Feature::ALL {
+        let (used, oldest) = db::feature_usage::usage_since(
+            &ready.db,
+            &user.id,
+            feature.name(),
+            now - feature.window(),
+        )
+        .await?;
+        let limit = feature.limit(user);
+        items.push(json!({
+            "feature": feature.name(),
+            "limit": limit,
+            "used": used,
+            "remaining": limit.map(|limit| (limit - used).max(0)),
+            "windowSeconds": feature.window().num_seconds(),
+            "resetAt": oldest.map(|oldest| (oldest + feature.window()).timestamp()),
+        }));
+    }
+    Ok(Value::Array(items))
 }
 
 fn invitation_ttl() -> chrono::Duration {
