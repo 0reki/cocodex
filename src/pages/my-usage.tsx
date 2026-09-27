@@ -1,8 +1,8 @@
 import {
   Gauge,
+  Gem,
   ImageIcon,
   PackagePlus,
-  Sparkles,
   Telescope,
   type LucideIcon,
 } from "lucide-react";
@@ -146,7 +146,7 @@ const FEATURES: Record<
 > = {
   deep_research: { title: "Deep Research", window: "30 天", icon: Telescope },
   image_gen: { title: "图片生成", window: "24 小时", icon: ImageIcon },
-  pro_message: { title: "Pro 模型消息", window: "7 天", icon: Sparkles },
+  pro_message: { title: "Pro 模型消息", window: "7 天", icon: Gem },
 };
 
 function formatUnixTime(seconds: number) {
@@ -158,8 +158,17 @@ function formatUnixTime(seconds: number) {
   }).format(new Date(seconds * 1000));
 }
 
-// One counted feature, measured against the user's own cap.
-function FeatureRow({ usage }: { usage: FeatureUsage }) {
+// One counted feature, measured against the user's own cap, drawn like the
+// weekly pools: the bar is the cap, filled in the user's color.
+function FeatureRow({
+  usage,
+  user,
+  color,
+}: {
+  usage: FeatureUsage;
+  user: PortalUser | null;
+  color: string;
+}) {
   const meta = FEATURES[usage.feature];
   const Icon = meta.icon;
   const percent =
@@ -168,7 +177,7 @@ function FeatureRow({ usage }: { usage: FeatureUsage }) {
       : usage.limit === 0
         ? 100
         : Math.min(100, (usage.used / usage.limit) * 100);
-  const exhausted = usage.remaining === 0;
+  const label = `${user?.username ?? "我"}: ${usage.used} / ${usage.limit ?? "不限"} 次`;
 
   return (
     <section className="grid gap-4 py-5 first:pt-0 last:pb-0">
@@ -177,23 +186,60 @@ function FeatureRow({ usage }: { usage: FeatureUsage }) {
           <Icon className="size-4 text-muted-foreground" />
           <h2 className="font-semibold">{meta.title}</h2>
         </div>
-        <div className="text-sm text-muted-foreground">
-          {usage.limit === null
-            ? `不限 · 近 ${meta.window}已用 ${usage.used} 次`
-            : `近 ${meta.window}已用 ${usage.used} / ${usage.limit} 次 · 剩余 ${usage.remaining ?? 0} 次`}
-          {usage.resetAt !== null && exhausted
-            ? ` · ${formatUnixTime(usage.resetAt)} 恢复 1 次`
-            : null}
-        </div>
+        {usage.limit === null ? null : (
+          <div className="text-sm text-muted-foreground">
+            近 {meta.window}已用 {usage.used} / {usage.limit} 次
+            {usage.resetAt !== null && usage.remaining === 0
+              ? ` · 将于 ${formatUnixTime(usage.resetAt)} 恢复 1 次`
+              : ` · 剩余 ${usage.remaining ?? 0} 次`}
+          </div>
+        )}
       </div>
-      {usage.limit === null ? null : (
-        <div className="relative h-3 overflow-hidden rounded-full bg-muted">
-          <span
-            className={`absolute inset-y-0 left-0 rounded-full transition-[width] ${
-              exhausted ? "bg-destructive" : "bg-primary"
-            }`}
-            style={{ width: `${percent}%` }}
-          />
+
+      {usage.limit === null ? (
+        <div className="rounded-lg border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">
+          不限额度 · 近 {meta.window}已用 {usage.used} 次
+        </div>
+      ) : (
+        <div>
+          <div className="relative flex h-10 rounded-lg bg-muted">
+            {[25, 50, 75].map((position) => (
+              <span
+                key={position}
+                className="pointer-events-none absolute inset-y-0 z-10 border-l border-background/80"
+                style={{ left: `${position}%` }}
+              />
+            ))}
+            {percent > 0 ? (
+              <span
+                className={`h-full min-w-0 rounded-l-lg transition-[width] ${
+                  percent >= 100 ? "rounded-r-lg" : ""
+                }`}
+                style={{ backgroundColor: color, width: `${percent}%` }}
+              >
+                <Tooltip
+                  content={label}
+                  side="top"
+                  className="h-full w-full min-w-0"
+                >
+                  <button
+                    type="button"
+                    className="flex h-full w-full min-w-0 items-center justify-center overflow-hidden text-xs font-medium text-white"
+                    aria-label={label}
+                  >
+                    {percent >= 6 ? formatPercent(percent) : null}
+                  </button>
+                </Tooltip>
+              </span>
+            ) : null}
+          </div>
+          <div className="mt-1 flex justify-between text-[11px] text-muted-foreground">
+            <span>0%</span>
+            <span>25%</span>
+            <span>50%</span>
+            <span>75%</span>
+            <span>100%</span>
+          </div>
         </div>
       )}
     </section>
@@ -201,7 +247,7 @@ function FeatureRow({ usage }: { usage: FeatureUsage }) {
 }
 
 export function MyUsagePage() {
-  const { api } = useAuth();
+  const { api, user } = useAuth();
   const load = useCallback(
     (signal: AbortSignal) => api<MyUsageResponse>("/api/my-usage", { signal }),
     [api],
@@ -238,7 +284,19 @@ export function MyUsagePage() {
               />
             ) : null}
             {(data.features ?? []).map((usage) => (
-              <FeatureRow key={usage.feature} usage={usage} />
+              <FeatureRow
+                key={usage.feature}
+                usage={usage}
+                user={user}
+                color={
+                  userColors[
+                    Math.max(
+                      0,
+                      data.users.findIndex((member) => member.id === user?.id),
+                    ) % userColors.length
+                  ] ?? "#2563eb"
+                }
+              />
             ))}
           </div>
         </>
