@@ -17,11 +17,25 @@ use tokio::net::TcpListener;
 use tower::ServiceExt;
 
 const WINDOWS_UA: &str = "codex_cli_rs/0.154.0 (Windows 10.0.22631; x86_64) WindowsTerminal";
+/// The desktop app's webview, which calls ChatGPT's own endpoints.
+const WEBVIEW_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                          (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
 
 #[derive(Clone, Default)]
 struct Captured {
     responses: Arc<Mutex<Vec<(HeaderMap, Value)>>>,
     models_queries: Arc<Mutex<Vec<String>>>,
+    /// (User-Agent, path and query) of the webview's ChatGPT requests.
+    webview: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+fn record_webview(state: &Captured, headers: &HeaderMap, uri: &axum::http::Uri) {
+    let agent = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    state.webview.lock().unwrap().push((agent, uri.to_string()));
 }
 
 async fn mock_upstream() -> (String, Captured) {
@@ -77,6 +91,81 @@ async fn mock_upstream() -> (String, Captured) {
                         .unwrap()
                         .push(uri.query().unwrap_or_default().to_string());
                     "ok"
+                },
+            ),
+        )
+        .route(
+            "/backend-api/me",
+            // Shape of chatgpt.com's reply, with the login's person in it.
+            axum::routing::get(
+                |State(state): State<Captured>, headers: HeaderMap, uri: axum::http::Uri| async move {
+                    record_webview(&state, &headers, &uri);
+                    axum::Json(json!({
+                        "object": "user",
+                        "id": "user-UPSTREAM",
+                        "email": "win@x",
+                        "name": "kk",
+                        "picture": "https://cdn.auth0.com/avatars/kk.png",
+                        "phone_number": "+48576391110",
+                        "created": 1787633488,
+                        "amr": ["urn:openai:amr:apple"],
+                        "country": "SG",
+                        "orgs": { "object": "list", "data": [{
+                            "object": "organization",
+                            "id": "org-UPSTREAM",
+                            "created": 1787633487,
+                            "title": "Personal",
+                            "name": "user-upstream",
+                            "description": "Personal org for win@x",
+                            "personal": true
+                        }]},
+                        "first_name": null
+                    }))
+                },
+            ),
+        )
+        .route(
+            "/backend-api/wham/profiles/me",
+            axum::routing::get(
+                |State(state): State<Captured>, headers: HeaderMap, uri: axum::http::Uri| async move {
+                    record_webview(&state, &headers, &uri);
+                    // chatgpt.com pretty-prints this one.
+                    serde_json::to_string_pretty(&json!({
+                        "profile": {
+                            "username": "win",
+                            "display_name": "kk",
+                            "profile_picture_url": "https://cdn.auth0.com/avatars/kk.png"
+                        },
+                        "stats": { "lifetime_tokens": 12341904269_i64, "total_threads": 1694 }
+                    }))
+                    .unwrap()
+                },
+            ),
+        )
+        .route(
+            "/backend-api/accounts/check/v4-2023-04-27",
+            axum::routing::get(
+                |State(state): State<Captured>, headers: HeaderMap, uri: axum::http::Uri| async move {
+                    record_webview(&state, &headers, &uri);
+                    axum::Json(json!({ "accounts": { "acct-1": {
+                        "account": {
+                            "account_id": "acct-1",
+                            "account_owner_id": "user-UPSTREAM",
+                            "created_time": "2026-08-25T04:51:29.428628Z",
+                            "pthdnu": "9a077e77608a3aa6c8769b5279a6fbf84441946232772b2485075f5b72bcb97f",
+                            "plan_type": "plus"
+                        },
+                        "features": ["wham"]
+                    }}}))
+                },
+            ),
+        )
+        .route(
+            "/backend-api/subscriptions",
+            axum::routing::get(
+                |State(state): State<Captured>, headers: HeaderMap, uri: axum::http::Uri| async move {
+                    record_webview(&state, &headers, &uri);
+                    axum::Json(json!({ "account_id": "acct-1", "plan_type": "plus" }))
                 },
             ),
         )
@@ -316,4 +405,171 @@ async fn environment_context_timezone_is_replaced_end_to_end() {
     assert!(!text.contains("2020-01-01"), "{text}");
     // The user's own path is left intact.
     assert!(text.contains("<cwd>/home/alice/repo</cwd>"), "{text}");
+}
+
+async fn webview_get(app: &Router, bearer: &str, uri: &str) -> Value {
+    let request = Request::builder()
+        .uri(uri)
+        .method("GET")
+        .header("authorization", bearer)
+        .header("user-agent", WEBVIEW_UA)
+        .header("cf-ipcountry", "JP")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    for upstream in [
+        "UPSTREAM",
+        "upstream",
+        "acct-1",
+        "win@x",
+        "kk",
+        "+48",
+        "1787633",
+        "apple",
+        "SG",
+        "2026-08-25",
+        "9a077e",
+        "12341904269",
+        "1694",
+    ] {
+        assert!(!text.contains(upstream), "{upstream} leaked: {text}");
+    }
+    serde_json::from_str(&text).unwrap()
+}
+
+#[tokio::test]
+async fn webview_chatgpt_requests_are_presented_as_the_login_and_answered_as_the_client() {
+    common::pin_codex_version();
+    let db = common::test_db().await;
+    let (origin, captured) = mock_upstream().await;
+    db.insert_account("win@x", "acct-1", "windows", "win-token")
+        .await;
+    db.set_upstream_user_id("acct-1", "user-UPSTREAM").await;
+    let user = db.create_user("user-1").await;
+    db.assign(&user, "acct-1").await;
+    let bearer = db.client_bearer(&user).await;
+    // The client's own usage: two hours on one day.
+    sqlx::query(
+        "INSERT INTO model_response_log_owner_hourly_rollups \
+           (hour_bucket, owner_user_id, model_id, request_count, total_tokens) \
+         VALUES ('2026-09-01T03:00:00Z', $1::uuid, 'gpt-5.4', 1, 400), \
+                ('2026-09-01T05:00:00Z', $1::uuid, 'gpt-5.4', 1, 200)",
+    )
+    .bind(&user)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let created: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT created_at FROM portal_users WHERE id = $1::uuid")
+            .bind(&user)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let app = create_router(common::config(db.settings(), &origin), None);
+    let token = bearer.trim_start_matches("Bearer ");
+    let claims = cocodex_proxy::auth::jwt::ClientJwt::from_secret(common::TEST_SECRET)
+        .verify_access_token(token)
+        .unwrap();
+    let auth = &claims.openai_auth;
+    let profile = claims.openai_profile.as_ref().unwrap();
+    let initials: String = profile
+        .name
+        .chars()
+        .take(2)
+        .collect::<String>()
+        .to_lowercase();
+    let picture = format!("https://cdn.auth0.com/avatars/{initials}.png");
+
+    let me = webview_get(&app, &bearer, "/backend-api/me").await;
+    assert_eq!(me["id"], auth.chatgpt_user_id.as_str());
+    assert_eq!(me["email"], "user@openai.com");
+    assert_eq!(me["name"], profile.name.as_str());
+    assert_eq!(me["picture"], picture.as_str());
+    assert_eq!(me["phone_number"], Value::Null);
+    let org = &me["orgs"]["data"][0];
+    assert_eq!(org["id"], auth.poid.as_deref().unwrap());
+    assert_eq!(org["name"], auth.chatgpt_user_id.to_lowercase().as_str());
+    assert_eq!(org["description"], "Personal org for user@openai.com");
+    assert_eq!(me["created"], created.timestamp());
+    assert_eq!(org["created"], created.timestamp() - 1);
+    assert_eq!(me["amr"], json!(auth.amr));
+    assert_eq!(me["country"], "JP");
+
+    let check = webview_get(&app, &bearer, "/backend-api/accounts/check/v4-2023-04-27").await;
+    let account = &check["accounts"][auth.chatgpt_account_id.as_str()]["account"];
+    assert_eq!(account["account_id"], auth.chatgpt_account_id.as_str());
+    assert_eq!(account["plan_type"], "plus");
+    assert_eq!(account["pthdnu"].as_str().unwrap().len(), 64);
+    let account_created =
+        chrono::DateTime::parse_from_rfc3339(account["created_time"].as_str().unwrap()).unwrap();
+    assert_eq!(account_created, created);
+
+    let wham = webview_get(&app, &bearer, "/backend-api/wham/profiles/me").await;
+    assert_eq!(wham["profile"]["username"], "user");
+    assert_eq!(wham["profile"]["display_name"], profile.name.as_str());
+    assert_eq!(wham["profile"]["profile_picture_url"], picture.as_str());
+    assert_eq!(wham["stats"]["lifetime_tokens"], 600);
+    assert_eq!(wham["stats"]["total_threads"], 0);
+    assert_eq!(
+        wham["stats"]["daily_usage_buckets"],
+        json!([{ "start_date": "2026-09-01", "tokens": 600 }])
+    );
+
+    // The webview asks about the account its own token names.
+    let uri = format!(
+        "/backend-api/subscriptions?account_id={}",
+        auth.chatgpt_account_id
+    );
+    let subscription = webview_get(&app, &bearer, &uri).await;
+    assert_eq!(subscription["account_id"], auth.chatgpt_account_id.as_str());
+
+    let seen = captured.webview.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+    // A browser agent goes upstream as is: a mangled one is banned by
+    // Cloudflare (403 "error code: 1010").
+    assert!(
+        seen.iter().all(|(agent, _)| agent == WEBVIEW_UA),
+        "{seen:?}"
+    );
+    assert_eq!(seen[3].1, "/backend-api/subscriptions?account_id=acct-1");
+}
+
+#[tokio::test]
+async fn payments_are_never_relayed() {
+    let (app, captured, bearer) = setup().await;
+    for (method, uri) in [
+        (
+            "GET",
+            "/backend-api/payments/payment_methods?account_id=acct-1",
+        ),
+        ("POST", "/backend-api/payments/payment_methods"),
+        ("GET", "/backend-api/payments/checkout"),
+        ("GET", "/backend-api/subscriptions/auto_top_up/settings"),
+        ("POST", "/backend-api/subscriptions/auto_top_up/enable"),
+    ] {
+        let request = Request::builder()
+            .uri(uri)
+            .method(method)
+            .header("authorization", &bearer)
+            .header("user-agent", WEBVIEW_UA)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+    }
+    assert!(captured.webview.lock().unwrap().is_empty());
+    // Only those: the subscription itself is still relayed.
+    let request = Request::builder()
+        .uri("/backend-api/subscriptions?account_id=acct-1")
+        .header("authorization", &bearer)
+        .header("user-agent", WEBVIEW_UA)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }

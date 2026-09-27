@@ -149,7 +149,13 @@ impl BackendForwarder {
         let query = upstream_query(&ctx, req.uri().query())
             .map(|q| format!("?{q}"))
             .unwrap_or_default();
-        let upstream_url_str = format!("{}{}{query}", self.upstream_origin, ctx.target_path);
+        // The webview names the client's own account in paths and queries
+        // (`/subscriptions?account_id=…`); upstream knows only the login's.
+        let upstream_url_str = client_identity::to_upstream_identity(
+            &format!("{}{query}", ctx.target_path),
+            &ctx.identity_swap,
+        );
+        let upstream_url_str = format!("{}{upstream_url_str}", self.upstream_origin);
 
         let upstream_url = match Url::parse(&upstream_url_str) {
             Ok(u) => u,
@@ -281,7 +287,21 @@ impl BackendForwarder {
             (!rest.is_empty()).then(|| Ok(bytes::Bytes::from(rest)))
         })
         .filter_map(|item: Option<Result<bytes::Bytes, std::io::Error>>| async move { item });
-        let byte_stream = upstream_resp.bytes_stream().map(move |item| {
+        // A profile body describes the login's person and account in fields
+        // that cannot be swapped as bytes; it is small, so it is rewritten
+        // whole.
+        let endpoint = client_identity::ProfileEndpoint::of(&ctx.target_path);
+        let upstream_stream = match (&ctx.client_profile, endpoint) {
+            (Some(profile), Some(endpoint)) if status.is_success() && !compressed => {
+                let body = upstream_resp.bytes().await.map(|body| {
+                    client_identity::rewrite_profile_body(endpoint, &body, profile)
+                        .map_or(body, bytes::Bytes::from)
+                });
+                futures_util::stream::once(async move { body }).boxed()
+            }
+            _ => upstream_resp.bytes_stream().boxed(),
+        };
+        let byte_stream = upstream_stream.map(move |item| {
             let _keep_guard = &finish_guard_chunk;
             match item {
                 Ok(bytes) => {

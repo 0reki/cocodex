@@ -13,9 +13,10 @@
 use std::io;
 
 use bytes::Bytes;
+use chrono::{DateTime, NaiveDate, Utc};
 use http::HeaderMap;
 use http::header::{CONTENT_ENCODING, CONTENT_TYPE, USER_AGENT};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::interceptor::RequestContext;
 use crate::upstream::identity::{
@@ -596,6 +597,284 @@ impl serde_json::ser::Formatter for AsciiJsonFormatter {
     }
 }
 
+/// The client's own profile, shown in place of the upstream login's on the
+/// ChatGPT profile endpoints the desktop app's webview reads.
+#[derive(Debug, Clone, Default)]
+pub struct ClientProfile {
+    pub name: String,
+    pub email: String,
+    /// How the client signed in, from its gateway token.
+    pub amr: Vec<String>,
+    /// The client's country (Cloudflare's `CF-IPCountry` for its request).
+    pub country: Option<String>,
+    /// When the client's portal user was created (loaded for the endpoints
+    /// that report it).
+    pub created_at: Option<DateTime<Utc>>,
+    /// The client's account id, from which its stand-in `pthdnu` is derived.
+    pub account_id: String,
+    /// The client's own usage (loaded for `/wham/profiles/me`).
+    pub usage: Option<crate::db::logs::ProfileUsage>,
+}
+
+impl ClientProfile {
+    /// ChatGPT's default username is the email's local part.
+    fn username(&self) -> &str {
+        self.email.split('@').next().unwrap_or_default()
+    }
+
+    /// The Auth0 default avatar ChatGPT gives an account without a picture:
+    /// the name's first two letters.
+    fn picture(&self) -> String {
+        let initials: String = self
+            .name
+            .chars()
+            .chain(self.username().chars())
+            .filter(char::is_ascii_alphanumeric)
+            .take(2)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        format!("https://cdn.auth0.com/avatars/{initials}.png")
+    }
+
+    /// `pthdnu` is a keyed hash chatgpt.com derives from the account; the
+    /// gateway cannot reproduce the key, so each client gets a stable hash
+    /// of its own account in the same shape.
+    fn pthdnu(&self) -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(
+            format!("cocodex-pthdnu:{}", self.account_id).as_bytes(),
+        ))
+    }
+}
+
+/// The client's identity values in a request path or query become the
+/// upstream login's: the webview asks e.g. `/subscriptions?account_id=…`
+/// with the account id its gateway token carries. `pairs` is
+/// `RequestContext::identity_swap` (upstream value, client value).
+pub fn to_upstream_identity(text: &str, pairs: &[(String, String)]) -> String {
+    let mut pairs: Vec<&(String, String)> = pairs
+        .iter()
+        .filter(|(upstream, client)| !client.is_empty() && upstream != client)
+        .collect();
+    // At one position, the longest value wins.
+    pairs.sort_by_key(|(_, client)| std::cmp::Reverse(client.len()));
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'outer: while !rest.is_empty() {
+        for (upstream, client) in &pairs {
+            if let Some(after) = rest.strip_prefix(client.as_str()) {
+                out.push_str(upstream);
+                rest = after;
+                continue 'outer;
+            }
+        }
+        let next = rest.chars().next().map_or(1, char::len_utf8);
+        out.push_str(&rest[..next]);
+        rest = &rest[next..];
+    }
+    out
+}
+
+/// The ChatGPT endpoints whose body describes the upstream login's person
+/// or account beyond its ids: `IdentitySwap` handles ids and email, these
+/// are rewritten field by field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileEndpoint {
+    /// `/me`: name, picture, phone, sign-in methods, country, creation time.
+    Me,
+    /// `/profiles/me`: the public profile.
+    Profile,
+    /// `/wham/profiles/me`: the Codex profile page, with usage stats.
+    CodexProfile,
+    /// `/accounts/check/…`: account creation time and `pthdnu`.
+    AccountsCheck,
+}
+
+impl ProfileEndpoint {
+    pub fn of(path: &str) -> Option<Self> {
+        let path = path.trim_end_matches('/');
+        match path {
+            "/backend-api/me" => Some(Self::Me),
+            "/backend-api/profiles/me" => Some(Self::Profile),
+            "/backend-api/wham/profiles/me" => Some(Self::CodexProfile),
+            _ if path.starts_with("/backend-api/accounts/check/") => Some(Self::AccountsCheck),
+            _ => None,
+        }
+    }
+
+    /// Whether the rewrite needs the portal user's creation time.
+    pub fn needs_created_at(self) -> bool {
+        matches!(self, Self::Me | Self::AccountsCheck)
+    }
+}
+
+/// Replaces the upstream login's personal fields in a profile endpoint's
+/// JSON body with the client's. These hold short free-form values (a name
+/// like "kk"), timestamps and usage that cannot be swapped as raw bytes.
+/// `None` when the body is not the expected JSON object.
+pub fn rewrite_profile_body(
+    endpoint: ProfileEndpoint,
+    body: &[u8],
+    profile: &ClientProfile,
+) -> Option<Vec<u8>> {
+    let mut value: Value = serde_json::from_slice(body).ok()?;
+    let object = value.as_object_mut()?;
+    // Only fields upstream sent, and not null, are replaced.
+    fn set(object: &mut serde_json::Map<String, Value>, key: &str, new: Value) {
+        if let Some(slot) = object.get_mut(key)
+            && !slot.is_null()
+        {
+            *slot = new;
+        }
+    }
+    let created = profile.created_at;
+    match endpoint {
+        ProfileEndpoint::Me => {
+            set(object, "name", profile.name.as_str().into());
+            set(object, "picture", profile.picture().into());
+            set(object, "phone_number", Value::Null);
+            set(object, "first_name", Value::Null);
+            set(object, "amr", json!(profile.amr));
+            if object.contains_key("country") {
+                object.insert("country".into(), json!(profile.country));
+            }
+            if let Some(created) = created {
+                set(object, "created", created.timestamp().into());
+                if let Some(orgs) = object
+                    .get_mut("orgs")
+                    .and_then(|orgs| orgs.get_mut("data"))
+                    .and_then(Value::as_array_mut)
+                {
+                    // The personal org is made a moment before its user.
+                    for org in orgs.iter_mut().filter_map(Value::as_object_mut) {
+                        set(org, "created", (created.timestamp() - 1).into());
+                    }
+                }
+            }
+        }
+        ProfileEndpoint::Profile | ProfileEndpoint::CodexProfile => {
+            let key = if endpoint == ProfileEndpoint::Profile {
+                "profile_details"
+            } else {
+                "profile"
+            };
+            let details = object.get_mut(key)?.as_object_mut()?;
+            set(details, "username", profile.username().into());
+            set(details, "display_name", profile.name.as_str().into());
+            set(details, "profile_picture_url", profile.picture().into());
+            if endpoint == ProfileEndpoint::CodexProfile
+                && let Some(usage) = &profile.usage
+            {
+                let today = Utc::now().date_naive();
+                object.insert("stats".into(), profile_stats(usage, today));
+            }
+        }
+        ProfileEndpoint::AccountsCheck => {
+            let accounts = object.get_mut("accounts")?.as_object_mut()?;
+            for entry in accounts.values_mut() {
+                let Some(account) = entry.get_mut("account").and_then(Value::as_object_mut) else {
+                    continue;
+                };
+                set(account, "pthdnu", profile.pthdnu().into());
+                if let Some(created) = created {
+                    set(
+                        account,
+                        "created_time",
+                        created
+                            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+                            .into(),
+                    );
+                }
+            }
+        }
+    }
+    let pretty = body.windows(2).any(|pair| pair == b"\n ");
+    if pretty {
+        serde_json::to_vec_pretty(&value).ok()
+    } else {
+        serde_json::to_vec(&value).ok()
+    }
+}
+
+/// The Codex profile page's `stats`, from the client's own usage. The
+/// gateway records no threads, skills or reasoning effort, so those read as
+/// a fresh account's.
+pub fn profile_stats(usage: &crate::db::logs::ProfileUsage, today: NaiveDate) -> Value {
+    use chrono::Datelike;
+
+    let days = &usage.daily_tokens;
+    let lifetime: i64 = days.iter().map(|(_, tokens)| tokens).sum();
+    let peak = days.iter().map(|(_, tokens)| *tokens).max().unwrap_or(0);
+
+    // Consecutive days with usage; the current run may end today or, before
+    // today's first request, yesterday.
+    let mut longest = 0;
+    let mut run = 0;
+    let mut previous: Option<NaiveDate> = None;
+    for (day, _) in days {
+        run = match previous {
+            Some(previous) if previous.succ_opt() == Some(*day) => run + 1,
+            _ => 1,
+        };
+        longest = longest.max(run);
+        previous = Some(*day);
+    }
+    let current = match previous {
+        Some(last) if last == today || last.succ_opt() == Some(today) => run,
+        _ => 0,
+    };
+
+    let mut cumulative = 0;
+    let daily: Vec<Value> = days
+        .iter()
+        .map(|(day, tokens)| json!({ "start_date": day.to_string(), "tokens": tokens }))
+        .collect();
+    let cumulative_daily: Vec<Value> = days
+        .iter()
+        .map(|(day, tokens)| {
+            cumulative += tokens;
+            json!({ "start_date": day.to_string(), "tokens": cumulative })
+        })
+        .collect();
+    // Weeks start on Monday.
+    let mut weekly: Vec<(NaiveDate, i64)> = Vec::new();
+    for (day, tokens) in days {
+        let monday = *day - chrono::Duration::days(i64::from(day.weekday().num_days_from_monday()));
+        match weekly.last_mut() {
+            Some((week, sum)) if *week == monday => *sum += tokens,
+            _ => weekly.push((monday, *tokens)),
+        }
+    }
+    let weekly: Vec<Value> = weekly
+        .into_iter()
+        .map(|(week, tokens)| json!({ "start_date": week.to_string(), "tokens": tokens }))
+        .collect();
+    let fast = if usage.responses > 0 {
+        usage.priority_responses as f64 * 100.0 / usage.responses as f64
+    } else {
+        0.0
+    };
+    json!({
+        "lifetime_tokens": lifetime,
+        "peak_daily_tokens": peak,
+        "current_streak_days": current,
+        "longest_streak_days": longest,
+        "total_threads": 0,
+        "longest_running_turn_sec": usage.longest_latency_ms / 1000,
+        "fast_mode_usage_percentage": fast,
+        "total_skills_used": 0,
+        "unique_skills_used": 0,
+        "most_used_reasoning_effort": null,
+        "most_used_reasoning_effort_percentage": 0.0,
+        "daily_usage_buckets": daily,
+        "cumulative_daily_usage_buckets": cumulative_daily,
+        "weekly_usage_buckets": weekly,
+        "top_invocations": [],
+        "workspace_rank": null,
+        "workspace_total_user_count": null
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1034,6 +1313,51 @@ mod tests {
                 "chunk size {size}"
             );
         }
+    }
+
+    #[test]
+    fn profile_stats_are_the_clients_own_usage() {
+        let day = |d: &str| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap();
+        let usage = crate::db::logs::ProfileUsage {
+            daily_tokens: vec![
+                (day("2026-09-01"), 10), // Tuesday
+                (day("2026-09-02"), 20),
+                (day("2026-09-03"), 30),
+                (day("2026-09-08"), 5), // the next Tuesday
+                (day("2026-09-26"), 7),
+                (day("2026-09-27"), 3),
+            ],
+            longest_latency_ms: 61_999,
+            responses: 8,
+            priority_responses: 2,
+        };
+        let stats = profile_stats(&usage, day("2026-09-27"));
+        assert_eq!(stats["lifetime_tokens"], 75);
+        assert_eq!(stats["peak_daily_tokens"], 30);
+        assert_eq!(stats["longest_streak_days"], 3);
+        assert_eq!(stats["current_streak_days"], 2);
+        assert_eq!(stats["longest_running_turn_sec"], 61);
+        assert_eq!(stats["fast_mode_usage_percentage"], 25.0);
+        assert_eq!(
+            stats["weekly_usage_buckets"],
+            json!([
+                { "start_date": "2026-08-31", "tokens": 60 },
+                { "start_date": "2026-09-07", "tokens": 5 },
+                { "start_date": "2026-09-21", "tokens": 10 }
+            ])
+        );
+        assert_eq!(stats["cumulative_daily_usage_buckets"][5]["tokens"], 75);
+        assert_eq!(
+            stats["daily_usage_buckets"][3],
+            json!({ "start_date": "2026-09-08", "tokens": 5 })
+        );
+        // A streak that ended before yesterday is over.
+        let stats = profile_stats(&usage, day("2026-09-29"));
+        assert_eq!(stats["current_streak_days"], 0);
+        // No usage at all: a fresh account.
+        let empty = profile_stats(&Default::default(), day("2026-09-29"));
+        assert_eq!(empty["lifetime_tokens"], 0);
+        assert_eq!(empty["daily_usage_buckets"], json!([]));
     }
 
     #[test]

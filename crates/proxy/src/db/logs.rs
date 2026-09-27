@@ -2,7 +2,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -337,4 +337,56 @@ pub async fn request_rates(pool: &PgPool, owner: Option<&str>) -> Result<(f64, f
     .bind(owner)
     .fetch_one(pool)
     .await
+}
+
+/// A portal user's own usage, as the Codex profile page reports it.
+#[derive(Debug, Clone, Default)]
+pub struct ProfileUsage {
+    /// Tokens per UTC day with any usage, oldest first.
+    pub daily_tokens: Vec<(NaiveDate, i64)>,
+    /// The longest single response, in milliseconds.
+    pub longest_latency_ms: i64,
+    pub responses: i64,
+    /// Responses served on the priority ("fast") tier.
+    pub priority_responses: i64,
+}
+
+pub async fn profile_usage(pool: &PgPool, owner: &str) -> Result<ProfileUsage, sqlx::Error> {
+    let Ok(owner) = Uuid::parse_str(owner) else {
+        return Ok(ProfileUsage::default());
+    };
+    // The hourly rollups hold at most one row per hour and model, so a
+    // user's whole history is a few thousand rows at most.
+    let daily_tokens: Vec<(NaiveDate, i64)> = sqlx::query_as(
+        r#"
+        SELECT (hour_bucket AT TIME ZONE 'UTC')::date, SUM(total_tokens)::int8
+        FROM model_response_log_owner_hourly_rollups
+        WHERE owner_user_id = $1
+        GROUP BY 1
+        HAVING SUM(total_tokens) > 0
+        ORDER BY 1
+        "#,
+    )
+    .bind(owner)
+    .fetch_all(pool)
+    .await?;
+    let (longest_latency_ms, responses, priority_responses): (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+          COALESCE(MAX(latency_ms), 0)::int8,
+          COUNT(*)::int8,
+          COUNT(*) FILTER (WHERE lower(service_tier) = 'priority')::int8
+        FROM model_response_logs
+        WHERE owner_user_id = $1
+        "#,
+    )
+    .bind(owner)
+    .fetch_one(pool)
+    .await?;
+    Ok(ProfileUsage {
+        daily_tokens,
+        longest_latency_ms,
+        responses,
+        priority_responses,
+    })
 }

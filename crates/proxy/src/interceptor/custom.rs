@@ -4,6 +4,8 @@ use super::{Interceptor, RequestAction, RequestContext, WsAction};
 use crate::auth::jwt::JwtError;
 use crate::billing::pricing;
 use crate::billing::usd::Usd;
+use crate::client_identity::{ClientProfile, ProfileEndpoint};
+use crate::db::logs::ProfileUsage;
 use crate::db::settlements::Settlement;
 use crate::runtime::{NotReady, OwnerStatus, Ready, Runtime};
 use crate::turn_state::{StateKey, TurnStateStore};
@@ -14,7 +16,9 @@ use axum::http::StatusCode;
 use axum::http::header::{CONTENT_TYPE, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use http::Request;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, info, warn};
 
@@ -68,7 +72,13 @@ pub struct CustomInterceptor {
     runtime: Arc<Runtime>,
     egress_locale: Arc<crate::egress_locale::EgressLocaleResolver>,
     turn_state: Arc<TurnStateStore>,
+    /// Each user's usage for the Codex profile page, kept briefly: the page
+    /// is opened now and then, and its numbers need not be to the second.
+    profile_usage: std::sync::Mutex<HashMap<String, (Instant, ProfileUsage)>>,
 }
+
+/// How long a user's profile-page usage is reused.
+const PROFILE_USAGE_TTL: Duration = Duration::from_secs(300);
 
 impl CustomInterceptor {
     pub fn new(
@@ -79,7 +89,71 @@ impl CustomInterceptor {
             turn_state: Arc::clone(runtime.turn_state()),
             runtime,
             egress_locale,
+            profile_usage: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    async fn profile_usage(&self, ready: &Ready, owner: &str) -> ProfileUsage {
+        if let Ok(cache) = self.profile_usage.lock()
+            && let Some((at, usage)) = cache.get(owner)
+            && at.elapsed() < PROFILE_USAGE_TTL
+        {
+            return usage.clone();
+        }
+        let usage = match crate::db::logs::profile_usage(&ready.db, owner).await {
+            Ok(usage) => usage,
+            Err(error) => {
+                // Shown as a fresh account's rather than the login's own.
+                warn!(%error, owner, "profile usage lookup failed");
+                return ProfileUsage::default();
+            }
+        };
+        if let Ok(mut cache) = self.profile_usage.lock() {
+            cache.retain(|_, (at, _)| at.elapsed() < PROFILE_USAGE_TTL);
+            cache.insert(owner.to_string(), (Instant::now(), usage.clone()));
+        }
+        usage
+    }
+
+    /// The client's profile for the ChatGPT profile endpoints, with what
+    /// `endpoint` reports loaded from the database.
+    async fn client_profile(
+        &self,
+        ready: &Ready,
+        ctx: &RequestContext,
+        claims: &crate::auth::jwt::CodexJwtClaims,
+        endpoint: Option<ProfileEndpoint>,
+    ) -> ClientProfile {
+        let owner = &claims.openai_auth.chatgpt_account_id;
+        let profile = claims.openai_profile.as_ref();
+        let mut client = ClientProfile {
+            name: profile.map(|p| p.name.clone()).unwrap_or_default(),
+            email: profile.map(|p| p.email.clone()).unwrap_or_default(),
+            amr: claims.openai_auth.amr.clone(),
+            country: ctx
+                .client_headers
+                .get("cf-ipcountry")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                // `XX`: unknown, `T1`: Tor.
+                .filter(|code| code.len() == 2 && *code != "XX" && *code != "T1")
+                .map(str::to_ascii_uppercase),
+            account_id: owner.clone(),
+            ..ClientProfile::default()
+        };
+        let Some(endpoint) = endpoint else {
+            return client;
+        };
+        if endpoint.needs_created_at() {
+            match crate::db::users::get_record(&ready.db, owner).await {
+                Ok(record) => client.created_at = record.map(|record| record.created_at),
+                Err(error) => warn!(%error, owner, "portal user lookup for profile failed"),
+            }
+        }
+        if endpoint == ProfileEndpoint::CodexProfile {
+            client.usage = Some(self.profile_usage(ready, owner).await);
+        }
+        client
     }
 
     /// The turn state held for the login this request was routed to and the
@@ -245,6 +319,7 @@ impl CustomInterceptor {
             .as_ref()
             .map(|profile| profile.email.clone())
             .unwrap_or_default();
+        let client_org = claims.openai_auth.poid.clone().unwrap_or_default();
         ctx.metadata.insert(META_OWNER.into(), owner.clone());
         if let Ok(mut obs) = ctx.observation.lock() {
             obs.owner_user_id = Some(owner.clone());
@@ -333,11 +408,19 @@ impl CustomInterceptor {
         let (timezone, current_date) = self.egress_locale.snapshot();
         ctx.presented_timezone = Some(timezone);
         ctx.presented_current_date = Some(current_date);
-        let (upstream_user_id, token_email) = upstream_token_identity(&row);
+        let upstream = upstream_token_identity(&row);
+        let endpoint = ProfileEndpoint::of(&ctx.target_path);
+        ctx.client_profile = Some(self.client_profile(&ready, ctx, &claims, endpoint).await);
         ctx.identity_swap = vec![
-            (upstream_user_id, client_user_id),
+            // `/me` names the personal org after the lowercased user id.
+            (
+                upstream.user_id.to_ascii_lowercase(),
+                client_user_id.to_ascii_lowercase(),
+            ),
+            (upstream.user_id, client_user_id),
             (row.account_id.clone(), owner),
-            (token_email, client_email.clone()),
+            (upstream.org_id, client_org),
+            (upstream.email, client_email.clone()),
             (row.email.clone(), client_email),
         ];
         Ok(())
@@ -475,9 +558,15 @@ impl CustomInterceptor {
     }
 }
 
-/// The login's ChatGPT user id (`user-…`) and email as its ID token states
-/// them (the access token as a fallback).
-fn upstream_token_identity(row: &crate::db::accounts::Account) -> (String, String) {
+/// The login's ChatGPT user id (`user-…`), personal org id (`org-…`) and
+/// email as its ID token states them (the access token as a fallback).
+struct UpstreamIdentity {
+    user_id: String,
+    org_id: String,
+    email: String,
+}
+
+fn upstream_token_identity(row: &crate::db::accounts::Account) -> UpstreamIdentity {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -505,7 +594,26 @@ fn upstream_token_identity(row: &crate::db::accounts::Account) -> (String, Strin
             .as_str()
             .or_else(|| claims["https://api.openai.com/profile"]["email"].as_str())
     });
-    (user_id, email)
+    let org_id = first(&|claims| claims["https://api.openai.com/auth"]["poid"].as_str());
+    UpstreamIdentity {
+        user_id,
+        org_id,
+        email,
+    }
+}
+
+/// ChatGPT endpoints the gateway never relays: the upstream login's
+/// payments and automatic top-up.
+fn is_blocked_path(path: &str) -> bool {
+    const BLOCKED: [&str; 2] = [
+        "/backend-api/payments",
+        "/backend-api/subscriptions/auto_top_up",
+    ];
+    let path = path.trim_end_matches('/');
+    BLOCKED.iter().any(|prefix| {
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
 }
 
 /// The ChatGPT MCP endpoint, or a path under it, without an `Authorization`
@@ -554,6 +662,19 @@ impl Interceptor for CustomInterceptor {
                 obs.record_error("no_biscuit_no_service", "MCP request without credentials");
             }
             return Ok(RequestAction::ShortCircuit(unauthenticated_mcp_response()));
+        }
+
+        // The upstream login's payments are not the client's to see or
+        // change.
+        if is_blocked_path(&ctx.target_path) {
+            if let Ok(mut obs) = ctx.observation.lock() {
+                obs.record_error("forbidden", "Blocked by the gateway");
+            }
+            return Ok(RequestAction::ShortCircuit(auth_error(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Blocked by the gateway",
+            )));
         }
 
         // A few Codex requests carry no User-Agent at all; anything else

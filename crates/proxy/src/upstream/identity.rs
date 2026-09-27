@@ -169,9 +169,18 @@ pub fn user_agent_for_platform(platform: &str, version: &str) -> String {
     )
 }
 
+/// Whether the agent is a browser's: the desktop app's webview calls
+/// ChatGPT's own endpoints with its Chromium agent, not a Codex one.
+fn is_browser_user_agent(user_agent: &str) -> bool {
+    user_agent.starts_with("Mozilla/")
+}
+
 /// The Codex version a client User-Agent carries: `{originator}/{version}`
-/// (also `codex-mcp-client/{version}`).
+/// (also `codex-mcp-client/{version}`). A browser agent carries none.
 pub fn codex_version_from_user_agent(user_agent: &str) -> Option<&str> {
+    if is_browser_user_agent(user_agent) {
+        return None;
+    }
     let after_slash = user_agent.split_once('/')?.1;
     let version = after_slash.split([' ', '(']).next()?.trim();
     (!version.is_empty()).then_some(version)
@@ -196,8 +205,13 @@ pub fn presented_client_version<'a>(
 /// type survives (the originator, the terminal or host it runs in, and the
 /// app-server client name); the Codex version, OS and architecture are the
 /// upstream login's. `codex-mcp-client/{version}` names no machine and only gets
-/// the version; an agent in no Codex shape becomes the CLI's.
+/// the version; an agent in no Codex shape becomes the CLI's. A browser
+/// agent is the desktop app's webview and goes through as it is: it names
+/// no Codex version, and Cloudflare bans a mangled one (error 1010).
 pub fn rewrite_user_agent(client: &str, platform: &str, version: &str) -> String {
+    if is_browser_user_agent(client) {
+        return client.to_string();
+    }
     let Some((name, rest)) = client.split_once('/') else {
         return user_agent_for_platform(platform, version);
     };
@@ -445,6 +459,16 @@ mod tests {
             rewrite_user_agent("Apifox/1.0.0 (x)", "linux", "0.156.0"),
             "Apifox/0.156.0 (Debian 13.0.0; x86_64) xterm-256color"
         );
+    }
+
+    #[test]
+    fn webview_browser_agents_go_through_unchanged() {
+        // Captured from the Codex desktop app's webview on Windows.
+        let chrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                      (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
+        assert_eq!(rewrite_user_agent(chrome, "windows", "0.156.0"), chrome);
+        assert_eq!(rewrite_user_agent(chrome, "linux", "0.156.0"), chrome);
+        assert_eq!(codex_version_from_user_agent(chrome), None);
     }
 
     #[test]

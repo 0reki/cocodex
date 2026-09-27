@@ -32,6 +32,9 @@ pub struct RequestContext {
     /// (upstream value, client value) for the identity upstream reports
     /// back: user id, account id and email.
     pub identity_swap: Vec<(String, String)>,
+    /// The client's name and email, shown on the ChatGPT profile endpoints
+    /// in place of the upstream login's.
+    pub client_profile: Option<crate::client_identity::ClientProfile>,
     /// Set when the gateway owns this request's `x-codex-turn-state`: the
     /// model is one it manages, so the client's own value never goes
     /// upstream and the state held for this login takes its place (see
@@ -82,6 +85,7 @@ impl RequestContext {
             upstream_installation_id: None,
             upstream_platform: None,
             identity_swap: Vec::new(),
+            client_profile: None,
             turn_state_key: None,
             upstream_turn_state: None,
             presented_timezone: None,

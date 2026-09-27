@@ -125,13 +125,16 @@ impl TestDb {
     }
 
     /// Gives the logins of `account_id` an ID token naming their ChatGPT
-    /// user, as a real OpenAI login has.
+    /// user and personal org (`org-UPSTREAM`), as a real OpenAI login has.
     pub async fn set_upstream_user_id(&self, account_id: &str, user_id: &str) {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
         let claims = serde_json::json!({
-            "https://api.openai.com/auth": { "chatgpt_user_id": user_id }
+            "https://api.openai.com/auth": {
+                "chatgpt_user_id": user_id,
+                "poid": "org-UPSTREAM"
+            }
         });
         let id_token = format!(
             "e30.{}.sig",
