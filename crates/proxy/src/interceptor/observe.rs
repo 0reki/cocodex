@@ -306,7 +306,8 @@ impl RequestObservation {
         {
             current.completed_model = Some(model.to_string());
         }
-        if current.ttft_ms.is_none() && is_generation_event(kind) {
+        if current.ttft_ms.is_none() && (is_generation_event(kind) || is_first_visible_token(value))
+        {
             current.ttft_ms = Some(current.started_at.elapsed().as_millis() as u64);
         }
         let response = value.get("response").filter(|r| r.is_object());
@@ -346,6 +347,8 @@ impl RequestObservation {
             "response.incomplete" => Some(Terminal::Incomplete),
             "response.failed" | "error" => Some(Terminal::Failed),
             "response.cancelled" => Some(Terminal::Cancelled),
+            // A ChatGPT turn's stream ends with this, then `[DONE]`.
+            "message_stream_complete" => Some(Terminal::Completed),
             // Non-streaming JSON bodies carry the whole response.
             "" if value.get("usage").is_some() || value.get("object").is_some() => {
                 Some(Terminal::Completed)
@@ -402,6 +405,13 @@ fn turn_state(headers: &serde_json::Map<String, Value>) -> Option<String> {
 fn is_generation_event(kind: &str) -> bool {
     kind == "response.output_item.added"
         || (kind.starts_with("response.") && kind.ends_with(".delta"))
+}
+
+/// A ChatGPT turn marks the first token its user sees.
+fn is_first_visible_token(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("message_marker")
+        && value.get("marker").and_then(Value::as_str) == Some("user_visible_token")
+        && value.get("event").and_then(Value::as_str) == Some("first")
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
@@ -608,6 +618,33 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
         // No completed event yet, but the requested model is known.
         assert_eq!(all[2].requested_model.as_deref(), Some("gpt-5.5"));
         assert_eq!(all[2].completed_model, None);
+    }
+
+    #[test]
+    fn a_chatgpt_turn_completes_with_its_stream() {
+        // Abridged from a real /f/conversation stream.
+        let stream = concat!(
+            "event: delta_encoding\ndata: \"v1\"\n\n",
+            "data: {\"type\":\"resume_conversation_token\",\"conversation_id\":\"c\"}\n\n",
+            "event: delta\ndata: {\"v\":{\"message\":{\"author\":{\"role\":\"system\"},",
+            "\"metadata\":{\"model_slug\":\"gpt-5-6-instant\"}}},\"c\":2}\n\n",
+            "event: delta\ndata: {\"v\":{\"message\":{\"author\":{\"role\":\"assistant\"},",
+            "\"status\":\"in_progress\",\"metadata\":{\"model_slug\":\"gpt-5-6-thinking\"}}},\"c\":10}\n\n",
+            "data: {\"type\":\"message_marker\",\"marker\":\"user_visible_token\",\"event\":\"first\"}\n\n",
+            "event: delta\ndata: {\"o\":\"patch\",\"v\":[{\"p\":\"/message/content/parts/0\",\"o\":\"append\",\"v\":\"Hi.\"}]}\n\n",
+            "data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"c\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut obs = RequestObservation::default();
+        obs.is_sse = Some(true);
+        obs.set_requested_model("gpt-5-6-thinking");
+        obs.ingest_chunk(stream.as_bytes());
+        let all = obs.take_all();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].terminal, Some(Terminal::Completed));
+        assert!(all[0].ttft_ms.is_some());
+        // The assistant's model, not a system message's.
+        assert_eq!(all[0].completed_model.as_deref(), Some("gpt-5-6-thinking"));
     }
 
     #[test]
