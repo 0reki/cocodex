@@ -310,22 +310,17 @@ function UserQuotaForm({
               </span>
             </label>
             {draft.enabled ? (
-              <>
-                <Input
-                  inputMode="decimal"
-                  value={draft.text}
-                  placeholder={field.key === "weeklySharePercent" ? "" : "不限"}
-                  onChange={(event) =>
-                    setOverrides((current) => ({
-                      ...current,
-                      [field.key]: { ...draft, text: event.target.value },
-                    }))
-                  }
-                />
-                <span className="text-xs text-muted-foreground">
-                  {field.hint}
-                </span>
-              </>
+              <Input
+                inputMode="decimal"
+                value={draft.text}
+                placeholder={field.key === "weeklySharePercent" ? "" : "不限"}
+                onChange={(event) =>
+                  setOverrides((current) => ({
+                    ...current,
+                    [field.key]: { ...draft, text: event.target.value },
+                  }))
+                }
+              />
             ) : null}
           </div>
         );

@@ -118,9 +118,6 @@ function ProfileForm({
               }))
             }
           />
-          <span className="text-xs font-normal text-muted-foreground">
-            {field.hint}
-          </span>
         </label>
       ))}
       <footer className="flex justify-end gap-2 pt-4">
@@ -178,9 +175,6 @@ export function QuotaProfilesPage() {
     <main className="flex w-full flex-col gap-6 px-3 py-3 sm:px-4 sm:py-4 lg:px-5">
       <section>
         <h1 className="text-2xl font-bold">额度配置</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          每个用户使用一个额度配置，可以在用户管理里逐项覆盖。未指定配置的用户使用默认配置。
-        </p>
       </section>
 
       <div className="flex justify-end">

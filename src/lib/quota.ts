@@ -3,27 +3,22 @@ import type { QuotaLimits } from "@/types/api";
 export const QUOTA_FIELDS: {
   key: keyof QuotaLimits;
   label: string;
-  hint: string;
 }[] = [
   {
     key: "weeklySharePercent",
     label: "周额度占比",
-    hint: "最多使用上游账号周额度的百分比",
   },
   {
     key: "deepResearchLimit",
     label: "Deep Research",
-    hint: "每 30 天可用次数，留空为不限（仍受上游账号剩余次数约束）",
   },
   {
     key: "imageGenLimit",
     label: "图片生成",
-    hint: "每 24 小时可用次数，留空为不限（仍受上游账号剩余次数约束）",
   },
   {
     key: "proMessageLimit",
     label: "Pro 消息",
-    hint: "每 7 天可向 Pro 模型（gpt-*-pro）发送的消息数，留空为不限（上游账号每周共 200 条）",
   },
 ];
 
