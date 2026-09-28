@@ -392,7 +392,8 @@ async fn console_and_codex_client_end_to_end() {
         .unwrap();
     let codex = tokens["access_token"].as_str().unwrap().to_string();
 
-    // 5. Search is a plain JSON request with no terminal event.
+    // 5. Search is relayed, but it is not one of the apps' turns: it is
+    // not logged.
     let response = client
         .http
         .post(format!("{}/backend-api/codex/alpha/search", client.base))
@@ -468,18 +469,17 @@ async fn console_and_codex_client_end_to_end() {
         })
     })
     .await;
-    // The search arrived whole, so it is complete, not "unfinished".
     let (_, logs) = client
         .call("GET", "/api/request-logs?limit=10", Some(&alice), None)
         .await;
-    let search = logs["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["path"] == "/backend-api/codex/alpha/search")
-        .unwrap_or_else(|| panic!("no search log: {logs}"));
-    assert_eq!(search["isFinal"], true, "{search}");
-    assert_eq!(search["streamEndReason"], "completed", "{search}");
+    assert!(
+        logs["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["path"] == "/backend-api/codex/responses"),
+        "{logs}"
+    );
     let (_, logs) = client
         .call(
             "GET",
@@ -519,7 +519,7 @@ async fn console_and_codex_client_end_to_end() {
             None,
         )
         .await;
-    assert_eq!(hourly["models"], json!(["codex-search", "gpt-5.4"]));
+    assert_eq!(hourly["models"], json!(["gpt-5.4"]));
     let (_, users) = client.call("GET", "/api/users", Some(admin), None).await;
     let alice_row = users["items"]
         .as_array()

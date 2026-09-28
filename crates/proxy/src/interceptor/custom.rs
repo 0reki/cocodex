@@ -1,4 +1,4 @@
-use super::observe::{BackendKind, ResponseObservation, Terminal, classify_backend_kind};
+use super::observe::{ResponseObservation, Terminal, classify_backend_kind};
 use super::platform::detect_platform;
 use super::{Interceptor, RequestAction, RequestContext, WsAction};
 use crate::auth::jwt::JwtError;
@@ -670,7 +670,6 @@ impl CustomInterceptor {
         let model = used_model
             .clone()
             .or_else(|| requested_model.clone())
-            .or_else(|| default_model_for_kind(kind))
             .unwrap_or_else(|| "codex-chatgpt".to_string());
         let tokens_info = response
             .usage
@@ -1173,11 +1172,11 @@ impl Interceptor for CustomInterceptor {
             "Request finished"
         );
 
-        // Only usage endpoints (Responses, Images, Search) are logged and
-        // settled. Housekeeping traffic — analytics events, plugins, models,
-        // the MCP handshake, usage polls — carries no model or tokens and
-        // must not fill the request log.
-        if classify_backend_kind(&ctx.target_path) == BackendKind::Passthrough {
+        // Only the two apps' turns — Codex Responses and ChatGPT
+        // conversations — are logged and settled. The rest (image generation,
+        // search, analytics events, plugins, models, the MCP handshake, usage
+        // polls) must not fill the request log.
+        if !classify_backend_kind(&ctx.target_path).logged() {
             return;
         }
 
@@ -1233,14 +1232,6 @@ fn routing_hint_field<'a>(headers: &'a http::HeaderMap, key: &str) -> Option<&'a
                 (name.trim() == key && !value.is_empty()).then_some(value)
             })
         })
-}
-
-fn default_model_for_kind(kind: BackendKind) -> Option<String> {
-    match kind {
-        BackendKind::Images => Some("gpt-image-2".to_string()),
-        BackendKind::Search => Some("codex-search".to_string()),
-        _ => None,
-    }
 }
 
 pub(crate) fn auth_error(status: StatusCode, code: &str, message: &str) -> Response {

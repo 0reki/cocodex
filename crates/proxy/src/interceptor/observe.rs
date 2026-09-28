@@ -13,21 +13,27 @@ const JSON_BUFFER_LIMIT: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
+    /// A Codex turn (`/codex/responses`).
     Responses,
-    Images,
-    Search,
     /// A ChatGPT turn (`/f/conversation`) from the desktop app's webview.
     Conversation,
+    /// Everything else, Codex image generation and search included: relayed,
+    /// neither logged nor settled.
     Passthrough,
 }
 
 impl BackendKind {
     /// Kinds whose cost is charged to the user and counted against the
-    /// upstream quota share. Images, Search and ChatGPT turns are logged but
-    /// free: a ChatGPT turn reports no token usage, and its limits are the
-    /// feature quotas (`crate::features`).
+    /// upstream quota share. A ChatGPT turn is logged but free: it reports
+    /// no token usage, and its limits are the feature quotas
+    /// (`crate::features`).
     pub fn billable(self) -> bool {
         matches!(self, Self::Responses)
+    }
+
+    /// Kinds that go in the request log: the two apps' turns.
+    pub fn logged(self) -> bool {
+        matches!(self, Self::Responses | Self::Conversation)
     }
 }
 
@@ -35,10 +41,6 @@ pub fn classify_backend_kind(path: &str) -> BackendKind {
     let normalized = path.trim_end_matches('/');
     if normalized.ends_with("/codex/responses") || normalized.contains("/codex/responses/") {
         BackendKind::Responses
-    } else if normalized.contains("/codex/images/") {
-        BackendKind::Images
-    } else if normalized.contains("/alpha/search") {
-        BackendKind::Search
     } else if crate::conversation_scope::is_turn_path(normalized) {
         BackendKind::Conversation
     } else {
@@ -85,8 +87,8 @@ pub struct ResponseObservation {
     /// HTTP-like status carried by a WebSocket `error` event.
     pub status: Option<u16>,
     pub terminal: Option<Terminal>,
-    /// A plain (non-streaming) body was read to the end. Such a response —
-    /// Search, say — has no terminal event and is complete once it arrived.
+    /// A plain (non-streaming) body was read to the end. Such a response
+    /// has no terminal event and is complete once it arrived.
     pub body_complete: bool,
     /// Whether anything was sent or received for this response.
     pub active: bool,
@@ -443,16 +445,7 @@ mod tests {
             classify_backend_kind("/backend-api/codex/responses"),
             BackendKind::Responses
         );
-        assert_eq!(
-            classify_backend_kind("/backend-api/codex/images/generations"),
-            BackendKind::Images
-        );
-        assert_eq!(
-            classify_backend_kind("/backend-api/codex/alpha/search"),
-            BackendKind::Search
-        );
         assert!(classify_backend_kind("/backend-api/codex/responses").billable());
-        assert!(!classify_backend_kind("/backend-api/codex/images/generations").billable());
         assert!(!classify_backend_kind("/backend-api/codex/models").billable());
         // ChatGPT turns are logged, not billed; the rest of ChatGPT is not logged.
         assert_eq!(
@@ -460,6 +453,7 @@ mod tests {
             BackendKind::Conversation
         );
         assert!(!BackendKind::Conversation.billable());
+        assert!(BackendKind::Conversation.logged() && BackendKind::Responses.logged());
         assert_eq!(
             classify_backend_kind("/backend-api/conversations"),
             BackendKind::Passthrough
@@ -468,8 +462,11 @@ mod tests {
             classify_backend_kind("/backend-api/f/conversation/prepare"),
             BackendKind::Passthrough
         );
-        // Housekeeping traffic is passthrough and never logged or settled.
+        // Housekeeping traffic, image generation and search are passthrough
+        // and never logged or settled.
         for path in [
+            "/backend-api/codex/images/generations",
+            "/backend-api/codex/alpha/search",
             "/backend-api/codex/analytics-events/events",
             "/backend-api/codex/models",
             "/backend-api/ps/mcp",
@@ -572,7 +569,7 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
 
     #[test]
     fn plain_body_is_complete_once_read() {
-        // A Search response has no usage and no terminal event.
+        // A plain JSON response has no usage and no terminal event.
         let mut obs = RequestObservation::default();
         obs.ingest_chunk(br#"{"results":[]}"#);
         obs.upstream_complete = true;
