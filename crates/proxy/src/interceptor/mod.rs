@@ -43,12 +43,16 @@ pub struct RequestContext {
     pub turn_conversation_id: Option<String>,
     /// The user's allowances, loaded for `/conversation/init` to report.
     pub feature_allowances: Option<Vec<crate::features::Allowance>>,
-    /// The client's own conversations, loaded for a conversation listing so
-    /// the forwarder can drop everyone else's (see `crate::conversation_scope`).
-    pub owned_conversations: Option<std::collections::HashSet<String>>,
-    /// Set on a turn: finds the conversation its response names, so a new
-    /// chat is bound to the user who started it.
-    pub conversation_scan: Option<Arc<Mutex<crate::conversation_scope::ConversationIdScanner>>>,
+    /// A response that lists conversations or projects, with the client's
+    /// own, so the forwarder can drop everyone else's (see
+    /// `crate::conversation_scope`).
+    pub conversation_listing: Option<(
+        crate::conversation_scope::Listing,
+        crate::conversation_scope::Owned,
+    )>,
+    /// Set on a turn or a project write: finds the conversation or project
+    /// its response names, so a new one is bound to the user who made it.
+    pub id_scan: Option<Arc<Mutex<crate::conversation_scope::IdScanner>>>,
     /// The timezone and date (`%Y-%m-%d`) the gateway presents in the
     /// conversation's `<environment_context>`, from its egress IP.
     pub presented_timezone: Option<String>,
@@ -96,8 +100,8 @@ impl RequestContext {
             requested_features: Vec::new(),
             turn_conversation_id: None,
             feature_allowances: None,
-            owned_conversations: None,
-            conversation_scan: None,
+            conversation_listing: None,
+            id_scan: None,
             presented_timezone: None,
             presented_current_date: None,
             metadata: HashMap::new(),

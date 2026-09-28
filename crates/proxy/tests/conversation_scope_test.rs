@@ -19,8 +19,14 @@ const WEBVIEW_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 const ALICE_CHAT: &str = "6ab9293a-fadc-83ea-80b7-004e72636b6d";
 const BOB_CHAT: &str = "6ab9270f-a5b8-83ea-be3e-562f1f943a19";
 const UNBOUND_CHAT: &str = "6ab91111-1111-83ea-be3e-562f1f943a19";
+/// Projects: one created through the gateway, one from before.
+const NEW_PROJECT: &str = "g-p-6a8f0c1e2d3b4a5968778695a4b3c2d1";
+const OLD_PROJECT: &str = "g-p-0123456789abcdef0123456789abcdef";
 /// What upstream assigns to a chat started without an id.
 const NEW_CHAT: &str = "6ab92222-2222-83ea-be3e-562f1f943a19";
+
+/// A logged turn: path, model, status and cost.
+type LoggedTurn = (String, Option<String>, Option<i32>, Option<f64>);
 
 /// Paths upstream was asked for.
 type Seen = Arc<Mutex<Vec<String>>>;
@@ -67,6 +73,57 @@ async fn mock_upstream() -> (String, Seen) {
                 |State(seen): State<Seen>, Path(id): Path<String>| async move {
                     seen.lock().unwrap().push(format!("GET /conversation/{id}"));
                     axum::Json(json!({ "conversation_id": id }))
+                },
+            ),
+        )
+        .route(
+            "/backend-api/conversations/{id}",
+            axum::routing::get(
+                |State(seen): State<Seen>, Path(id): Path<String>| async move {
+                    seen.lock().unwrap().push(format!("GET /conversations/{id}"));
+                    axum::Json(json!({ "conversation_id": id, "messages": [] }))
+                },
+            ),
+        )
+        .route(
+            "/backend-api/conversations/batch",
+            // Whatever is asked for, everyone's conversations come back.
+            axum::routing::post(|State(seen): State<Seen>| async move {
+                seen.lock().unwrap().push("POST /conversations/batch".into());
+                axum::Json(json!([
+                    { "id": ALICE_CHAT, "mapping": { "a": {} } },
+                    { "id": BOB_CHAT, "mapping": { "b": {} } }
+                ]))
+            }),
+        )
+        .route(
+            "/backend-api/gizmos/snorlax/upsert",
+            axum::routing::post(|State(seen): State<Seen>| async move {
+                seen.lock().unwrap().push("POST /gizmos/snorlax/upsert".into());
+                axum::Json(json!({ "resource": { "gizmo": {
+                    "id": NEW_PROJECT, "organization_id": "org-1", "gizmo_type": "snorlax"
+                } } }))
+            }),
+        )
+        .route(
+            "/backend-api/gizmos/snorlax/sidebar",
+            // Every project of the upstream account.
+            axum::routing::get(|| async {
+                let project = |id: &str| {
+                    json!({ "gizmo": { "gizmo": { "id": id } },
+                            "conversations": { "items": [], "cursor": null } })
+                };
+                axum::Json(json!({
+                    "items": [project(OLD_PROJECT), project(NEW_PROJECT)], "cursor": null
+                }))
+            }),
+        )
+        .route(
+            "/backend-api/gizmos/{id}",
+            axum::routing::get(
+                |State(seen): State<Seen>, Path(id): Path<String>| async move {
+                    seen.lock().unwrap().push(format!("GET /gizmos/{id}"));
+                    axum::Json(json!({ "gizmo": { "id": id }, "files": [] }))
                 },
             ),
         )
@@ -235,7 +292,7 @@ async fn each_user_sees_and_opens_only_their_own_conversations() {
     );
 
     // ChatGPT turns are in the request log, free of charge.
-    let mut logged: Vec<(String, Option<String>, Option<i32>, Option<f64>)> = Vec::new();
+    let mut logged: Vec<LoggedTurn> = Vec::new();
     for _ in 0..100 {
         logged = sqlx::query_as(
             "SELECT path, model_id, status_code, cost::float8 FROM model_response_logs \
@@ -277,5 +334,158 @@ async fn each_user_sees_and_opens_only_their_own_conversations() {
             format!("GET /conversation/{ALICE_CHAT}"),
             "POST /f/conversation new".to_string(),
         ]
+    );
+}
+
+#[tokio::test]
+async fn whole_conversations_and_bulk_writes_stay_scoped() {
+    common::pin_codex_version();
+    let db = common::test_db().await;
+    let (origin, seen) = mock_upstream().await;
+    db.insert_account("win@x", "acct-1", "windows", "win-token")
+        .await;
+    let alice = db.create_user("alice").await;
+    let bob = db.create_user("bob").await;
+    db.assign(&alice, "acct-1").await;
+    db.assign(&bob, "acct-1").await;
+    let alice = db.client_bearer(&alice).await;
+    let bob = db.client_bearer(&bob).await;
+    let app = create_router(common::config(db.settings(), &origin), None);
+    for (user, chat) in [(&alice, ALICE_CHAT), (&bob, BOB_CHAT)] {
+        let (status, _) = call(
+            &app,
+            user,
+            "POST",
+            "/backend-api/f/conversation",
+            turn(chat),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // `/conversations/{id}` is the same conversation as `/conversation/{id}`.
+    let theirs = format!("/backend-api/conversations/{BOB_CHAT}?num_turns=10");
+    let (status, body) = call(&app, &alice, "GET", &theirs, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({ "detail": "Not Found" }));
+    let own = format!("/backend-api/conversations/{ALICE_CHAT}?num_turns=10");
+    assert_eq!(
+        call(&app, &alice, "GET", &own, None).await.0,
+        StatusCode::OK
+    );
+
+    // A batch returns whole conversations: only the user's own survive.
+    let (status, batch) = call(
+        &app,
+        &alice,
+        "POST",
+        "/backend-api/conversations/batch",
+        Some(json!({ "conversation_ids": [ALICE_CHAT, BOB_CHAT] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(batch, json!([{ "id": ALICE_CHAT, "mapping": { "a": {} } }]));
+
+    // Archiving or deleting the whole history would take everyone's.
+    let (status, _) = call(
+        &app,
+        &bob,
+        "PATCH",
+        "/backend-api/conversations",
+        Some(json!({ "is_visible": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen.contains(&format!("GET /conversations/{ALICE_CHAT}")));
+    assert!(!seen.contains(&format!("GET /conversations/{BOB_CHAT}")));
+}
+
+#[tokio::test]
+async fn projects_belong_to_whoever_created_them() {
+    common::pin_codex_version();
+    let db = common::test_db().await;
+    let (origin, seen) = mock_upstream().await;
+    db.insert_account("win@x", "acct-1", "windows", "win-token")
+        .await;
+    let alice = db.create_user("alice").await;
+    let bob = db.create_user("bob").await;
+    db.assign(&alice, "acct-1").await;
+    db.assign(&bob, "acct-1").await;
+    let alice = db.client_bearer(&alice).await;
+    let bob = db.client_bearer(&bob).await;
+    let app = create_router(common::config(db.settings(), &origin), None);
+
+    // Creating a project binds it to its creator.
+    let (status, _) = call(
+        &app,
+        &alice,
+        "POST",
+        "/backend-api/gizmos/snorlax/upsert",
+        Some(json!({ "display": { "name": "mine" }, "instructions": "" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let sidebar = "/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=0&limit=20";
+    let mut listed = Value::Null;
+    for _ in 0..50 {
+        listed = call(&app, &alice, "GET", sidebar, None).await.1;
+        if listed["items"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // Only the creator sees it; one from before the gateway, nobody.
+    assert_eq!(
+        listed["items"],
+        json!([{ "gizmo": { "gizmo": { "id": NEW_PROJECT } },
+                 "conversations": { "items": [], "cursor": null } }])
+    );
+    assert_eq!(
+        call(&app, &bob, "GET", sidebar, None).await.1["items"],
+        json!([])
+    );
+
+    // Opening it, or chatting in it, is the owner's alone.
+    let project = format!("/backend-api/gizmos/{NEW_PROJECT}?include_file_limits=true");
+    assert_eq!(
+        call(&app, &alice, "GET", &project, None).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&app, &bob, "GET", &project, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let old = format!("/backend-api/gizmos/{OLD_PROJECT}");
+    assert_eq!(
+        call(&app, &alice, "GET", &old, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    let in_project = json!({
+        "action": "next",
+        "conversation_mode": { "kind": "gizmo_interaction", "gizmo_id": NEW_PROJECT },
+        "messages": []
+    });
+    let (status, _) = call(
+        &app,
+        &bob,
+        "POST",
+        "/backend-api/f/conversation",
+        Some(in_project),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen.contains(&format!("GET /gizmos/{NEW_PROJECT}")));
+    assert!(!seen.contains(&format!("GET /gizmos/{OLD_PROJECT}")));
+    assert!(
+        !seen
+            .iter()
+            .any(|call| call.starts_with("POST /f/conversation"))
     );
 }

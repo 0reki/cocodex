@@ -201,21 +201,39 @@ impl CustomInterceptor {
         Request::from_parts(parts, Body::empty())
     }
 
-    /// Binds the conversation a turn names to the user, refuses one that is
-    /// not theirs, and loads their conversations for a listing to filter.
+    /// Binds the conversation a turn names to the user, refuses a
+    /// conversation or project that is not theirs, and loads their own for a
+    /// listing to filter.
     async fn scope_conversations(
         &self,
         ctx: &mut RequestContext,
         req: Request<Body>,
     ) -> Result<Request<Body>, Rejection> {
         use crate::conversation_scope::{self as scope, ConversationUse};
-        use crate::db::conversations::{self, Ownership};
+        use crate::db::conversations::{self, Kind, Ownership};
 
         let path = ctx.target_path.clone();
-        let listing = req.method() == http::Method::GET && scope::is_list_path(&path);
+        if scope::is_bulk_write(req.method(), &path) {
+            warn!(
+                request_id = %ctx.request_id,
+                method = %req.method(),
+                path = %path,
+                "refused a write to the whole conversation history"
+            );
+            return Err(Rejection::new(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Blocked by the gateway",
+            ));
+        }
+        let listing = scope::listing_of(req.method(), &path, ctx.query.as_deref());
         let read_body = scope::may_name_conversation_in_body(req.method(), &path)
             && !req.headers().contains_key(http::header::CONTENT_ENCODING);
-        if !listing && !read_body && scope::path_conversation_id(&path).is_none() {
+        if listing.is_none()
+            && !read_body
+            && scope::path_conversation_id(&path).is_none()
+            && scope::project_ids(&path, ctx.query.as_deref(), None).is_empty()
+        {
             return Ok(req);
         }
         let (Some(owner), Some(account_id)) = (
@@ -239,17 +257,10 @@ impl CustomInterceptor {
                 "Failed to check the conversation",
             )
         })?;
-        if listing {
-            ctx.owned_conversations = Some(
-                conversations::owned(&ready.db, &owner)
-                    .await
-                    .map_err(unavailable)?,
-            );
-            return Ok(req);
-        }
-
         if req.method() == http::Method::POST && scope::is_turn_path(&path) {
-            ctx.conversation_scan = Some(Default::default());
+            ctx.id_scan = Some(Arc::new(std::sync::Mutex::new(scope::IdScanner::new(
+                Kind::Conversation,
+            ))));
         }
         let (req, body) = if read_body {
             let (parts, body) = req.into_parts();
@@ -269,15 +280,33 @@ impl CustomInterceptor {
         } else {
             (req, None)
         };
-        for named in scope::conversation_uses(&path, body.as_deref()) {
+        let uses = scope::conversation_uses(&path, ctx.query.as_deref(), body.as_deref());
+        // A gizmo write naming no project creates one: its response says
+        // which, and it becomes the user's.
+        if scope::may_create_project(req.method(), &path)
+            && !uses
+                .iter()
+                .any(|named| matches!(named, ConversationUse::Project(_)))
+        {
+            ctx.id_scan = Some(Arc::new(std::sync::Mutex::new(scope::IdScanner::new(
+                Kind::Project,
+            ))));
+        }
+        for named in uses {
             let (id, ownership) = match &named {
                 ConversationUse::Turn(id) => (
                     id,
-                    conversations::bind(&ready.db, id, &owner, &account_id).await,
+                    conversations::bind(&ready.db, Kind::Conversation, id, &owner, &account_id)
+                        .await,
                 ),
-                ConversationUse::Access(id) => {
-                    (id, conversations::ownership(&ready.db, id, &owner).await)
-                }
+                ConversationUse::Access(id) => (
+                    id,
+                    conversations::ownership(&ready.db, Kind::Conversation, id, &owner).await,
+                ),
+                ConversationUse::Project(id) => (
+                    id,
+                    conversations::ownership(&ready.db, Kind::Project, id, &owner).await,
+                ),
             };
             match ownership.map_err(unavailable)? {
                 Ownership::Own => {}
@@ -288,7 +317,7 @@ impl CustomInterceptor {
                         conversation_id = %id,
                         ?ownership,
                         path = %path,
-                        "refused a conversation that is not the user's"
+                        "refused a conversation or project that is not the user's"
                     );
                     return Err(Rejection::new(
                         StatusCode::NOT_FOUND,
@@ -297,6 +326,20 @@ impl CustomInterceptor {
                     ));
                 }
             }
+        }
+        if let Some(listing) = listing {
+            ctx.conversation_listing = Some((
+                listing,
+                scope::Owned {
+                    conversations: conversations::owned(&ready.db, Kind::Conversation, &owner)
+                        .await
+                        .map_err(unavailable)?,
+                    projects: conversations::owned(&ready.db, Kind::Project, &owner)
+                        .await
+                        .map_err(unavailable)?,
+                },
+            ));
+            return Ok(req);
         }
 
         // Counted features: a turn asking for one past the user's cap is
@@ -903,10 +946,10 @@ impl Interceptor for CustomInterceptor {
         {
             obs.set_requested_service_tier(tier);
         }
-        if let Some(model) = routing_hint_field(req.headers(), "model").map(str::to_string) {
-            if let Ok(mut obs) = ctx.observation.lock() {
-                obs.set_requested_model(&model);
-            }
+        if let Some(model) = routing_hint_field(req.headers(), "model").map(str::to_string)
+            && let Ok(mut obs) = ctx.observation.lock()
+        {
+            obs.set_requested_model(&model);
         }
 
         Ok(RequestAction::Forward(req))
@@ -990,11 +1033,11 @@ impl Interceptor for CustomInterceptor {
         if let Ok(mut obs) = ctx.observation.lock() {
             obs.ingest_chunk(chunk);
         }
-        let found = ctx
-            .conversation_scan
-            .as_ref()
-            .and_then(|scan| scan.lock().ok()?.push(chunk));
-        if let (Some(conversation_id), Some(owner), Some(account_id)) = (
+        let found = ctx.id_scan.as_ref().and_then(|scan| {
+            let mut scan = scan.lock().ok()?;
+            Some((scan.kind(), scan.push(chunk)?))
+        });
+        if let (Some((kind, conversation_id)), Some(owner), Some(account_id)) = (
             found,
             ctx.metadata.get(META_OWNER).cloned(),
             ctx.metadata.get(META_ACCOUNT).cloned(),
@@ -1007,6 +1050,7 @@ impl Interceptor for CustomInterceptor {
                 };
                 match crate::db::conversations::bind(
                     &ready.db,
+                    kind,
                     &conversation_id,
                     &owner,
                     &account_id,
@@ -1016,7 +1060,7 @@ impl Interceptor for CustomInterceptor {
                     Ok(crate::db::conversations::Ownership::Own) => {}
                     Ok(ownership) => warn!(
                         %request_id, owner, conversation_id, ?ownership,
-                        "a turn's response names a conversation bound to someone else"
+                        "a response names a conversation or project bound to someone else"
                     ),
                     Err(error) => warn!(
                         %request_id, %error, conversation_id,

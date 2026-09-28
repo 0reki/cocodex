@@ -339,6 +339,17 @@ CREATE TABLE IF NOT EXISTS conversation_owners (
 CREATE INDEX IF NOT EXISTS idx_conversation_owners_owner
   ON conversation_owners (owner_user_id);
 
+-- The same for ChatGPT projects (`g-p-` gizmos): bound to the user who
+-- created one through the gateway; older ones belong to no one.
+CREATE TABLE IF NOT EXISTS project_owners (
+  project_id TEXT PRIMARY KEY,
+  owner_user_id UUID NOT NULL REFERENCES portal_users(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ(6) NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_project_owners_owner
+  ON project_owners (owner_user_id);
+
 -- Quota profiles: what a user may consume, set by an admin. A user takes
 -- the values of their profile (the default one when none is set), overridden
 -- key by key by `portal_users.quota_overrides`. A NULL feature limit means

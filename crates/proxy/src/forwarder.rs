@@ -246,7 +246,7 @@ impl BackendForwarder {
         let status = StatusCode::from_u16(upstream_resp.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
-        let client_resp_headers = copy_client_response_headers(upstream_resp.headers());
+        let mut client_resp_headers = copy_client_response_headers(upstream_resp.headers());
 
         // Create stream with chunk-level interceptor inspection. Settlement
         // runs when the body is dropped (client finished or disconnected),
@@ -294,11 +294,15 @@ impl BackendForwarder {
         // whole.
         let endpoint = client_identity::ProfileEndpoint::of(&ctx.target_path);
         let profile = ctx.client_profile.as_ref().zip(endpoint);
+        // A listing is filtered even compressed: it cannot be read, so it
+        // goes out empty (see `filter_listing`) rather than unfiltered.
+        let listing = ctx.conversation_listing.as_ref();
         let rewrite_whole = status.is_success()
-            && !compressed
-            && (profile.is_some()
-                || ctx.owned_conversations.is_some()
-                || ctx.feature_allowances.is_some());
+            && (listing.is_some()
+                || (!compressed && (profile.is_some() || ctx.feature_allowances.is_some())));
+        if rewrite_whole && compressed {
+            client_resp_headers.remove(http::header::CONTENT_ENCODING);
+        }
         let upstream_stream = if rewrite_whole {
             let body = upstream_resp.bytes().await.map(|mut body| {
                 if let Some((client, endpoint)) = profile
@@ -307,10 +311,13 @@ impl BackendForwarder {
                 {
                     body = bytes::Bytes::from(rewritten);
                 }
-                if let Some(owned) = &ctx.owned_conversations
-                    && let Some(filtered) = crate::conversation_scope::filter_listing(&body, owned)
-                {
-                    body = bytes::Bytes::from(filtered);
+                if let Some((listing, owned)) = listing {
+                    body = bytes::Bytes::from(crate::conversation_scope::filter_listing(
+                        *listing,
+                        &body,
+                        owned,
+                        !compressed,
+                    ));
                 }
                 if let Some(allowances) = &ctx.feature_allowances
                     && let Some(rewritten) = crate::features::rewrite_limits_progress(

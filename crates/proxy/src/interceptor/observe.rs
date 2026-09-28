@@ -635,8 +635,10 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
             "data: {\"type\":\"message_stream_complete\",\"conversation_id\":\"c\"}\n\n",
             "data: [DONE]\n\n",
         );
-        let mut obs = RequestObservation::default();
-        obs.is_sse = Some(true);
+        let mut obs = RequestObservation {
+            is_sse: Some(true),
+            ..Default::default()
+        };
         obs.set_requested_model("gpt-5-6-thinking");
         obs.ingest_chunk(stream.as_bytes());
         let all = obs.take_all();
