@@ -181,9 +181,8 @@ function formatTps(value: number | null) {
   return value === null ? "—" : `${value.toFixed(1)} tok/s`;
 }
 
-// Which client a logged request came from: a ChatGPT turn from the desktop
-// app (`/f/conversation`), or Codex (Responses and its image and search
-// tools).
+// Which app a logged turn came from: ChatGPT (`/f/conversation`, from the
+// desktop app's webview) or Codex (`/codex/responses`).
 function sourceLabel(path: string) {
   const trimmed = path.replace(/\/+$/, "");
   return trimmed.endsWith("/f/conversation") ||
@@ -248,7 +247,7 @@ function LogDetails({ log }: { log: RequestLog }) {
       <DetailField label="请求时间">
         {formatRequestTime(log.requestTime)}
       </DetailField>
-      <DetailField label="路径">{sourceLabel(log.path)}</DetailField>
+      <DetailField label="应用">{sourceLabel(log.path)}</DetailField>
       <DetailField label="模型">
         <ModelLabel log={log} />
       </DetailField>
@@ -421,7 +420,7 @@ export function LogsPage() {
               <TableHeader>
                 <TableRow className="bg-muted/40">
                   <TableHead className="px-3 py-2">请求时间</TableHead>
-                  <TableHead className="px-3 py-2">路径</TableHead>
+                  <TableHead className="px-3 py-2">应用</TableHead>
                   <TableHead className="px-3 py-2">模型</TableHead>
                   <TableHead className="px-3 py-2">状态</TableHead>
                   <TableHead className="px-3 py-2">TTFB / 延迟</TableHead>
