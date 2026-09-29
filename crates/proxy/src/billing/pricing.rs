@@ -232,32 +232,40 @@ impl Pricing {
     }
 }
 
-/// Priority ("fast") processing is billed at a model-specific multiple.
+/// Models that offer the `ultrafast` tier, billed at 6x.
+const ULTRAFAST_MODELS: [&str; 2] = ["gpt-6-astra", "gpt-6.1-sol"];
+
+/// Priority ("fast") processing is billed at a model-specific multiple, and
+/// `ultrafast` at 6x on the models that offer it (elsewhere, as fast).
 pub fn apply_service_tier(
     cost: Option<Usd>,
     service_tier: Option<&str>,
     model: Option<&str>,
 ) -> Option<Usd> {
     let cost = cost?;
-    if !service_tier.is_some_and(|tier| tier.trim().eq_ignore_ascii_case("priority")) {
+    let tier = service_tier.map(|tier| tier.trim().to_ascii_lowercase());
+    if !matches!(tier.as_deref(), Some("priority" | "ultrafast")) {
         return Some(cost);
     }
     let model = model
         .map(|m| base_model_id(m.trim()).to_lowercase())
         .unwrap_or_default();
-    let (numerator, denominator) = if model == "gpt-6"
-        || model.starts_with("gpt-6-")
-        || model.starts_with("gpt-6.")
-        || model == "gpt-5.5"
-        || model == "gpt-5.6"
-        || model.starts_with("gpt-5.6-")
-    {
-        (5, 2)
-    } else if model == "gpt-5.4" {
-        (2, 1)
-    } else {
-        (1, 1)
-    };
+    let (numerator, denominator) =
+        if tier.as_deref() == Some("ultrafast") && ULTRAFAST_MODELS.contains(&model.as_str()) {
+            (6, 1)
+        } else if model == "gpt-6"
+            || model.starts_with("gpt-6-")
+            || model.starts_with("gpt-6.")
+            || model == "gpt-5.5"
+            || model == "gpt-5.6"
+            || model.starts_with("gpt-5.6-")
+        {
+            (5, 2)
+        } else if model == "gpt-5.4" {
+            (2, 1)
+        } else {
+            (1, 1)
+        };
     Some(Usd::divide(cost.0 * numerator, denominator))
 }
 
@@ -306,6 +314,25 @@ mod tests {
                 "{slug}"
             );
         }
+
+        // Ultrafast is 6x on Astra and GPT-6.1 Sol; a model without it is
+        // billed as Fast.
+        let cost = Usd::from_json(&json!("1"));
+        for slug in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-sol-2026-09-29"] {
+            assert_eq!(
+                apply_service_tier(cost, Some("ultrafast"), Some(slug))
+                    .unwrap()
+                    .to_string(),
+                "6.00000000",
+                "{slug}"
+            );
+        }
+        assert_eq!(
+            apply_service_tier(cost, Some("ultrafast"), Some("gpt-6-sol"))
+                .unwrap()
+                .to_string(),
+            "2.50000000"
+        );
         for slug in ["gpt-6-luna", "gpt-rosalind-research"] {
             assert!(
                 pricing

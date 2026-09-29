@@ -347,7 +347,7 @@ pub struct ProfileUsage {
     /// The longest single response, in milliseconds.
     pub longest_latency_ms: i64,
     pub responses: i64,
-    /// Responses served on the priority ("fast") tier.
+    /// Responses served on a fast tier (`priority` or `ultrafast`).
     pub priority_responses: i64,
 }
 
@@ -375,7 +375,7 @@ pub async fn profile_usage(pool: &PgPool, owner: &str) -> Result<ProfileUsage, s
         SELECT
           COALESCE(MAX(latency_ms), 0)::int8,
           COUNT(*)::int8,
-          COUNT(*) FILTER (WHERE lower(service_tier) = 'priority')::int8
+          COUNT(*) FILTER (WHERE lower(service_tier) IN ('priority', 'ultrafast'))::int8
         FROM model_response_logs
         WHERE owner_user_id = $1
         "#,
