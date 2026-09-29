@@ -11,6 +11,7 @@ fn default_prices() -> Vec<Value> {
     vec![
         json!({ "slug": "gpt-6-astra", "input_price_per_million": "10", "cached_input_price_per_million": "1", "output_price_per_million": "50" }),
         json!({ "slug": "gpt-6-sol", "input_price_per_million": "2", "cached_input_price_per_million": "0.2", "output_price_per_million": "10" }),
+        json!({ "slug": "gpt-6.1-sol", "input_price_per_million": "2", "cached_input_price_per_million": "0.2", "output_price_per_million": "10" }),
         json!({ "slug": "gpt-6-luna", "input_price_per_million": "0.1", "cached_input_price_per_million": "0.01", "output_price_per_million": "0.5" }),
         json!({ "slug": "gpt-5.6-sol", "input_price_per_million": "4", "cached_input_price_per_million": "0.4", "output_price_per_million": "20" }),
         json!({ "slug": "daybreak_blue", "input_price_per_million": "4", "cached_input_price_per_million": "0.4", "output_price_per_million": "20" }),
@@ -246,6 +247,7 @@ pub fn apply_service_tier(
         .unwrap_or_default();
     let (numerator, denominator) = if model == "gpt-6"
         || model.starts_with("gpt-6-")
+        || model.starts_with("gpt-6.")
         || model == "gpt-5.5"
         || model == "gpt-5.6"
         || model.starts_with("gpt-5.6-")
@@ -288,14 +290,22 @@ mod tests {
     #[test]
     fn newer_models_are_priced() {
         let pricing = Pricing::from_env().unwrap();
-        // 1000 uncached input at 2, 1000 cached at 0.2, 500 output at 10 (per 1M).
-        let sol = pricing
-            .estimate(
-                Some("gpt-6-sol"),
+        // 1000 uncached input at 2, 1000 cached at 0.2, 500 output at 10 (per 1M);
+        // GPT-6.1 Sol is priced as GPT-6 Sol, Fast included.
+        for slug in ["gpt-6-sol", "gpt-6.1-sol"] {
+            let sol = pricing.estimate(
+                Some(slug),
                 &info(json!({ "input_tokens": 2000, "cached_input_tokens": 1000, "output_tokens": 500 })),
-            )
-            .unwrap();
-        assert_eq!(sol.to_string(), "0.00720000");
+            );
+            assert_eq!(sol.unwrap().to_string(), "0.00720000", "{slug}");
+            assert_eq!(
+                apply_service_tier(sol, Some("priority"), Some(slug))
+                    .unwrap()
+                    .to_string(),
+                "0.01800000",
+                "{slug}"
+            );
+        }
         for slug in ["gpt-6-luna", "gpt-rosalind-research"] {
             assert!(
                 pricing
