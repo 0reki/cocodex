@@ -79,6 +79,7 @@ pub fn config(settings: Settings, origin: &str) -> cocodex_proxy::config::ProxyC
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         upstream_chatgpt_origin: origin.to_string(),
         upstream_auth_origin: origin.to_string(),
+        upstream_api_origin: origin.to_string(),
         public_app_url: "http://localhost:53332".to_string(),
         public_gateway_url: None,
         settings,

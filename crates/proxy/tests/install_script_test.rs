@@ -134,6 +134,13 @@ async fn the_served_script_configures_codex_when_run() {
     let toml = run();
     assert!(toml.contains("openai_base_url = \"https://api.cocodex.app/backend-api/codex\""));
     assert!(toml.contains("chatgpt_base_url = \"https://api.cocodex.app/backend-api\""));
+    // Voice mode's sideband goes to the gateway too, as a bare origin.
+    assert_eq!(
+        toml.matches("experimental_realtime_ws_base_url = \"https://api.cocodex.app\"\n")
+            .count(),
+        1,
+        "{toml}"
+    );
     // Codex telemetry is off, replacing the user's own tables whole.
     for line in [
         "[analytics]\nenabled = false",

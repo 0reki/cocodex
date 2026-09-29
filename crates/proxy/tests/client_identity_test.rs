@@ -27,6 +27,10 @@ struct Captured {
     models_queries: Arc<Mutex<Vec<String>>>,
     /// (User-Agent, path and query) of the webview's ChatGPT requests.
     webview: Arc<Mutex<Vec<(String, String)>>>,
+    /// (method, path) of the account-wide work settings requests.
+    work_settings: Arc<Mutex<Vec<(String, String)>>>,
+    /// Handshake headers of the realtime sideband.
+    sideband: Arc<Mutex<Vec<HeaderMap>>>,
 }
 
 fn record_webview(state: &Captured, headers: &HeaderMap, uri: &axum::http::Uri) {
@@ -197,6 +201,50 @@ async fn mock_upstream() -> (String, Captured) {
                 |State(state): State<Captured>, headers: HeaderMap, uri: axum::http::Uri| async move {
                     record_webview(&state, &headers, &uri);
                     axum::Json(json!({ "account_id": "acct-1", "plan_type": "plus" }))
+                },
+            ),
+        )
+        .route(
+            "/backend-api/wham/work/settings",
+            // Upstream accepts both; the gateway must only ever read.
+            axum::routing::get(
+                |State(state): State<Captured>, method: axum::http::Method| async move {
+                    state
+                        .work_settings
+                        .lock()
+                        .unwrap()
+                        .push((method.to_string(), "/wham/work/settings".into()));
+                    axum::Json(json!({ "revision": 3, "settings": { "mode": "shared" } }))
+                },
+            )
+            .patch(|State(state): State<Captured>| async move {
+                state
+                    .work_settings
+                    .lock()
+                    .unwrap()
+                    .push(("PATCH".into(), "/wham/work/settings".into()));
+                axum::Json(json!({ "revision": 4, "settings": { "mode": "changed" } }))
+            }),
+        )
+        .route(
+            "/v1/live/{call_id}",
+            // The OpenAI API's realtime sideband: greets with the login's id.
+            axum::routing::get(
+                |State(state): State<Captured>,
+                 headers: HeaderMap,
+                 ws: axum::extract::ws::WebSocketUpgrade| async move {
+                    state.sideband.lock().unwrap().push(headers);
+                    ws.on_upgrade(|mut socket| async move {
+                        use axum::extract::ws::Message;
+                        let _ = socket
+                            .send(Message::Text(
+                                r#"{"type":"session.created","user":"user-UPSTREAM"}"#.into(),
+                            ))
+                            .await;
+                        if let Some(Ok(Message::Text(text))) = socket.recv().await {
+                            let _ = socket.send(Message::Text(text)).await;
+                        }
+                    })
                 },
             ),
         )
@@ -582,6 +630,8 @@ async fn payments_are_never_relayed() {
         ("GET", "/backend-api/payments/checkout"),
         ("GET", "/backend-api/subscriptions/auto_top_up/settings"),
         ("POST", "/backend-api/subscriptions/auto_top_up/enable"),
+        // Registering the machine as an executor of the shared login.
+        ("POST", "/backend-api/flora/cca/executor"),
     ] {
         let request = Request::builder()
             .uri(uri)
@@ -695,4 +745,76 @@ async fn a_profile_edit_never_reaches_the_upstream_login() {
     assert_eq!(profile["profile"]["username"], "user");
     assert_ne!(profile["profile"]["display_name"], "renamed");
     assert_eq!(captured.webview.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn account_wide_work_settings_are_only_read() {
+    let (app, captured, bearer) = setup().await;
+    let request = Request::builder()
+        .method("PATCH")
+        .uri("/backend-api/wham/work/settings")
+        .header("authorization", &bearer)
+        .header("user-agent", WEBVIEW_UA)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"expected_revision":3,"settings":{"mode":"changed"}}"#,
+        ))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let settings: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        settings,
+        json!({ "revision": 3, "settings": { "mode": "shared" } })
+    );
+    assert_eq!(
+        captured.work_settings.lock().unwrap().as_slice(),
+        [("GET".to_string(), "/wham/work/settings".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn the_voice_sideband_is_relayed_as_the_upstream_login() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let (app, captured, bearer) = setup().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut request = format!("ws://{addr}/v1/live/rtc_u23_abc")
+        .into_client_request()
+        .unwrap();
+    let headers = request.headers_mut();
+    headers.insert("authorization", bearer.parse().unwrap());
+    headers.insert("chatgpt-account-id", "client-account".parse().unwrap());
+    headers.insert(
+        "user-agent",
+        "Codex Desktop/0.158.0 (Windows 10.0.26200; x86_64)"
+            .parse()
+            .unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+
+    // Upstream's greeting names the client, not the login.
+    let greeting = socket.next().await.unwrap().unwrap();
+    let greeting: Value = serde_json::from_str(greeting.to_text().unwrap()).unwrap();
+    assert_ne!(greeting["user"], "user-UPSTREAM");
+    socket
+        .send(Message::Text(r#"{"type":"session.update"}"#.into()))
+        .await
+        .unwrap();
+    let echo = socket.next().await.unwrap().unwrap();
+    assert_eq!(echo.to_text().unwrap(), r#"{"type":"session.update"}"#);
+
+    // It reached the API origin with the login's credentials.
+    let sideband = captured.sideband.lock().unwrap();
+    assert_eq!(sideband.len(), 1);
+    assert_eq!(sideband[0]["authorization"], "Bearer win-token");
+    assert_eq!(sideband[0]["chatgpt-account-id"], "acct-1");
 }

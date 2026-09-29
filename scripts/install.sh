@@ -10,8 +10,9 @@
 #
 #   ./scripts/install.sh http://127.0.0.1:53141
 #
-# It writes ~/.codex/config.toml (openai_base_url / chatgpt_base_url, with
-# Codex telemetry turned off) and an
+# It writes ~/.codex/config.toml (openai_base_url / chatgpt_base_url, the
+# voice sideband's experimental_realtime_ws_base_url, with Codex telemetry
+# turned off) and an
 # env file for the login issuer and refresh/revoke overrides, then hooks that
 # env file into the rc file of your login shell. Codex does not read those
 # OAuth URLs from config.toml, so environment variables are the only way in.
@@ -112,6 +113,9 @@ esac
 GATEWAY=$(printf '%s' "$GATEWAY" | sed 's|/*$||')
 OPENAI_BASE_URL="${GATEWAY}/backend-api/codex"
 CHATGPT_BASE_URL="${GATEWAY}/backend-api"
+# Voice mode's sideband WebSocket (`/v1/live/<call>`) goes to this origin, not
+# chatgpt_base_url; it must be a bare origin, with no path.
+REALTIME_WS_BASE_URL="$GATEWAY"
 REFRESH_URL="${GATEWAY}/oauth/token"
 REVOKE_URL="${GATEWAY}/oauth/revoke"
 # Codex appends /oauth/authorize, /oauth/token and the device-code paths.
@@ -168,6 +172,7 @@ upsert_toml() {
     # end, so repeated runs do not grow the file.
     grep -v -E '^[[:space:]]*openai_base_url[[:space:]]*=' "$TOML" \
       | grep -v -E '^[[:space:]]*chatgpt_base_url[[:space:]]*=' \
+      | grep -v -E '^[[:space:]]*experimental_realtime_ws_base_url[[:space:]]*=' \
       | awk '
           /^[[:space:]]*\[/ {
             header = $0
@@ -182,6 +187,7 @@ upsert_toml() {
   {
     printf 'openai_base_url = "%s"\n' "$OPENAI_BASE_URL"
     printf 'chatgpt_base_url = "%s"\n' "$CHATGPT_BASE_URL"
+    printf 'experimental_realtime_ws_base_url = "%s"\n' "$REALTIME_WS_BASE_URL"
     printf '\n'
     if [ -s "$kept" ]; then
       cat "$kept"
@@ -385,6 +391,7 @@ RC_FILES=$(rc_targets | cut -d' ' -f2-)
 echo "Wrote $TOML"
 echo "  openai_base_url  = $OPENAI_BASE_URL"
 echo "  chatgpt_base_url = $CHATGPT_BASE_URL"
+echo "  experimental_realtime_ws_base_url = $REALTIME_WS_BASE_URL"
 echo "Wrote $ENV_FILE"
 printf '%s\n' "$RC_FILES" | while read -r rc; do
   [ -n "$rc" ] || continue

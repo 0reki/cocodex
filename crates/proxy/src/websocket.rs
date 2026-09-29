@@ -266,10 +266,12 @@ async fn relay(
         while let Some(message) = to_client_rx.recv().await {
             if let Err(e) = client_tx.send(message).await {
                 debug!("Client WS send error: {e}");
-                break;
+                return;
             }
         }
+        let _ = client_tx.close().await;
     };
+    tokio::pin!(writer);
 
     let ctx_client = ctx.clone();
     let interceptor_client = Arc::clone(&interceptor);
@@ -331,10 +333,16 @@ async fn relay(
         }
     };
 
-    tokio::select! {
-        _ = client_to_upstream => {},
-        _ = upstream_to_client => {},
-        _ = writer => {},
+    let writer_done = tokio::select! {
+        _ = client_to_upstream => false,
+        _ = upstream_to_client => false,
+        _ = &mut writer => true,
+    };
+    // Both senders went with the relay loops, so the writer delivers what
+    // is still queued (upstream's last frames before it closed, such as its
+    // error ending a long-lived connection) and then closes the client.
+    if !writer_done {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), writer).await;
     }
     interceptor.on_request_finish(&ctx, Some(101), None).await;
 }

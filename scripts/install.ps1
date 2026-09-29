@@ -9,7 +9,8 @@
 #
 #   ./scripts/install.ps1 http://127.0.0.1:53141
 #
-# Writes ~/.codex/config.toml (with Codex telemetry turned off) and persists
+# Writes ~/.codex/config.toml (the base URLs, the voice sideband's
+# experimental_realtime_ws_base_url, with Codex telemetry turned off) and persists
 # the login issuer and refresh/revoke overrides as user environment
 # variables. Codex does not read those OAuth URLs from config.toml.
 # User-level variables (rather than the PowerShell
@@ -57,6 +58,9 @@ if ($GatewayUrl -notmatch '^https?://') {
 $GatewayUrl = $GatewayUrl.TrimEnd("/")
 $OpenAiBaseUrl = "$GatewayUrl/backend-api/codex"
 $ChatGptBaseUrl = "$GatewayUrl/backend-api"
+# Voice mode's sideband WebSocket (/v1/live/<call>) goes to this origin, not
+# chatgpt_base_url; it must be a bare origin, with no path.
+$RealtimeWsBaseUrl = $GatewayUrl
 $RefreshUrl = "$GatewayUrl/oauth/token"
 $RevokeUrl = "$GatewayUrl/oauth/revoke"
 # Codex appends /oauth/authorize, /oauth/token and the device-code paths.
@@ -96,7 +100,7 @@ if (Test-Path $Toml) {
             $header = ($line -replace '#.*$', '') -replace '\s', ''
             $skip = $header -match '^\[+(analytics|feedback|otel)[\].]'
         }
-        if ($skip -or $line -match '^\s*(openai_base_url|chatgpt_base_url)\s*=') {
+        if ($skip -or $line -match '^\s*(openai_base_url|chatgpt_base_url|experimental_realtime_ws_base_url)\s*=') {
             continue
         }
         $kept.Add($line)
@@ -109,6 +113,7 @@ while ($kept.Count -and -not $kept[$kept.Count - 1].Trim()) { $kept.RemoveAt($ke
 $lines = @(
     "openai_base_url = `"$OpenAiBaseUrl`""
     "chatgpt_base_url = `"$ChatGptBaseUrl`""
+    "experimental_realtime_ws_base_url = `"$RealtimeWsBaseUrl`""
     ""
 )
 if ($kept.Count) {
@@ -143,6 +148,7 @@ if (Test-Path -LiteralPath $PROFILE) {
 Write-Host "Wrote $Toml"
 Write-Host "  openai_base_url  = $OpenAiBaseUrl"
 Write-Host "  chatgpt_base_url = $ChatGptBaseUrl"
+Write-Host "  experimental_realtime_ws_base_url = $RealtimeWsBaseUrl"
 foreach ($name in $GatewayEnv.Keys) {
     Write-Host "Set user env $name = $($GatewayEnv[$name])"
 }

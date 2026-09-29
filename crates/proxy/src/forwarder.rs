@@ -22,11 +22,39 @@ pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub struct BackendForwarder {
     client: Client,
     upstream_origin: String,
+    /// Where the realtime sideband goes (see `is_openai_api_path`).
+    api_origin: String,
     interceptor: SharedInterceptor,
     cookies: Arc<CookieJars>,
 }
 
+/// The realtime (voice) sideband, which Codex opens on the OpenAI API
+/// (`/v1/live/{call_id}`, or `/v1/realtime` over a plain WebSocket) with
+/// the same ChatGPT credentials, once its `experimental_realtime_ws_base_url`
+/// points at the gateway.
+pub fn is_openai_api_path(path: &str) -> bool {
+    ["/v1/live", "/v1/realtime"].iter().any(|prefix| {
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
 impl BackendForwarder {
+    /// Sends the realtime sideband to `origin` instead of the OpenAI API.
+    pub fn with_api_origin(mut self, origin: String) -> Self {
+        self.api_origin = origin;
+        self
+    }
+
+    /// The upstream origin a request goes to.
+    fn origin_for(&self, path: &str) -> &str {
+        if is_openai_api_path(path) {
+            &self.api_origin
+        } else {
+            &self.upstream_origin
+        }
+    }
+
     pub fn new(
         upstream_origin: String,
         interceptor: SharedInterceptor,
@@ -44,6 +72,7 @@ impl BackendForwarder {
         Self {
             client,
             upstream_origin,
+            api_origin: "https://api.openai.com".to_string(),
             interceptor,
             cookies,
         }
@@ -104,10 +133,11 @@ impl BackendForwarder {
                 obs.websocket = true;
             }
             info!(request_id = %ctx.request_id, "Upgrading connection to WebSocket");
+            let origin = self.origin_for(&ctx.target_path).to_string();
             return handle_ws_upgrade(
                 ws_opt.unwrap(),
                 ctx,
-                self.upstream_origin.clone(),
+                origin,
                 Arc::clone(&self.interceptor),
                 Arc::clone(&self.cookies),
             )
@@ -155,7 +185,7 @@ impl BackendForwarder {
             &format!("{}{query}", ctx.target_path),
             &ctx.identity_swap,
         );
-        let upstream_url_str = format!("{}{upstream_url_str}", self.upstream_origin);
+        let upstream_url_str = format!("{}{upstream_url_str}", self.origin_for(&ctx.target_path));
 
         let upstream_url = match Url::parse(&upstream_url_str) {
             Ok(u) => u,

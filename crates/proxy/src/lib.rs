@@ -76,11 +76,10 @@ pub fn build(
     let runtime = Arc::new(Runtime::new(config.settings.clone(), upstream, pricing));
     let interceptor = interceptor
         .unwrap_or_else(|| Arc::new(CustomInterceptor::new(runtime.clone(), egress_locale)));
-    let forwarder = Arc::new(BackendForwarder::new(
-        config.upstream_chatgpt_origin.clone(),
-        interceptor,
-        cookies,
-    ));
+    let forwarder = Arc::new(
+        BackendForwarder::new(config.upstream_chatgpt_origin.clone(), interceptor, cookies)
+            .with_api_origin(config.upstream_api_origin.clone()),
+    );
 
     // Connect eagerly so problems surface at startup; requests retry lazily.
     tokio::spawn({
@@ -110,7 +109,12 @@ pub fn build(
         .route("/wham/{*path}", any(handle_backend_api))
         .route("/wham", any(handle_backend_api))
         .route("/api/codex/{*path}", any(handle_backend_api))
-        .route("/api/codex", any(handle_backend_api));
+        .route("/api/codex", any(handle_backend_api))
+        // The realtime (voice) sideband, relayed to the OpenAI API.
+        .route("/v1/live/{*path}", any(handle_backend_api))
+        .route("/v1/live", any(handle_backend_api))
+        .route("/v1/realtime/{*path}", any(handle_backend_api))
+        .route("/v1/realtime", any(handle_backend_api));
     let router = Router::new()
         .merge(auth::routes::create_auth_router())
         .merge(api::router(state.clone()))

@@ -174,9 +174,10 @@ impl CustomInterceptor {
         client
     }
 
-    /// The upstream login's profile is not the client's to change: an edit
-    /// (e.g. `PATCH /wham/profiles/me` renaming the user) is sent upstream as
-    /// a read, and the client gets back its own, unchanged profile.
+    /// The upstream login's profile and account-wide settings are not the
+    /// client's to change: an edit (e.g. `PATCH /wham/profiles/me` renaming
+    /// the user, `PATCH /wham/work/settings`) is sent upstream as a read, and
+    /// the client gets back the current, unchanged values.
     fn keep_upstream_profile(&self, ctx: &RequestContext, req: Request<Body>) -> Request<Body> {
         use crate::client_identity::ProfileEndpoint;
 
@@ -184,14 +185,18 @@ impl CustomInterceptor {
             ProfileEndpoint::of(&ctx.target_path),
             Some(ProfileEndpoint::Me | ProfileEndpoint::Profile | ProfileEndpoint::CodexProfile)
         );
-        if !is_person || matches!(*req.method(), http::Method::GET | http::Method::HEAD) {
+        let is_shared_setting =
+            ctx.target_path.trim_end_matches('/') == "/backend-api/wham/work/settings";
+        if !(is_person || is_shared_setting)
+            || matches!(*req.method(), http::Method::GET | http::Method::HEAD)
+        {
             return req;
         }
         info!(
             request_id = %ctx.request_id,
             method = %req.method(),
             path = %ctx.target_path,
-            "profile edit not relayed; reading the profile instead"
+            "edit to the shared login not relayed; reading it instead"
         );
         let (mut parts, _) = req.into_parts();
         parts.method = http::Method::GET;
@@ -570,7 +575,14 @@ impl CustomInterceptor {
         };
         ctx.metadata.insert(META_ACCOUNT.into(), account_id.clone());
 
-        if classify_backend_kind(&ctx.target_path).billable()
+        // A voice call draws on the same upstream quota as a Codex turn, so
+        // it is refused once the user's share is used up.
+        let draws_quota = classify_backend_kind(&ctx.target_path).billable()
+            || ctx
+                .target_path
+                .trim_end_matches('/')
+                .ends_with("/codex/realtime/calls");
+        if draws_quota
             && let Some(rejection) = Self::quota_rejection(&ready, &account_id, &user).await
         {
             return Err(rejection);
@@ -819,11 +831,14 @@ fn upstream_token_identity(row: &crate::db::accounts::Account) -> UpstreamIdenti
 }
 
 /// ChatGPT endpoints the gateway never relays: the upstream login's
-/// payments and automatic top-up.
+/// payments and automatic top-up, and registering the client's machine as
+/// an executor of the login (`/flora/cca/executor`), which would let anyone
+/// else using that login send work to it.
 fn is_blocked_path(path: &str) -> bool {
-    const BLOCKED: [&str; 2] = [
+    const BLOCKED: [&str; 3] = [
         "/backend-api/payments",
         "/backend-api/subscriptions/auto_top_up",
+        "/backend-api/flora/cca/executor",
     ];
     let path = path.trim_end_matches('/');
     BLOCKED.iter().any(|prefix| {
@@ -881,7 +896,7 @@ impl Interceptor for CustomInterceptor {
         }
 
         // The upstream login's payments are not the client's to see or
-        // change.
+        // change, nor is it to host executors (see `is_blocked_path`).
         if is_blocked_path(&ctx.target_path) {
             if let Ok(mut obs) = ctx.observation.lock() {
                 obs.record_error("forbidden", "Blocked by the gateway");

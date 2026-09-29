@@ -29,6 +29,15 @@ pub struct ProxyArgs {
     )]
     pub upstream_auth_origin: String,
 
+    /// OpenAI API origin for the realtime (voice) sideband WebSocket, which
+    /// Codex opens at `/v1/live/{call_id}` rather than on chatgpt.com
+    #[arg(
+        long,
+        env = "OPENAI_API_ORIGIN",
+        default_value = "https://api.openai.com"
+    )]
+    pub upstream_api_origin: String,
+
     /// Public frontend application URL for OAuth redirects
     #[arg(long, env = "PUBLIC_APP_URL", default_value = "http://localhost:53332")]
     pub public_app_url: String,
@@ -64,6 +73,7 @@ pub struct ProxyConfig {
     pub bind_addr: SocketAddr,
     pub upstream_chatgpt_origin: String,
     pub upstream_auth_origin: String,
+    pub upstream_api_origin: String,
     pub public_app_url: String,
     pub public_gateway_url: Option<String>,
     pub settings: Settings,
@@ -125,6 +135,7 @@ impl ProxyConfig {
                 .trim_end_matches('/')
                 .to_string(),
             upstream_auth_origin: args.upstream_auth_origin.trim_end_matches('/').to_string(),
+            upstream_api_origin: args.upstream_api_origin.trim_end_matches('/').to_string(),
             public_app_url: args.public_app_url.trim_end_matches('/').to_string(),
             public_gateway_url,
             settings: Settings {
