@@ -212,6 +212,16 @@ function ModelLabel({ log }: { log: RequestLog }) {
             <Zap className="size-3.5 fill-current" strokeWidth={1.75} />
           </span>
         </Tooltip>
+      ) : log.serviceTier === "ultrafast" ? (
+        <Tooltip content="超快模式">
+          <span
+            aria-label="超快模式"
+            className="inline-flex h-4 items-center justify-center rounded-sm text-amber-500"
+          >
+            <Zap className="size-3.5 fill-current" strokeWidth={1.75} />
+            <Zap className="-ml-1.5 size-3.5 fill-current" strokeWidth={1.75} />
+          </span>
+        </Tooltip>
       ) : null}
       <span className="leading-none">{used}</span>
       {showRequested ? (
