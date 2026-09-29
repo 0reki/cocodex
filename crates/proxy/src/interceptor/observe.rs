@@ -92,6 +92,10 @@ pub struct ResponseObservation {
     pub body_complete: bool,
     /// Whether anything was sent or received for this response.
     pub active: bool,
+    /// On a WebSocket, whether a client `response.create` started it. What
+    /// upstream sends outside a turn (the error that closes a connection
+    /// idle for an hour, say) is not a response.
+    pub client_turn: bool,
 }
 
 impl ResponseObservation {
@@ -112,6 +116,7 @@ impl ResponseObservation {
             terminal: None,
             body_complete: false,
             active: false,
+            client_turn: false,
         }
     }
 
@@ -166,7 +171,7 @@ impl RequestObservation {
     pub fn ingest_client_text(&mut self, text: &str) -> Option<Value> {
         let value: Value = serde_json::from_str(text).ok()?;
         if value.get("type").and_then(Value::as_str) == Some("response.create") {
-            if self.current.active && self.current.terminal.is_none() {
+            if self.current.active && self.current.client_turn && self.current.terminal.is_none() {
                 // A new turn while the previous one never finished.
                 let unfinished =
                     std::mem::replace(&mut self.current, ResponseObservation::new(Instant::now()));
@@ -175,6 +180,7 @@ impl RequestObservation {
                 self.current = ResponseObservation::new(Instant::now());
             }
             self.current.active = true;
+            self.current.client_turn = true;
             let model = value
                 .get("model")
                 .or_else(|| value.get("response").and_then(|r| r.get("model")))
@@ -296,6 +302,7 @@ impl RequestObservation {
 
     fn ingest_event(&mut self, value: &Value) {
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+        let outside_turn = self.websocket && !self.current.client_turn;
         let current = &mut self.current;
         // A ChatGPT turn names the model that answered on its assistant
         // message (`{"v": {"message": {...}}}` deltas).
@@ -370,7 +377,9 @@ impl RequestObservation {
         if let Some(terminal) = terminal {
             current.terminal = Some(terminal);
             let done = std::mem::replace(current, ResponseObservation::new(Instant::now()));
-            self.finished.push(done);
+            if !outside_turn {
+                self.finished.push(done);
+            }
         }
     }
 
@@ -382,7 +391,7 @@ impl RequestObservation {
             all.truncate(1);
             return all;
         }
-        if self.current.active {
+        if self.current.active && (!self.websocket || self.current.client_turn) {
             all.push(std::mem::replace(
                 &mut self.current,
                 ResponseObservation::new(Instant::now()),
@@ -665,6 +674,29 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
         assert_eq!(all[0].requested_model.as_deref(), Some("gpt-5.4"));
         // The completed event's model is the one actually used.
         assert_eq!(all[0].completed_model.as_deref(), Some("gpt-5.4-mini"));
+    }
+
+    #[test]
+    fn a_websocket_event_outside_a_turn_is_not_a_response() {
+        let mut obs = RequestObservation {
+            websocket: true,
+            ..Default::default()
+        };
+        obs.ingest_client_text(r#"{"type":"response.create","model":"gpt-6-astra"}"#);
+        obs.ingest_text(r#"{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}"#);
+        // An hour later upstream closes the idle connection.
+        obs.ingest_text(r#"{"type":"error","status":400,"error":{"code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached (60 minutes)."}}"#);
+        let all = obs.take_all();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].terminal, Some(Terminal::Completed));
+
+        // A connection that never had a turn has nothing to log.
+        let mut idle = RequestObservation {
+            websocket: true,
+            ..Default::default()
+        };
+        idle.ingest_text(r#"{"type":"codex.rate_limits","rate_limits":{}}"#);
+        assert!(idle.take_all().is_empty());
     }
 
     #[test]
