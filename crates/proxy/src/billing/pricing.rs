@@ -11,7 +11,7 @@ fn default_prices() -> Vec<Value> {
     vec![
         json!({ "slug": "gpt-6-astra", "input_price_per_million": "10", "cached_input_price_per_million": "1", "output_price_per_million": "50" }),
         json!({ "slug": "gpt-6-sol", "input_price_per_million": "2", "cached_input_price_per_million": "0.2", "output_price_per_million": "10" }),
-        json!({ "slug": "gpt-6.1-sol", "input_price_per_million": "2", "cached_input_price_per_million": "0.2", "output_price_per_million": "10" }),
+        json!({ "slug": "gpt-6.1-sol", "input_price_per_million": "2", "cached_input_price_per_million": "0.1", "output_price_per_million": "10" }),
         json!({ "slug": "gpt-6-luna", "input_price_per_million": "0.1", "cached_input_price_per_million": "0.01", "output_price_per_million": "0.5" }),
         json!({ "slug": "gpt-5.6-sol", "input_price_per_million": "4", "cached_input_price_per_million": "0.4", "output_price_per_million": "20" }),
         json!({ "slug": "daybreak_blue", "input_price_per_million": "4", "cached_input_price_per_million": "0.4", "output_price_per_million": "20" }),
@@ -232,11 +232,13 @@ impl Pricing {
     }
 }
 
-/// Models that offer the `ultrafast` tier, billed at 6x.
-const ULTRAFAST_MODELS: [&str; 2] = ["gpt-6-astra", "gpt-6.1-sol"];
+/// Models that offer the `ultrafast` tier.
+const ULTRAFAST_MODELS: [&str; 1] = ["gpt-6-astra"];
 
 /// Priority ("fast") processing is billed at a model-specific multiple, and
-/// `ultrafast` at 6x on the models that offer it (elsewhere, as fast).
+/// `ultrafast` at 8x on the models that offer it (elsewhere, as fast). Both
+/// follow the rates against included subscription usage (Fast 2.5x,
+/// Ultrafast 8x), not those for purchased credits (2x, 6x).
 pub fn apply_service_tier(
     cost: Option<Usd>,
     service_tier: Option<&str>,
@@ -252,7 +254,7 @@ pub fn apply_service_tier(
         .unwrap_or_default();
     let (numerator, denominator) =
         if tier.as_deref() == Some("ultrafast") && ULTRAFAST_MODELS.contains(&model.as_str()) {
-            (6, 1)
+            (8, 1)
         } else if model == "gpt-6"
             || model.starts_with("gpt-6-")
             || model.starts_with("gpt-6.")
@@ -298,41 +300,60 @@ mod tests {
     #[test]
     fn newer_models_are_priced() {
         let pricing = Pricing::from_env().unwrap();
-        // 1000 uncached input at 2, 1000 cached at 0.2, 500 output at 10 (per 1M);
-        // GPT-6.1 Sol is priced as GPT-6 Sol, Fast included.
-        for slug in ["gpt-6-sol", "gpt-6.1-sol"] {
-            let sol = pricing.estimate(
-                Some(slug),
-                &info(json!({ "input_tokens": 2000, "cached_input_tokens": 1000, "output_tokens": 500 })),
+        // OpenAI's rate card, in credits per 1M tokens (input, cached input,
+        // output); a credit is $0.04.
+        let card = [
+            ("gpt-6-astra", 250.0, 25.0, 1250.0),
+            ("gpt-6.1-sol", 50.0, 2.5, 250.0),
+            ("gpt-6-sol", 50.0, 5.0, 250.0),
+            ("gpt-6-luna", 2.5, 0.25, 12.5),
+            ("gpt-5.6-sol", 100.0, 10.0, 500.0),
+            ("daybreak_blue", 100.0, 10.0, 500.0),
+            ("daybreak_red", 312.5, 31.25, 1875.0),
+            ("gpt-5.6-terra", 50.0, 5.0, 300.0),
+            ("gpt-5.6-luna", 5.0, 0.5, 30.0),
+            ("gpt-rosalind-research", 125.0, 12.5, 625.0),
+            ("gpt-5.5", 125.0, 12.5, 750.0),
+        ];
+        let usd = |tokens: Value, slug: &str| -> f64 {
+            pricing
+                .estimate(Some(slug), &info(tokens))
+                .unwrap()
+                .to_string()
+                .parse()
+                .unwrap()
+        };
+        for (slug, input, cached, output) in card {
+            let million = 1_000_000;
+            let rates = (
+                usd(json!({ "input_tokens": million }), slug),
+                usd(
+                    json!({ "input_tokens": million, "cached_input_tokens": million }),
+                    slug,
+                ),
+                usd(json!({ "output_tokens": million }), slug),
             );
-            assert_eq!(sol.unwrap().to_string(), "0.00720000", "{slug}");
-            assert_eq!(
-                apply_service_tier(sol, Some("priority"), Some(slug))
-                    .unwrap()
-                    .to_string(),
-                "0.01800000",
-                "{slug}"
+            let expected = (input * 0.04, cached * 0.04, output * 0.04);
+            assert!(
+                (rates.0 - expected.0).abs() < 1e-9
+                    && (rates.1 - expected.1).abs() < 1e-9
+                    && (rates.2 - expected.2).abs() < 1e-9,
+                "{slug}: {rates:?} != {expected:?}"
             );
         }
 
-        // Ultrafast is 6x on Astra and GPT-6.1 Sol; a model without it is
-        // billed as Fast.
+        // Fast is 2.5x on the GPT-6 family; Ultrafast is 8x on Astra, and a
+        // model without it is billed as Fast.
         let cost = Usd::from_json(&json!("1"));
-        for slug in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-sol-2026-09-29"] {
-            assert_eq!(
-                apply_service_tier(cost, Some("ultrafast"), Some(slug))
-                    .unwrap()
-                    .to_string(),
-                "6.00000000",
-                "{slug}"
-            );
-        }
-        assert_eq!(
-            apply_service_tier(cost, Some("ultrafast"), Some("gpt-6-sol"))
+        let tiered = |tier: &str, slug: &str| {
+            apply_service_tier(cost, Some(tier), Some(slug))
                 .unwrap()
-                .to_string(),
-            "2.50000000"
-        );
+                .to_string()
+        };
+        assert_eq!(tiered("priority", "gpt-6.1-sol"), "2.50000000");
+        assert_eq!(tiered("ultrafast", "gpt-6-astra"), "8.00000000");
+        assert_eq!(tiered("ultrafast", "gpt-6-astra-2026-09-29"), "8.00000000");
+        assert_eq!(tiered("ultrafast", "gpt-6.1-sol"), "2.50000000");
         for slug in ["gpt-6-luna", "gpt-rosalind-research"] {
             assert!(
                 pricing
