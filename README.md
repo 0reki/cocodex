@@ -127,6 +127,11 @@ WebSocket 的每一轮 `response.create` 都单独检查、单独结算。上游
 
 ## 计费与结算
 
+网关不额外限制 HTTP 请求体或客户端发来的 WebSocket 消息 / 帧大小，控制台和登录接口
+也不设置请求体大小上限。反向代理需相应设置 `client_max_body_size 0;`。
+从上游接收的 WebSocket 响应沿用 Codex 客户端默认限制：单条消息 64 MiB、单帧 16 MiB；
+上游服务和模型自身的限制仍由上游决定。
+
 费用按内置价格（美元 / 百万 Token，可用 `OPENAI_MODEL_PRICING_JSON` 按 slug 覆盖）
 计算，`service_tier: "priority"` 对 GPT-6 系列、GPT-5.6 系列、GPT-5.5 按 2.5 倍、
 GPT-5.4 按 2 倍计费。只有 Responses 的标准 Token 计费并计入上游额度；Responses 中

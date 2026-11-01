@@ -19,9 +19,12 @@ impl Interceptor for TestInterceptor {
     async fn on_request(
         &self,
         _ctx: &mut RequestContext,
-        _req: Request<Body>,
+        req: Request<Body>,
     ) -> Result<RequestAction, Box<dyn std::error::Error + Send + Sync>> {
         self.intercepted.store(true, Ordering::SeqCst);
+        if req.headers().contains_key("x-test-forward") {
+            return Ok(RequestAction::Forward(req));
+        }
         let resp = Response::builder()
             .status(StatusCode::OK)
             .header("x-custom-intercepted", "true")
@@ -200,4 +203,113 @@ async fn cors_headers_only_on_console_routes() {
             .is_none()
     );
     assert!(gateway.headers().get("vary").is_none());
+}
+
+#[tokio::test]
+async fn forwards_http_body_above_previous_64_mib_limit() {
+    let upstream = axum::Router::new()
+        .fallback(axum::routing::any(|body: axum::body::Bytes| async move {
+            body.len().to_string()
+        }))
+        .layer(axum::extract::DefaultBodyLimit::disable());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let app = create_router(
+        common::config(common::offline_settings(), &origin),
+        Some(Arc::new(TestInterceptor {
+            intercepted: AtomicBool::new(false),
+        })),
+    );
+    let size = 65 * 1024 * 1024;
+    let request = Request::builder()
+        .uri("/backend-api/codex/responses")
+        .method("POST")
+        .header("x-test-forward", "1")
+        .body(Body::from(vec![b'x'; size]))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(response.into_body(), 1024).await.unwrap(),
+        size.to_string()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn console_body_above_previous_10_mib_limit_reaches_json_parser() {
+    let app = create_router(
+        common::config(common::offline_settings(), "http://127.0.0.1:9"),
+        None,
+    );
+    let mut body = vec![b' '; 11 * 1024 * 1024];
+    body.push(b'{');
+    let request = Request::builder()
+        .uri("/api/setup/complete")
+        .method("POST")
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("invalid_json"));
+}
+
+#[tokio::test]
+async fn forwards_client_websocket_frame_above_previous_message_and_frame_limits() {
+    use futures_util::{SinkExt, StreamExt};
+    let upstream = axum::Router::new().fallback(axum::routing::any(
+        |ws: axum::extract::ws::WebSocketUpgrade| async move {
+            ws.max_message_size(usize::MAX)
+                .max_frame_size(usize::MAX)
+                .on_upgrade(|mut socket| async move {
+                    if let Some(Ok(axum::extract::ws::Message::Binary(body))) = socket.recv().await
+                    {
+                        socket
+                            .send(axum::extract::ws::Message::Text(
+                                body.len().to_string().into(),
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                })
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let upstream_server =
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let app = create_router(
+        common::config(common::offline_settings(), &origin),
+        Some(Arc::new(TestInterceptor {
+            intercepted: AtomicBool::new(false),
+        })),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "ws://{}/backend-api/codex/responses",
+        listener.local_addr().unwrap()
+    );
+    let gateway_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("x-test-forward", "1".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    let size = 65 * 1024 * 1024;
+    socket
+        .send(WsMessage::Binary(vec![b'x'; size].into()))
+        .await
+        .unwrap();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(15), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.into_text().unwrap(), size.to_string());
+    gateway_server.abort();
+    upstream_server.abort();
 }

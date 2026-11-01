@@ -14,9 +14,6 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use url::Url;
 
-/// Largest request body accepted for forwarding (image edits carry images).
-pub(crate) const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
-
 /// Forwarder for `/backend-api/*` requests to upstream ChatGPT.
 #[derive(Clone)]
 pub struct BackendForwarder {
@@ -199,8 +196,9 @@ impl BackendForwarder {
         };
 
         // Buffered so the request can be replayed after a token refresh.
+        // Codex does not cap outgoing HTTP bodies; do not add a gateway cap.
         let (parts, body) = req.into_parts();
-        let body = match axum::body::to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
+        let body = match axum::body::to_bytes(body, usize::MAX).await {
             Ok(body) => body,
             Err(e) => {
                 self.interceptor

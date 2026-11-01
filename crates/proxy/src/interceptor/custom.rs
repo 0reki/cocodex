@@ -269,15 +269,13 @@ impl CustomInterceptor {
         }
         let (req, body) = if read_body {
             let (parts, body) = req.into_parts();
-            let body = axum::body::to_bytes(body, crate::forwarder::MAX_REQUEST_BODY_BYTES)
-                .await
-                .map_err(|_| {
-                    Rejection::new(
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        "payload_too_large",
-                        "Request payload too large",
-                    )
-                })?;
+            let body = axum::body::to_bytes(body, usize::MAX).await.map_err(|_| {
+                Rejection::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload_too_large",
+                    "Request payload too large",
+                )
+            })?;
             (
                 Request::from_parts(parts, Body::from(body.clone())),
                 Some(body),

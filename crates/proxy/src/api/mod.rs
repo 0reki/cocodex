@@ -274,8 +274,5 @@ pub fn router(state: AppState) -> Router<AppState> {
         .merge(accounts::routes())
         .merge(profiles::routes())
         .route_layer(middleware::from_fn_with_state(state, require_admin));
-    public
-        .merge(signed_in)
-        .merge(admin)
-        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
+    public.merge(signed_in).merge(admin)
 }

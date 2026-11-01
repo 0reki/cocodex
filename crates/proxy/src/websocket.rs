@@ -188,7 +188,13 @@ pub async fn handle_ws_upgrade(
         }
     };
     info!(request_id = %ctx.request_id, "WebSocket proxy established with upstream");
-    let mut response = ws.on_upgrade(move |client| relay(client, upstream, ctx, interceptor));
+    // Codex's tungstenite limits apply to receiving upstream responses, not
+    // sending requests. Accept its outgoing messages without an extra proxy cap;
+    // upstream_ws_config keeps the same response receive limits as Codex.
+    let mut response = ws
+        .max_message_size(usize::MAX)
+        .max_frame_size(usize::MAX)
+        .on_upgrade(move |client| relay(client, upstream, ctx, interceptor));
     // Codex reads the model, reasoning and rate-limit markers off the
     // handshake response, so carry the upstream ones onto the client's 101.
     let response_headers = response.headers_mut();

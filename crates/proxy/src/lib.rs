@@ -126,6 +126,9 @@ pub fn build(
         )
         .merge(gateway)
         .fallback(handle_not_found)
+        // Disable the framework's default body cap on console and auth routes
+        // as well as the gateway's explicitly buffered requests.
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
     (router, runtime)
