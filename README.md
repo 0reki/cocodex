@@ -137,6 +137,7 @@ GPT-5.4 按 2 倍计费。只有 Responses 的标准 Token 计费并计入上游
 | --- | ---: | ---: | ---: |
 | GPT-6 Astra | $10 | $1 | $50 |
 | GPT-6 Sol | $2 | $0.2 | $10 |
+| GPT-6.1 Terra | $1 | $0.05 | $5 |
 | GPT-6 Luna | $0.1 | $0.01 | $0.5 |
 | GPT-5.6 Sol | $4 | $0.4 | $20 |
 | Daybreak Blue | $4 | $0.4 | $20 |
@@ -149,6 +150,10 @@ GPT-5.4 按 2 倍计费。只有 Responses 的标准 Token 计费并计入上游
 | GPT-5.4 mini | $0.75 | $0.075 | $4.52 |
 | GPT-Image-2 image tokens | $8 | $2 | $30 |
 | GPT-Image-2 text tokens | $5 | $1.25 | $10 |
+
+GPT-6.1 Terra 的 Standard 价格按[官方订阅积分价目表](https://learn.chatgpt.com/docs/pricing#token-rates)
+每百万 Token 的输入 25、缓存输入 1.25、输出 125 credits，以项目现有的
+$0.04 / credit 折算；订阅额度 Fast 模式按 2.5 倍计费，缓存写入不单独收费。
 
 每个响应先写入并 fsync 本地 WAL（默认与配置文件同目录，`RESPONSE_SETTLEMENT_WAL_PATH`
 可覆盖），再按批（默认 200 条或 1 秒）用一条 SQL 原子写入日志、用户花费和按用户的

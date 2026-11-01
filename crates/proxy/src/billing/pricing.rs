@@ -1,5 +1,7 @@
 //! Model prices (USD per million tokens) and request cost estimation.
 //! Defaults can be overridden per model with `OPENAI_MODEL_PRICING_JSON`.
+//! Subscription credit rates: https://learn.chatgpt.com/docs/pricing#token-rates
+//! Converted at $0.04 per credit; no separate cache-write charge.
 
 use std::collections::HashMap;
 
@@ -12,6 +14,7 @@ fn default_prices() -> Vec<Value> {
         json!({ "slug": "gpt-6-astra", "input_price_per_million": "10", "cached_input_price_per_million": "1", "output_price_per_million": "50" }),
         json!({ "slug": "gpt-6-sol", "input_price_per_million": "2", "cached_input_price_per_million": "0.2", "output_price_per_million": "10" }),
         json!({ "slug": "gpt-6.1-sol", "input_price_per_million": "2", "cached_input_price_per_million": "0.1", "output_price_per_million": "10" }),
+        json!({ "slug": "gpt-6.1-terra", "input_price_per_million": "1", "cached_input_price_per_million": "0.05", "output_price_per_million": "5" }),
         json!({ "slug": "gpt-6-luna", "input_price_per_million": "0.1", "cached_input_price_per_million": "0.01", "output_price_per_million": "0.5" }),
         json!({ "slug": "gpt-5.6-sol", "input_price_per_million": "4", "cached_input_price_per_million": "0.4", "output_price_per_million": "20" }),
         json!({ "slug": "daybreak_blue", "input_price_per_million": "4", "cached_input_price_per_million": "0.4", "output_price_per_million": "20" }),
@@ -305,6 +308,7 @@ mod tests {
         let card = [
             ("gpt-6-astra", 250.0, 25.0, 1250.0),
             ("gpt-6.1-sol", 50.0, 2.5, 250.0),
+            ("gpt-6.1-terra", 25.0, 1.25, 125.0),
             ("gpt-6-sol", 50.0, 5.0, 250.0),
             ("gpt-6-luna", 2.5, 0.25, 12.5),
             ("gpt-5.6-sol", 100.0, 10.0, 500.0),
@@ -351,6 +355,7 @@ mod tests {
                 .to_string()
         };
         assert_eq!(tiered("priority", "gpt-6.1-sol"), "2.50000000");
+        assert_eq!(tiered("priority", "gpt-6.1-terra"), "2.50000000");
         assert_eq!(tiered("ultrafast", "gpt-6-astra"), "8.00000000");
         assert_eq!(tiered("ultrafast", "gpt-6-astra-2026-09-29"), "8.00000000");
         assert_eq!(tiered("ultrafast", "gpt-6.1-sol"), "2.50000000");
@@ -360,6 +365,28 @@ mod tests {
                     .estimate(Some(slug), &info(json!({ "input_tokens": 1_000_000 })))
                     .is_some(),
                 "{slug} has no price"
+            );
+        }
+    }
+
+    #[test]
+    fn terra_subscription_cost_includes_cache_and_service_tier() {
+        let pricing = Pricing::from_env().unwrap();
+        // 1000 uncached input, 1000 cached input, 500 cache-write tokens
+        // (no separate charge), and 500 output tokens.
+        let usage = info(json!({
+            "input_tokens": 2500,
+            "input_tokens_details": { "cached_tokens": 1000, "cache_write_tokens": 500 },
+            "output_tokens": 500
+        }));
+        for model in ["gpt-6.1-terra", "gpt-6.1-terra-2026-10-26"] {
+            let cost = pricing.estimate(Some(model), &usage).unwrap();
+            assert_eq!(cost.to_string(), "0.00355000");
+            assert_eq!(
+                apply_service_tier(Some(cost), Some("priority"), Some(model))
+                    .unwrap()
+                    .to_string(),
+                "0.00887500"
             );
         }
     }
