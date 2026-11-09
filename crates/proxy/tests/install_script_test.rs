@@ -75,6 +75,8 @@ async fn install_ps1_carries_the_gateway_url() {
         "\"[otel]\"",
         "'exporter = \"none\"'",
         "\"log_user_prompt = false\"",
+        "'apps = false'",
+        "'daemon_auto_start = false'",
     ] {
         assert!(body.contains(line), "install.ps1 lacks {line}");
     }
@@ -112,7 +114,8 @@ async fn the_served_script_configures_codex_when_run() {
         home.join(".codex/config.toml"),
         "model = \"gpt-5.5\"\n\n[otel]\nexporter = \"otlp-http\"\n\n\
          [otel.exporter.otlp-http]\nendpoint = \"http://collector\"\n\n\
-         [mcp_servers.docs]\ncommand = \"docs\"\n",
+         [features] # user settings\napps = true\ndaemon_auto_start = true\n\
+         shell_snapshot = true\n\n[mcp_servers.docs]\ncommand = \"docs\"\n",
     )
     .unwrap();
 
@@ -121,6 +124,8 @@ async fn the_served_script_configures_codex_when_run() {
             .arg(&script)
             .arg("--no-login")
             .env("HOME", &home)
+            .env("CODEX_HOME", home.join(".codex"))
+            .env_remove("ZDOTDIR")
             .env("SHELL", "/bin/zsh")
             .output()
             .expect("sh is available on every supported platform");
@@ -151,6 +156,13 @@ async fn the_served_script_configures_codex_when_run() {
     }
     assert_eq!(toml.matches("[otel").count(), 1, "{toml}");
     assert!(!toml.contains("collector"), "{toml}");
+    assert_eq!(toml.matches("[features]").count(), 1, "{toml}");
+    assert!(
+        toml.contains("apps = false\ndaemon_auto_start = false"),
+        "{toml}"
+    );
+    assert!(!toml.contains("apps = true") && !toml.contains("daemon_auto_start = true"));
+    assert!(toml.contains("shell_snapshot = true"), "{toml}");
     // Everything else is the user's and stays.
     assert!(toml.contains("model = \"gpt-5.5\"") && toml.contains("[mcp_servers.docs]"));
     // Running it again changes nothing.

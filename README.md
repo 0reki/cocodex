@@ -52,6 +52,10 @@ Codex 自带的遥测（`[analytics]`、`[feedback]` 的 `enabled = false`，`[o
 三个 Codex 只从环境变量读的登录地址：`CODEX_APP_SERVER_LOGIN_ISSUER`（= 网关地址）、
 `CODEX_REFRESH_TOKEN_URL_OVERRIDE`、`CODEX_REVOKE_TOKEN_URL_OVERRIDE`。
 
+安装脚本还会设置 `[features]` 下的 `apps = false` 和 `daemon_auto_start = false`，
+保留其它功能开关。内置 Apps / Connectors 不能用网关 Token 登录；CLI 默认使用内嵌
+app-server，避免新版默认自动安装、启动共享后台 daemon。用户自己配置的 MCP 服务仍可使用。
+
 - macOS / Linux：写进 `~/.codex/cocodex-gateway.env`，挂进登录 shell 的 rc 文件（zsh 用
   `$ZDOTDIR/.zshrc`，bash 用 `.bashrc`，macOS 上另外挂一份到 `.bash_profile` 这类登录
   文件，fish 用 `config.fish`，其余回落 `.profile`）。桌面应用不读 rc，所以 macOS 另外
@@ -100,7 +104,8 @@ Codex 的两种 base URL 写法都可以：`/backend-api/*`、`/api/codex/*`，
    完全不带 User-Agent 的请求（如 `/accounts/verified_access`）与设备无关，使用该账号任一平台的登录。
    不带 `Authorization` 的 `/ps/mcp` 及其子路径（Codex 只把 ChatGPT token 发给 chatgpt.com，
    对网关会把 `codex_apps` 当成 OAuth MCP：先探测 `.well-known` 元数据再无凭证建会话）由网关
-   直接返回与 chatgpt.com 相同的 451 `no_biscuit_no_service`，不转发上游——上游账号的 Connectors 不对用户开放
+   直接返回与 chatgpt.com 相同的 451 `no_biscuit_no_service`，不转发上游——上游账号的 Connectors 不对用户开放。
+   这会让对应 MCP 连接失败；安装脚本通过关闭内置 Apps 消除这类请求
 2. 校验 Codex token 与 Session、用户状态
 3. 找到管理员分配给用户的 ChatGPT 账号（按 `account_id`），未分配返回 403
 4. 选该账号在此平台的登录（没有时用 `all` 登录），并换上该平台的真实 Codex User-Agent
@@ -190,7 +195,54 @@ $0.04 / credit 折算；订阅额度 Fast 模式按 2.5 倍计费，缓存写入
 
 `CODEX_CLIENT_VERSION=auto`（默认）在后台查询 GitHub 最新稳定版（最多每 6 小时一次，
 ETag 条件请求，失败至少 1 小时后重试，从不阻塞请求），首次查询完成前使用
-`0.153.4`；也可填写具体版本号固定。`CODEX_GITHUB_TOKEN` 可选，只发给 GitHub。
+`0.167.0`；也可填写具体版本号固定。`CODEX_GITHUB_TOKEN` 可选，只发给 GitHub。
+
+2026-11-09 核对上游源码：`main` 为 `ffdf2daddb`，最新稳定版 tag 为 `rust-v0.167.0`。
+本地 `codex/` 从原有的 `b1e72963c3`（2026-09-29）更新到该 main；该目录不纳入本网关的 Git。
+
+| 新版相关变化 | 网关处理与剩余范围 |
+| --- | --- |
+| `daemon_auto_start` 默认开启，CLI 可连接独立安装的共享 app-server | 安装脚本关闭自动启动；后台服务的安装、更新、启动时环境和 socket 状态由 Codex 管理。关闭自动启动不会停止已运行的 daemon，也不阻止发现现有 daemon |
+| 内置 Apps 默认启用，经 `/ps/mcp` 发现 Connectors / 托管插件工具 | 安装脚本关闭 `apps`；上游账号的 Connectors 与托管插件工具未提供用户隔离，保持不可用 |
+| 远程控制通过 `/wham/remote/control/server/*` 注册、刷新、配对，另有环境客户端接口 | 整个 `/wham/remote/control` 子树及 `/api/codex` 别名返回 403，沿用旧 executor 注册接口的拦截策略 |
+| Terra、Responses Lite、增量工具及新的 turn metadata | Terra 已有计价；Lite 仍使用 Responses 路径及请求头 / metadata，现有转发保留这些字段，未增加路径白名单 |
+| 语音与 realtime sideband | 已有 `/v1/live`、`/v1/realtime` 路由及 `experimental_realtime_ws_base_url`，本次未发现需要新增的路径；未实测音视频通话 |
+| OAuth 登录来源持久化与刷新协调 | 现有 issuer / refresh / revoke 覆盖仍存在；新 provider 向导是另一套接入方式，当前安装脚本仍用原有登录流程 |
+| Codex Cloud tasks / environments 等账号级资源 | 现有通用转发可到达，尚无类似 ChatGPT 对话 / 项目的用户归属隔离，不能据此视为已支持共享账号下的云端资源 |
+
+若启动时出现 `Managed app-server stderr ... HTTP 451 no_biscuit_no_service`，随后报
+`app-server-control.sock: No such file or directory`，需要分开判断：451 是 MCP 连接被拒；
+最终失败表示 CLI 未连接到本地 daemon。stderr 摘要可以包含此前多次启动留下的日志，
+不能据此认定 451 导致 daemon 退出。
+0.167.0 若检测到 daemon PID 仍有效，即使控制 socket 不可用，也会走等待就绪分支；
+因此“已有实例运行”与新 CLI 报 socket 缺失并不矛盾。普通 CLI 进程或使用另一个
+`CODEX_HOME` 的 app-server 也不能说明当前路径上的 daemon 可连接。
+
+本地使用官方 0.167.0 包和隔离 `CODEX_HOME` 实测：健康 daemon 的第二次 start 返回
+`alreadyRunning`；模拟 `/ps/mcp` 返回上述 451 后，daemon 仍可接受新连接。仅在手动
+删除测试实例的 socket 后，才重现“stderr 尾部带 451，最终 socket 缺失”的错误，同时
+原有连接仍能调用 `thread/list`。这验证了进程存活、旧连接正常、新连接失败可以同时
+发生。问题机器随后确认整个 `/tmp/codex-daemon-0` 目录丢失，daemon 与终端处于同一
+挂载命名空间，重启 app-server 后恢复；目录丢失的来源尚未确定。关闭 Apps 或绕过
+daemon 不等于修复 socket 丢失的根因。
+
+Unix 上该路径是符号链接，真正的监听 socket 固定放在 `/tmp/codex-daemon-<uid>/<hash>`；
+设置 `TMPDIR` 不会改变其位置。保留符号链接、仅删除测试实例的实际 socket 也能复现
+相同错误。遇到这种情况，检查 `ls -lL` 是否能解析链接目标，并比较 daemon 的
+`/proc/<pid>/root/tmp/codex-daemon-<uid>` 与当前终端的 `/tmp` 视图，区分文件被删除和
+挂载命名空间差异。updater 的 `daemon_not_ready` 表示探测失败，不是自动修复成功。
+
+可先保留原命令及参数，加上 `--no-daemon --disable apps` 启动，例如：
+
+```bash
+codex --no-daemon --disable apps
+codex resume --last --no-daemon --disable apps
+```
+
+升级网关并重新运行安装脚本后会写入上述两个功能开关。若要继续使用共享 daemon，
+先用 `codex app-server daemon version` 核对 CLI 与后台版本，再检查
+`$CODEX_HOME/app-server-daemon/daemon.stderr.log`（默认 `~/.codex`）与 socket 目录状态；
+通过 `codex app-server daemon restart` 重启会影响连接它的会话，应在当前任务结束后进行。
 
 ## Docker
 

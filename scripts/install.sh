@@ -12,7 +12,7 @@
 #
 # It writes ~/.codex/config.toml (openai_base_url / chatgpt_base_url, the
 # voice sideband's experimental_realtime_ws_base_url, with Codex telemetry
-# turned off) and an
+# turned off, built-in Apps and daemon auto-start disabled) and an
 # env file for the login issuer and refresh/revoke overrides, then hooks that
 # env file into the rc file of your login shell. Codex does not read those
 # OAuth URLs from config.toml, so environment variables are the only way in.
@@ -175,11 +175,13 @@ upsert_toml() {
       | grep -v -E '^[[:space:]]*experimental_realtime_ws_base_url[[:space:]]*=' \
       | awk '
           /^[[:space:]]*\[/ {
+            in_table = 1
             header = $0
             sub(/#.*/, "", header)
             gsub(/[[:space:]]/, "", header)
             skip = header ~ /^\[+(analytics|feedback|otel)[].]/
           }
+          !in_table && /^[[:space:]]*features[.](apps|daemon_auto_start)[[:space:]]*=/ { next }
           !skip { print }' \
       | awk 'NF { if (seen) for (; blank > 0; blank--) print ""; blank = 0; seen = 1; print; next }
              { blank++ }' >"$kept" || true
@@ -188,14 +190,49 @@ upsert_toml() {
     printf 'openai_base_url = "%s"\n' "$OPENAI_BASE_URL"
     printf 'chatgpt_base_url = "%s"\n' "$CHATGPT_BASE_URL"
     printf 'experimental_realtime_ws_base_url = "%s"\n' "$REALTIME_WS_BASE_URL"
-    printf '\n'
     if [ -s "$kept" ]; then
-      cat "$kept"
       printf '\n'
+      cat "$kept"
     fi
-    printf '%s\n' "$TELEMETRY_TOML"
   } >"$tmp"
-  cat "$tmp" >"$TOML"
+  # Keep the user's other feature flags. Apps cannot authenticate to this
+  # gateway, and embedded CLI startup avoids the managed daemon's socket
+  # and separately installed binary. Handle existing tables and root dotted
+  # keys without creating duplicate TOML definitions on reruns.
+  awk '
+    FNR == NR {
+      if ($0 ~ /^[[:space:]]*\[/) scanning_table = 1
+      if (!scanning_table && $0 ~ /^[[:space:]]*features[.]/) dotted = 1
+      next
+    }
+    FNR == 1 && dotted {
+      print "features.apps = false"
+      print "features.daemon_auto_start = false"
+    }
+    /^[[:space:]]*\[/ {
+      header = $0
+      sub(/#.*/, "", header)
+      gsub(/[[:space:]]/, "", header)
+      features = header == "[features]"
+      in_table = 1
+      print
+      if (features) {
+        print "apps = false"
+        print "daemon_auto_start = false"
+        found = 1
+      }
+      next
+    }
+    !in_table && /^[[:space:]]*features[.](apps|daemon_auto_start)[[:space:]]*=/ { next }
+    features && /^[[:space:]]*(apps|daemon_auto_start)[[:space:]]*=/ { next }
+    { print }
+    END {
+      if (!found && !dotted) print "\n[features]\napps = false\ndaemon_auto_start = false"
+    }' "$tmp" "$tmp" >"$kept"
+  {
+    cat "$kept"
+    printf '\n%s\n' "$TELEMETRY_TOML"
+  } >"$TOML"
   rm -f "$tmp" "$kept"
 }
 

@@ -10,7 +10,8 @@
 #   ./scripts/install.ps1 http://127.0.0.1:53141
 #
 # Writes ~/.codex/config.toml (the base URLs, the voice sideband's
-# experimental_realtime_ws_base_url, with Codex telemetry turned off) and persists
+# experimental_realtime_ws_base_url, with Codex telemetry turned off,
+# built-in Apps and daemon auto-start disabled) and persists
 # the login issuer and refresh/revoke overrides as user environment
 # variables. Codex does not read those OAuth URLs from config.toml.
 # User-level variables (rather than the PowerShell
@@ -95,10 +96,15 @@ $Telemetry = @(
 $kept = New-Object System.Collections.Generic.List[string]
 if (Test-Path $Toml) {
     $skip = $false
+    $inTable = $false
     foreach ($line in Get-Content -LiteralPath $Toml) {
         if ($line -match '^\s*\[') {
+            $inTable = $true
             $header = ($line -replace '#.*$', '') -replace '\s', ''
             $skip = $header -match '^\[+(analytics|feedback|otel)[\].]'
+        }
+        if (-not $inTable -and $line -match '^\s*features\.(apps|daemon_auto_start)\s*=') {
+            continue
         }
         if ($skip -or $line -match '^\s*(openai_base_url|chatgpt_base_url|experimental_realtime_ws_base_url)\s*=') {
             continue
@@ -114,13 +120,53 @@ $lines = @(
     "openai_base_url = `"$OpenAiBaseUrl`""
     "chatgpt_base_url = `"$ChatGptBaseUrl`""
     "experimental_realtime_ws_base_url = `"$RealtimeWsBaseUrl`""
-    ""
 )
 if ($kept.Count) {
-    $lines += $kept
     $lines += ""
+    $lines += $kept
 }
-$lines + $Telemetry | Set-Content -LiteralPath $Toml -Encoding utf8
+# Preserve other feature flags while replacing only the gateway defaults.
+$configured = New-Object System.Collections.Generic.List[string]
+$dottedFeatures = $false
+foreach ($line in $lines) {
+    if ($line -match '^\s*\[') { break }
+    if ($line -match '^\s*features\.') { $dottedFeatures = $true }
+}
+if ($dottedFeatures) {
+    $configured.Add('features.apps = false')
+    $configured.Add('features.daemon_auto_start = false')
+}
+$inTable = $false
+$inFeatures = $false
+$foundFeatures = $false
+foreach ($line in $lines) {
+    if ($line -match '^\s*\[') {
+        $header = ($line -replace '#.*$', '') -replace '\s', ''
+        $inTable = $true
+        $inFeatures = $header -eq '[features]'
+        $configured.Add($line)
+        if ($inFeatures) {
+            $configured.Add('apps = false')
+            $configured.Add('daemon_auto_start = false')
+            $foundFeatures = $true
+        }
+        continue
+    }
+    if ((-not $inTable -and $line -match '^\s*features\.(apps|daemon_auto_start)\s*=') -or
+        ($inFeatures -and $line -match '^\s*(apps|daemon_auto_start)\s*=')) {
+        continue
+    }
+    $configured.Add($line)
+}
+if (-not $foundFeatures -and -not $dottedFeatures) {
+    $configured.Add('')
+    $configured.Add('[features]')
+    $configured.Add('apps = false')
+    $configured.Add('daemon_auto_start = false')
+}
+$configured.Add('')
+foreach ($line in $Telemetry) { $configured.Add($line) }
+$configured | Set-Content -LiteralPath $Toml -Encoding utf8
 
 $GatewayEnv = [ordered]@{
     CODEX_APP_SERVER_LOGIN_ISSUER    = $LoginIssuer

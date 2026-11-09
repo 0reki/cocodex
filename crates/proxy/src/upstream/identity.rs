@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 
-pub const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.153.4";
+pub const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.167.0";
 const REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const RELEASES_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";

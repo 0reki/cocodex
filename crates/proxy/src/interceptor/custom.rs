@@ -831,12 +831,16 @@ fn upstream_token_identity(row: &crate::db::accounts::Account) -> UpstreamIdenti
 /// ChatGPT endpoints the gateway never relays: the upstream login's
 /// payments and automatic top-up, and registering the client's machine as
 /// an executor of the login (`/flora/cca/executor`), which would let anyone
-/// else using that login send work to it.
+/// else using that login send work to it. The newer remote-control enroll,
+/// pairing and environment APIs have the same shared-account boundary.
 fn is_blocked_path(path: &str) -> bool {
-    const BLOCKED: [&str; 3] = [
+    const BLOCKED: [&str; 5] = [
         "/backend-api/payments",
         "/backend-api/subscriptions/auto_top_up",
         "/backend-api/flora/cca/executor",
+        "/backend-api/wham/remote/control",
+        // The /api/codex alias normalizes to this path.
+        "/backend-api/codex/remote/control",
     ];
     let path = path.trim_end_matches('/');
     BLOCKED.iter().any(|prefix| {

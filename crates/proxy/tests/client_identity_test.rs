@@ -632,6 +632,14 @@ async fn payments_are_never_relayed() {
         ("POST", "/backend-api/subscriptions/auto_top_up/enable"),
         // Registering the machine as an executor of the shared login.
         ("POST", "/backend-api/flora/cca/executor"),
+        // New remote-control APIs also enroll machines in the shared login.
+        ("POST", "/backend-api/wham/remote/control/server/enroll"),
+        ("POST", "/wham/remote/control/server/pair"),
+        ("POST", "/wham/remote/control/server/refresh"),
+        ("GET", "/wham/remote/control/server/pair/status"),
+        ("GET", "/wham/remote/control/server"),
+        ("GET", "/wham/remote/control/environments/env-1/clients"),
+        ("POST", "/api/codex/remote/control/server/enroll"),
     ] {
         let request = Request::builder()
             .uri(uri)
